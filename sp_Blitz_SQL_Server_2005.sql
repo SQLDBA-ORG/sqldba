@@ -2,7 +2,7 @@ ALTER PROCEDURE [dbo].[sp_Blitz]
 /*
 Sample command:
 EXEC [dbo].[sp_Blitz] @CheckUserDatabaseObjects = 1 , @CheckProcedureCache = 1 , @OutputType = 'TABLE' , @OutputProcedureCache = 0 , @CheckProcedureCacheFilter = NULL, @CheckServerInfo = 1, @OutputDatabaseName = 'master', @OutputSchemaName = 'dbo', @OutputTableName = 'sp_Blitz_output', @BringThePain = 1
-SELECT  ID, ServerName, CheckDate, Priority, FindingsGroup, Finding, DatabaseName, URL, Details, CheckID FROM master.dbo.sp_Blitz_output 
+SELECT  ID, ServerName, CONVERT(VARCHAR(20),CheckDate,120) CheckDate, Priority, FindingsGroup, Finding, DatabaseName, URL, Details, CheckID FROM master.dbo.sp_Blitz_output 
 WHERE CheckDate = (SELEct max(Checkdate) FROM master.dbo.sp_Blitz_output)
 
 ---
