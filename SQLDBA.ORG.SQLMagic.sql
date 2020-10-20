@@ -1838,15 +1838,15 @@ end
 --from @vlfcounts  
 --order by dbname
 
-
 SELECT d.name,
- ROUND(SUM(case when type =0 then mf.size else 0 end) * 8 / 1024, 0)   Size_MBs,ROUND(SUM(case when type =1 then mf.size else 0 end) * 8 / 1024, 0) as log_size_mb
+ROUND(SUM(case when type =0 then cast(mf.size as bigint) else 0 end) * 8 / 1024, 0)   Size_MBs,ROUND(SUM(case when type =1 then cast(mf.size as bigint) else 0 end) * 8 / 1024, 0) as log_size_mb
 into #db_size
 FROM sys.master_files mf
 INNER JOIN sys.databases d ON d.database_id = mf.database_id   
 WHERE d.database_id > 4   -- Skip system databases 
 GROUP BY d.name
 ORDER BY Size_MBs desc,d.name
+
 
 insert into @avg_max_log_size(dbname,avgsize,maxsize)
 
