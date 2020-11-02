@@ -1338,6 +1338,7 @@ DECLARE @Databases TABLE
 	FROM 
 	sys.databases db 
 	LEFT OUTER JOIN(
+	
 	SELECT top 100 percent
 	AG.name AS [AvailabilityGroupName],
 	ISNULL(agstates.primary_replica, NULL) AS [PrimaryReplicaServerName],
@@ -1346,6 +1347,10 @@ DECLARE @Databases TABLE
 	ISNULL(dbrs.synchronization_state, 0) AS [SynchronizationState],
 	ISNULL(dbrs.is_suspended, 0) AS [IsSuspended],
 	ISNULL(dbcs.is_database_joined, 0) AS [IsJoined]
+	, AG.automated_backup_preference_desc [BackupPref]
+	, AR.availability_mode_desc
+	,agstates.primary_replica
+	,dbrs.is_primary_replica
 	FROM master.sys.availability_groups AS AG
 	LEFT OUTER JOIN master.sys.dm_hadr_availability_group_states as agstates
 	   ON AG.group_id = agstates.group_id
@@ -1357,8 +1362,15 @@ DECLARE @Databases TABLE
 	   ON arstates.replica_id = dbcs.replica_id
 	LEFT OUTER JOIN master.sys.dm_hadr_database_replica_states AS dbrs
 	   ON dbcs.replica_id = dbrs.replica_id AND dbcs.group_database_id = dbrs.group_database_id
-	WHERE agstates.primary_replica = '''+@ThisServer+''' OR agstates.primary_replica IS NULL
+	WHERE dbcs.is_database_joined = 1 AND agstates.primary_replica = '''+@ThisServer+'''
+	OR 
+	(
+	(dbrs.is_primary_replica = 0 AND AG.automated_backup_preference_desc <>'primary')
+	
+	OR (dbrs.is_primary_replica = 1 AND AG.automated_backup_preference_desc ='primary')
+	)
 	ORDER BY AG.name ASC, dbcs.database_name
+	
 	) t1 on t1.DatabaseName = db.name 
 	WHERE db.database_id > 4 AND db.user_access = 0 AND db.State = 0 
 	AND t1.LocalReplicaRole IS NOT NULL'
@@ -2446,10 +2458,11 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			, qs.sql_handle
 			FROM #dadatafor_exec_query_stats qs WITH (NOLOCK)
 			WHERE  CONVERT(MONEY,qs.total_logical_writes + qs.total_logical_reads)/1000 > 10 /*10MB total activity*/
-			ORDER BY [RankIOTime] ASC
+			/* Change order by ORDER BY [RankIOTime] ASC*/
+			ORDER BY total_elapsed_time/execution_count DESC
+	BEGIN TRY
+
 	INSERT #output_man_script (SectionID, Section,Summary, Details, QueryPlan) SELECT 16, 'PLAN INSIGHT - MISSING INDEX','------','------',NULL
-	;WITH XMLNAMESPACES  
-		   (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan') 
 	INSERT #output_man_script (SectionID, Section,Summary, Details, QueryPlan,HoursToResolveWithTesting)
 	SELECT 16,
 		REPLICATE('|',TFF.[SecondsSavedPerDay]/28800*100) + ' $' + CONVERT(VARCHAR(20),CONVERT(MONEY,TFF.[SecondsSavedPerDay]/28800) * @FTECost) + 'pa ('+CONVERT(VARCHAR(20),CONVERT(MONEY,TFF.[SecondsSavedPerDay]/28800) )+ 'FTE)' [Section]
@@ -2536,7 +2549,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 				   HAVING SUM(qs.total_elapsed_time ) > @MinWorkerTime
 				 ) AS qs 
 			OUTER APPLY sys.dm_exec_query_plan(qs.plan_handle) tp  
-		--	WHERE tp.query_plan.exist('//MissingIndex')=1 
+			WHERE tp.query_plan.exist('//MissingIndex')=1 
 				--AND qs.execution_count > @MinExecutionCount   
 		) AS tab 
 		CROSS APPLY query_plan.nodes('//StmtSimple') AS q(n) 
@@ -2577,12 +2590,18 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		, TF.plan_handle
 		) TFF
 		OUTER APPLY sys.dm_exec_query_plan(TFF.plan_handle) tp  
-		WHERE [statement] <> '[msdb].[dbo].[backupset]'
+		--WHERE [statement] <> '[msdb].[dbo].[backupset]'
 		ORDER BY  [SecondsSavedPerDay] DESC, total_elapsed_time DESC OPTION (RECOMPILE);
+	END TRY
+	BEGIN CATCH
+		RAISERROR	  (N'ERROR Section 16 looking for missing indexes in Query plan',0,1) WITH NOWAIT;
+	END CATCH
 
+
+	BEGIN TRY
 	INSERT #output_man_script (SectionID, Section,Summary, Details, QueryPlan) SELECT 17,'PLAN INSIGHT - EVERYTHING','------','------',NULL
 	INSERT #output_man_script (SectionID, Section,Summary, Details, QueryPlan) 
-
+	
 	SELECT  17,
 	 /*Bismillah, Find most intensive query*/
 	REPLICATE ('|', CASE WHEN [Total_GBsRead]*[Impact%] = 0 THEN 0 ELSE 100.0 * [Total_GBsRead]*[Impact%]  / SUM ([Total_GBsRead]*[Impact%]) OVER() END)   
@@ -2639,7 +2658,10 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	
 		) q 
 		ORDER BY CASE WHEN [Impact%] > 0 THEN 1 ELSE 0 END DESC, [Total_GBsRead]*[Impact%] DESC OPTION (RECOMPILE);
-
+	END TRY
+	BEGIN CATCH
+		RAISERROR	  (N'ERROR Section 17 Find most intensive query',0,1) WITH NOWAIT;
+	END CATCH
 
 	RAISERROR	  (N'Evaluated execution plans for missing indexes',0,1) WITH NOWAIT;
 
