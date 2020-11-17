@@ -1,12 +1,15 @@
-ALTER PROCEDURE [dbo].[sqlsteward] 
+ALTER PROCEDURE [dbo].[sqldba_sqlmagic] 
 /* 
 Sample command:
-	EXEC  [dbo].[sqlsteward] 
+	EXEC  [dbo].[sqldba_sqlmagic] 
 	
-RAISERROR (N'SQL server evaluation script @ 9 July 2020 adrian.sullivan@lexel.co.nz. ?',0,1) WITH NOWAIT;
+RAISERROR (N'SQL server evaluation script @ 3 November 2020 adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
+Thanks:
+Robert Wylie
+Nav Mukkasa
 RAISERROR (NCHAR(65021),0,1) WITH NOWAIT;
 --Clean up
-DROP PROCEDURE [master].[dbo].[sqlsteward]
+DROP PROCEDURE [master].[dbo].[sqldba_sqlmagic]
 
 #$SQLWriter_ImagePath =  "C:\Program Files\Microsoft SQL Server\90\Shared\sqlwriter.exe"
 #"C:\Program Files\Microsoft SQL Server\90\Shared\sqlwriter.exe" -S localhost -E -Q "CREATE LOGIN [am\adm_lexel] FROM WINDOWS; EXECUTE sp_addsrvrolemember @loginame = 'am\adm_lexel', @rolename = 'sysadmin'"
@@ -18,7 +21,7 @@ DROP PROCEDURE [master].[dbo].[sqlsteward]
   @TopQueries int  = 500 
 /*@FTECost. Average price in $$$ that you pay someone at your company every year.*/
 , @FTECost MONEY  = 70000
-/*@MinExecutionCount. This can go to 0 for more details, but first attend to often used queries. Run this with 0 before making any big decisions*/
+/*@MinExecutionCount. This can go to 0 for more details, but first attEND to often used queries. Run this with 0 before making any big decisions*/
 , @MinExecutionCount int  = 1 
 /*@ShowQueryPlan. Set to 1 to include the Query plan in the output*/
 , @ShowQueryPlan int  = 0
@@ -33,7 +36,7 @@ DROP PROCEDURE [master].[dbo].[sqlsteward]
 
 , @ExportSchema NVARCHAR(10)  = 'dbo'
 , @ExportDBName  NVARCHAR(20) = 'master'
-, @ExportTableName NVARCHAR(20) = 'sqlsteward_output'
+, @ExportTableName NVARCHAR(20) = 'sqldba_sqlmagic_output'
 , @ExportCleanupDays INT = 180
 /* @PrintMatrixHeader. Added to turn it off since some control chars coming through stopping a copy/paste from the messages window in SSMS */
 , @PrintMatrixHeader int = 0
@@ -57,6 +60,7 @@ BEGIN
 	SET @License = '----------------
 	MIT License
 	Copyright (c) ' + CONVERT(VARCHAR(4),DATEPART(YEAR,GETDATE())) + ' Adrian Sullivan
+	When things start going poorly for you when you run this script, get in touch with me linkedin.com/in/milliondollardba/,adrian.sullivan@lexel.co.nz, or adrian@sqldba.org
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal
 	in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
@@ -71,7 +75,7 @@ BEGIN
 	'
 
 /* Guidelines:
-	1. Each declare on a new line
+	1. Each DECLARE on a new line
 	2. Each column on a new line
 	3. "," in from of new lines
 	4. All (table columns) have ( and ) in new lines with tab indent
@@ -200,7 +204,7 @@ BEGIN
 	DECLARE @record_count INT;
 	DECLARE @dbid INT;
 	DECLARE @objectid INT;
-	DECLARE @cmd nvarchar(MAX);
+	DECLARE @cmd NVARCHAR(MAX);
 	DECLARE @grand_total_worker_time FLOAT ; 
 	DECLARE @grand_total_IO FLOAT ; 
 	DECLARE @evaldate NVARCHAR(20);
@@ -366,7 +370,7 @@ END CATCH
 			(
 				evaldate NVARCHAR(20)
 				, domain NVARCHAR(505) DEFAULT DEFAULT_DOMAIN()
-				, SQLInstance NVARCHAR(505) DEFAULT @@SERVERNAME
+				, SQLInstance NVARCHAR(505) NULL --DEFAULT @@SERVERNAME
 				, SectionID int NULL
 				, Section NVARCHAR(4000)
 				, Summary NVARCHAR(4000)
@@ -468,16 +472,26 @@ END CATCH
 		EXEC sp_executesql @dynamicSQL;
 	END
 
-	Alter table #dbccloginfo Add fileid smallint 
-	Alter table #dbccloginfo Add file_size BIGINT
-	Alter table #dbccloginfo Add start_offset BIGINT  
-	Alter table #dbccloginfo Add fseqno int
-	Alter table #dbccloginfo Add [status] INT
-	Alter table #dbccloginfo Add parity INT
-	Alter table #dbccloginfo Add create_lsn numeric(25,0)  
+	ALTER TABLE #dbccloginfo 
+		Add fileid smallint 
+	ALTER TABLE #dbccloginfo 
+		Add file_size BIGINT
+	ALTER TABLE #dbccloginfo 
+		Add start_offset BIGINT  
+	ALTER TABLE #dbccloginfo 
+		Add fseqno int
+	ALTER TABLE #dbccloginfo 
+		Add [status] INT
+	ALTER TABLE #dbccloginfo 
+		Add parity INT
+	ALTER TABLE #dbccloginfo 
+		Add create_lsn numeric(25,0)  
 
-DECLARE @errMessage varchar(MAX) = ERROR_MESSAGE()
-	  DECLARE @ThisServer NVARCHAR(500)
+DECLARE @errMessage VARCHAR(MAX) 
+SET @errMessage = ERROR_MESSAGE()
+
+DECLARE @ThisServer NVARCHAR(500)
+
 BEGIN TRY
   IF (select CHARINDEX('\',@@SERVERNAME)) > 0
   /*Named instance will always use NetBIOS name*/
@@ -572,19 +586,28 @@ END CATCH
 		
 	
 	INSERT #output_man_script (SectionID,Section,Summary, Details) SELECT 0,'@' + CONVERT(VARCHAR(20),GETDATE(),120),'------','------'
-	INSERT #output_man_script (SectionID,Section,Summary)
-		SELECT 0,'Domain',DEFAULT_DOMAIN()
+	INSERT #output_man_script (
+	SectionID
+	, Section
+	, Summary
+	)
+		SELECT 0
+		, 'Domain'
+		, DEFAULT_DOMAIN()
 		UNION ALL
-		SELECT 0,'Server', @ThisServer
+		SELECT 0
+		,'Server'
+		, @ThisServer
 		UNION ALL
-		SELECT 0, 'ServerProperties', 
-@SP_MachineName 
-+ ';'+@SP_INSTANCENAME 
-+ ';'+@SP_PRODUCTVERSION 
-+ ';'+@SP_SQL_VERSION 
-+ ';'+@SP_PRODUCTLEVEL 
-+ ';'+@SP_EDITION 
-+ ';'+@SP_ISCLUSTERED 
+		SELECT 0
+		, 'ServerProperties'
+		, @SP_MachineName 
+		+ ';'+@SP_INSTANCENAME 
+		+ ';'+@SP_PRODUCTVERSION 
+		+ ';'+@SP_SQL_VERSION 
+		+ ';'+@SP_PRODUCTLEVEL 
+		+ ';'+@SP_EDITION 
+		+ ';'+@SP_ISCLUSTERED 
 
 		UNION ALL
 		SELECT 0,'User',CURRENT_USER
@@ -592,39 +615,63 @@ END CATCH
 		SELECT 0,'Logged in', SYSTEM_USER
 
 		UNION ALL
-		SELECT 0,'Server Install Date', CONVERT(VARCHAR,create_date,120) as 'SQL Server Installation Date' FROM sys.server_principals  WHERE name='NT AUTHORITY\SYSTEM'
-	INSERT #output_man_script (SectionID,Section,Summary, Severity)
-		SELECT 0, 'Power Plan', @PowerPlan, CASE WHEN @PowerPlan = 'High-Performance' THEN  @Result_Good  ELSE @Result_Warning END
+		SELECT 0
+		,'Server Install Date'
+		, CONVERT(VARCHAR,create_date,120) as 'SQL Server Installation Date' 
+		FROM sys.server_principals  
+		WHERE name='NT AUTHORITY\SYSTEM'
+	INSERT #output_man_script (
+	SectionID
+	, Section
+	, Summary
+	, Severity
+	)
+		SELECT 0
+		, 'Power Plan'
+		, @PowerPlan
+		, CASE 
+		WHEN @PowerPlan = 'High-Performance' THEN @Result_Good 
+		ELSE @Result_Warning 
+		END
 	
 	BEGIN 
-		INSERT #output_man_script (SectionID,Section,Summary, Severity)
+		INSERT #output_man_script (
+		SectionID
+		, Section
+		, Summary
+		, Severity
+		)
 
 		SELECT 0
-		, CASE WHEN @CPUHyperthreadratio <> @CPUcount THEN 'Bad CPU balance' ELSE 'CPU balance' END
+		, CASE 
+		WHEN @CPUHyperthreadratio <> @CPUcount THEN 'Bad CPU balance' 
+		ELSE 'CPU balance' 
+		END
 		, '['+REPLICATE('#', CONVERT(MONEY,(@CPUcount /  @CPUHyperthreadratio))) +'] CPU Sockets ['+REPLICATE(@Sparkle, CONVERT(MONEY,(@CPUcount))) +'] CPUs'
 		, @Result_Warning 
 	END
 	
 /*----------------------------------------
 			--Check for current supported build of SQL server
-			----------------------------------------*/
-	DECLARE @CurrentBuild NVARCHAR(50)
-	SELECT @CurrentBuild = [Character_Value] FROM @msversion 
-	WHERE [Name] = 'ProductVersion' 
+-------------------------------------*/
+DECLARE @CurrentBuild NVARCHAR(50)
+SELECT @CurrentBuild = [Character_Value] 
+FROM @msversion 
+WHERE [Name] = 'ProductVersion' 
 
-	DECLARE @pstext NVARCHAR(4000)
+DECLARE @pstext NVARCHAR(4000)
 
-	/*What does Microsoft say about support*/
-	DECLARE @SQLproductlevel NVARCHAR(50)
-	DECLARE @SQLVersionText NVARCHAR(200)
+/*What does Microsoft say about support*/
+DECLARE @SQLproductlevel NVARCHAR(50)
+DECLARE @SQLVersionText NVARCHAR(200)
 
-	SELECT @SQLproductlevel = CONVERT(VARCHAR(50),SERVERPROPERTY ('productlevel'))
-	IF @SQLproductlevel = 'RTM'
-		SET @SQLproductlevel = '';
-	
+SELECT @SQLproductlevel = CONVERT(VARCHAR(50),SERVERPROPERTY ('productlevel'))
+IF @SQLproductlevel = 'RTM'
+	SET @SQLproductlevel = '';
 
-	DECLARE @TrimVersion NVARCHAR(250)
-	SET @TrimVersion = RTRIM(LTRIM(REPLACE(LEFT(@@VERSION,PATINDEX('% - %',@@VERSION)), 'Microsoft SQL Server ','')))
+
+DECLARE @TrimVersion NVARCHAR(250)
+SET @TrimVersion = RTRIM(LTRIM(REPLACE(LEFT(@@VERSION,PATINDEX('% - %',@@VERSION)), 'Microsoft SQL Server ','')))
 	
 	
 DECLARE @MyBuild NVARCHAR(50)
@@ -638,7 +685,7 @@ DECLARE @BuildTable TABLE(
 , MinBuild NVARCHAR(25)
 , MaxBuild NVARCHAR(25)
 )
- INSERT INTO @BuildTable SELECT '2000', '8', '2007-10-07', '8.0.047', '8.0.997' 
+  INSERT INTO @BuildTable SELECT '2000', '8', '2007-10-07', '8.0.047', '8.0.997' 
  INSERT INTO @BuildTable SELECT '2000', '8', '2013-09-04', '8.0.2039', '8.0.2305' 
  INSERT INTO @BuildTable SELECT '2005', '9', '2016-12-04', '9.0.1399', '9.0.5324.00' 
  INSERT INTO @BuildTable SELECT '2008', '10', '2019-09-07', '10.0.1019.17', '10.0.6556.0' 
@@ -651,7 +698,7 @@ DECLARE @BuildTable TABLE(
  INSERT INTO @BuildTable SELECT '2014', '12', '2016-07-12', '12.0.1524.0', '12.0.2569.0' 
  INSERT INTO @BuildTable SELECT '2014', '12', '2020-01-14', '12.0.4050.0', '12.0.5687.1' 
  INSERT INTO @BuildTable SELECT '2014', '12', '2024-07-09', '12.0.6024.0', '12.0.6372.1' 
- INSERT INTO @BuildTable SELECT '2016', '13', '2018-01-09', '13.0.1000.281', '13.0.900.73' 
+ INSERT INTO @BuildTable SELECT '2016', '13', '2018-01-09', '13.0.1000.281', '13.0.3900.73' 
  INSERT INTO @BuildTable SELECT '2016', '13', '2019-07-09', '13.0.4001.0', '13.0.4604.0' 
  INSERT INTO @BuildTable SELECT '2016', '13', '2026-07-14', '13.0.5026.0', '13.0.5820.21' 
  INSERT INTO @BuildTable SELECT '2017', '14', '2027-10-12', '14.0.1.246', '14.0.900.75' 
@@ -667,7 +714,7 @@ DECLARE @BuildTable TABLE(
 	 FROM @BuildTable
 	 WHERE @MyBuild BETWEEN MinBuild AND MaxBuild 
 	
-	RAISERROR (N'Evaluated build support end date',0,1) WITH NOWAIT;
+	RAISERROR (N'Evaluated build support END date',0,1) WITH NOWAIT;
 
 	RAISERROR (N'Check Server name',0,1) WITH NOWAIT;
 	IF (@ThisServer <> @@servername )
@@ -715,11 +762,21 @@ DECLARE @BuildTable TABLE(
 		,@Result_Warning, 'Check disk latency on the TempDB files'
 	END
 	
-	IF EXISTS(SELECT 1 FROM  sys.dm_os_waiting_tasks
-			Where wait_type Like 'PAGE%LATCH_%'
-			And resource_description Like '2:%')
+	IF EXISTS
+	(
+		SELECT 1 
+		FROM  sys.dm_os_waiting_tasks
+		WHERE wait_type LIKE 'PAGE%LATCH_%'
+		AND resource_description Like '2:%'
+	)
 	BEGIN
-	INSERT #output_man_script (SectionID,Section,Summary, Severity, Details )
+	INSERT #output_man_script 
+	(SectionID
+	, Section
+	, Summary
+	, Severity
+	, Details 
+	)
 	Select 0, 'Testing latches in TempDB', 'Session: ' + CONVERT(VARCHAR(10),ISNULL(session_id,'')) 
 			+ '; Wait Type: ' + CONVERT(VARCHAR(50), ISNULL(wait_type,''))
 			+ '; Wait Duraion: ' + CONVERT(VARCHAR(25), ISNULL(wait_duration_ms,''))
@@ -753,22 +810,51 @@ DECLARE @BuildTable TABLE(
 	INSERT @xp_errorlog
 	EXEC sys.xp_readerrorlog 0, 1, N'Database Instant File Initialization: enabled';
 
-	IF EXISTS ( SELECT * FROM @xp_errorlog WHERE [Text] LIKE '%locked pages%')
+	IF EXISTS
+	( 
+		SELECT * 
+		FROM @xp_errorlog 
+		WHERE [Text] 
+		LIKE '%locked pages%'
+	)
 	BEGIN
-		INSERT #output_man_script (SectionID,Section,Summary,Severity)
-		SELECT 0,'Locked Pages in Memory','Consider changing. This was old best practice, not valid for VMs or post 2008.',@Result_Warning
+		INSERT #output_man_script 
+		(
+			SectionID
+			, Section
+			, Summary
+			, Severity
+		)
+		SELECT 0
+		, 'Locked Pages in Memory'
+		, 'Consider changing. This was old best practice, not valid for VMs or post 2008.'
+		, @Result_Warning
 	END
 
-	IF NOT EXISTS ( SELECT * FROM @xp_errorlog WHERE [Text] LIKE '%File Initialization%')
+	IF NOT EXISTS 
+	( 
+		SELECT * 
+		FROM @xp_errorlog 
+		WHERE [Text] LIKE '%File Initialization%'
+	)
 	BEGIN
-		INSERT #output_man_script (SectionID,Section,Summary,Severity)
-		SELECT 0,'Instant File Initialization is OFF','Consider enabling this. Speeds up database data file growth.',@Result_Warning
+		INSERT #output_man_script 
+		(
+			SectionID
+			, Section
+			, Summary
+			, Severity
+		)
+		SELECT 0
+		, 'Instant File Initialization is OFF'
+		, 'Consider enabling this. Speeds up database data file growth.'
+		, @Result_Warning
 	END
 			/*----------------------------------------
 			--Check for current service account
 			----------------------------------------*/
 		RAISERROR (N'Check for current service account',0,1) WITH NOWAIT;
-		DECLARE @SQLsn NVARCHAR(128);
+DECLARE @SQLsn NVARCHAR(128);
 /*
 			SELECT DSS.servicename,
 			DSS.startup_type_desc,
@@ -787,17 +873,33 @@ DECLARE @BuildTable TABLE(
 		If @SQLVersion >= 11 
 		BEGIN 
 		
-		SET @dynamicSQL = 'SELECT 0,''SQL Service Account'',[services].service_account
+		SET @dynamicSQL = '
+		SELECT 0
+		,''SQL Service Account''
+		,[services].service_account
 		FROM sys.dm_server_services AS [services]
 		WHERE servicename like ''SQL Server (%'';'
-		INSERT #output_man_script (SectionID,Section,Summary)
+		INSERT #output_man_script 
+		(
+			SectionID
+			, Section
+			, Summary
+		)
 		EXEC sp_executesql @dynamicSQL 
 
-		SET @dynamicSQL = 'SELECT 0,''SQL Service Agent Account'',[services].service_account
+		SET @dynamicSQL = '
+		SELECT 0
+		, ''SQL Service Agent Account''
+		, [services].service_account
 		FROM sys.dm_server_services AS [services]
 		WHERE servicename like ''SQL Server Agent (%'';'
 
-		INSERT #output_man_script (SectionID,Section,Summary)
+		INSERT #output_man_script 
+		(
+			SectionID
+			, Section
+			, Summary
+		)
 		EXEC sp_executesql @dynamicSQL 
 		END
 	END TRY
@@ -810,17 +912,43 @@ DECLARE @BuildTable TABLE(
 			--Check for high worker thread usage
 			----------------------------------------*/
 	DECLARE @workerthreadspercentage FLOAT;
-	SELECT @workerthreadspercentage  = (SELECT CONVERT(MONEY,SUM(current_workers_count)) as [Current worker thread] FROM sys.dm_os_schedulers)*100/max_workers_count FROM sys.dm_os_sys_info 
-	INSERT #output_man_script (SectionID, Section,Summary) SELECT 0, 'HIGH Worker Thread Usage','------'
-	INSERT #output_man_script (SectionID, Section,Summary, Severity)
+	SELECT @workerthreadspercentage  = 
+		(
+		SELECT CONVERT(MONEY,SUM(current_workers_count)) as [Current worker thread] 
+		FROM sys.dm_os_schedulers
+		)*100/max_workers_count 
+	FROM sys.dm_os_sys_info 
+	INSERT #output_man_script 
+	(
+		SectionID
+		, Section
+		, Summary
+	) 
+	SELECT 0
+	, 'HIGH Worker Thread Usage'
+	, '------'
+	INSERT #output_man_script 
+	(
+		SectionID
+		, Section
+		, Summary
+		, Severity
+	)
 		SELECT 0, 'Worker threads',
 			CONVERT(VARCHAR(20),(
-			SELECT CONVERT(MONEY,SUM(current_workers_count)) as [Current worker thread] FROM sys.dm_os_schedulers)*100/max_workers_count) 
+			SELECT 
+			CONVERT(MONEY,SUM(current_workers_count)) as [Current worker thread] 
+			FROM sys.dm_os_schedulers)*100/max_workers_count) 
 			+ '% workes used. With average work queue count'
-			+ CONVERT(VARCHAR(15),(SELECT AVG (CONVERT(MONEY,work_queue_count))
-			
-		FROM  sys.dm_os_schedulers WHERE STATUS = 'VISIBLE ONLINE' ))
-		, CASE WHEN @workerthreadspercentage > 65 THEN @Result_Warning ELSE @Result_Good END
+			+ CONVERT(VARCHAR(15),(
+			SELECT AVG (CONVERT(MONEY,work_queue_count))
+			FROM  sys.dm_os_schedulers 
+			WHERE STATUS = 'VISIBLE ONLINE' )
+			)
+		, CASE 
+		WHEN @workerthreadspercentage > 65 THEN @Result_Warning 
+		ELSE @Result_Good 
+		END
 		FROM sys.dm_os_sys_info
 	RAISERROR (N'Looked at worker thread usage',0,1) WITH NOWAIT;
 
@@ -931,94 +1059,134 @@ BEGIN TRY
 			, ('\SQLServer:Databases(_Total)\Log Bytes Flushed/sec',1)
 END TRY
 BEGIN CATCH
-       SELECT @errMessage  = ERROR_MESSAGE()
-       	RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+    SELECT @errMessage  = ERROR_MESSAGE()
+    RAISERROR (@errMessage,0,1) WITH NOWAIT; 
        
-
 END CATCH
+
 BEGIN
-DECLARE @syscounters NVARCHAR(4000)
-SET @syscounters=STUFF((SELECT DISTINCT ''',''' +LTRIM([counter_name])
-FROM @PerformanceCounterList
-WHERE [is_captured_ind] = 1 FOR XML PATH('')), 1, 2, '')+'''' 
+	DECLARE @syscounters NVARCHAR(4000)
+	SET @syscounters=STUFF((SELECT DISTINCT ''',''' +LTRIM([counter_name])
+	FROM @PerformanceCounterList
+	WHERE [is_captured_ind] = 1 FOR XML PATH('')), 1, 2, '')+'''' 
 
-DECLARE @syscountertable TABLE (id INT IDENTITY(1,1), [output] VARCHAR(500))
-DECLARE @syscountervaluestable TABLE (id INT IDENTITY(1,1), [value] VARCHAR(500))
-DECLARE @cmdpowershell NVARCHAR(4000)
-SET @cmdpowershell = 'C:\WINDOWS\system32\WindowsPowerShell\v1.0\powershell.exe "& get-counter -counter '+ @syscounters +' -SampleInterval 5 -MaxSamples 2 | Select-Object -ExpandProperty Readings"'
-BEGIN TRY
-	INSERT @syscountertable
-	EXEC master..xp_cmdshell @cmdpowershell
-END TRY
-BEGIN CATCH
-	RAISERROR (N'xp_cmdshell DISABLED',0,1) WITH NOWAIT; 
-END CATCH
+	DECLARE @syscountertable TABLE (
+	id INT IDENTITY(1,1)
+	, [output] VARCHAR(500)
+	)
+	
+	DECLARE @syscountervaluestable TABLE (
+	id INT IDENTITY(1,1)
+	, [value] VARCHAR(500)
+	)
+	
+	DECLARE @cmdpowershell NVARCHAR(4000)
+	SET @cmdpowershell = 'C:\WINDOWS\system32\WindowsPowerShell\v1.0\powershell.exe "& get-counter -counter '+ @syscounters +' -SampleInterval 5 -MaxSamples 2 | Select-Object -ExpandProperty Readings"'
+	BEGIN TRY
+		INSERT @syscountertable
+		EXEC master..xp_cmdshell @cmdpowershell
+	END TRY
+	BEGIN CATCH
+		RAISERROR (N'xp_cmdshell DISABLED',0,1) WITH NOWAIT; 
+	END CATCH
 
-declare @sqlnamedinstance sysname
-declare @networkname sysname
-if (select CHARINDEX('\',@@SERVERNAME)) = 0
-	begin
-	INSERT @PerformanceCounter (CounterName, CounterValue, DateSampled)
-	SELECT  REPLACE(REPLACE(REPLACE(ct.[output],'\\'+@@SERVERNAME+'\',''),' :',''),'sqlserver:','')[CounterName] , CONVERT(varchar(20),ct2.[output]) [CounterValue], GETDATE() [DateSampled]
-	FROM @syscountertable ct
-	LEFT OUTER JOIN (
-	SELECT id - 1 [id], [output]
-	FROM @syscountertable
-	WHERE PATINDEX('%[0-9]%', LEFT([output],1)) > 0  
-	) ct2 ON ct.id = ct2.id
-	WHERE  ct.[output] LIKE '\\%'
-	AND  ct.[output] IS NOT NULL
-	ORDER BY [CounterName] ASC
-	end
+	DECLARE @sqlnamedinstance sysname
+	DECLARE @networkname sysname
+	if (select CHARINDEX('\',@@SERVERNAME)) = 0
+	BEGIN
+		INSERT @PerformanceCounter (CounterName, CounterValue, DateSampled)
+		SELECT  REPLACE(REPLACE(REPLACE(ct.[output],'\\'+@@SERVERNAME+'\',''),' :',''),'sqlserver:','')[CounterName] , CONVERT(VARCHAR(20),ct2.[output]) [CounterValue], GETDATE() [DateSampled]
+		FROM @syscountertable ct
+		LEFT OUTER JOIN (
+		SELECT id - 1 [id], [output]
+		FROM @syscountertable
+		WHERE PATINDEX('%[0-9]%', LEFT([output],1)) > 0  
+		) ct2 ON ct.id = ct2.id
+		WHERE  ct.[output] LIKE '\\%'
+		AND  ct.[output] IS NOT NULL
+		ORDER BY [CounterName] ASC
+	END
 
-	else
-	begin
-	select @networkname=RTRIM(left(@@SERVERNAME, CHARINDEX('\', @@SERVERNAME) - 1))
-	select @sqlnamedinstance=RIGHT(@@SERVERNAME,CHARINDEX('\',REVERSE(@@SERVERNAME))-1)
-	INSERT @PerformanceCounter (CounterName, CounterValue, DateSampled)
-	SELECT  REPLACE(REPLACE(REPLACE(ct.[output],'\\'+@networkname+'\',''),' :',''),'mssql$'+@sqlnamedinstance+':','')[CounterName] , CONVERT(varchar(20),ct2.[output]) [CounterValue], GETDATE() [DateSampled]
-	FROM @syscountertable ct
-	LEFT OUTER JOIN (
-	SELECT id - 1 [id], [output]
-	FROM @syscountertable
-	WHERE PATINDEX('%[0-9]%', LEFT([output],1)) > 0  
-	) ct2 ON ct.id = ct2.id
-	WHERE  ct.[output] LIKE '\\%'
-	ORDER BY [CounterName] ASC
+	ELSE
+
+	BEGIN
+		select @networkname=RTRIM(left(@@SERVERNAME, CHARINDEX('\', @@SERVERNAME) - 1))
+		select @sqlnamedinstance=RIGHT(@@SERVERNAME,CHARINDEX('\',REVERSE(@@SERVERNAME))-1)
+		INSERT @PerformanceCounter (CounterName, CounterValue, DateSampled)
+		SELECT  REPLACE(REPLACE(REPLACE(ct.[output],'\\'+@networkname+'\',''),' :',''),'mssql$'+@sqlnamedinstance+':','')[CounterName] , CONVERT(VARCHAR(20),ct2.[output]) [CounterValue], GETDATE() [DateSampled]
+		FROM @syscountertable ct
+		LEFT OUTER JOIN (
+		SELECT id - 1 [id], [output]
+		FROM @syscountertable
+		WHERE PATINDEX('%[0-9]%', LEFT([output],1)) > 0  
+		) ct2 ON ct.id = ct2.id
+		WHERE  ct.[output] LIKE '\\%'
+		ORDER BY [CounterName] ASC
 	END
 END
 
 /*Generate DTU calculations*/
-INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 0,'For Azure Calculations','------','------'
-INSERT #output_man_script (SectionID, Section,Summary)
-SELECT 0, 'Number of CPUs exposed to OS' [Measure], CONVERT(VARCHAR(3),@CPUcount) [Value] 
+INSERT #output_man_script 
+(
+	SectionID
+	, Section
+	, Summary
+	, Details
+) 
+SELECT 0
+,'For Azure Calculations'
+,'------'
+,'------'
+INSERT #output_man_script 
+(
+	SectionID
+	, Section
+	,Summary
+)
+SELECT 0
+, 'Number of CPUs exposed to OS' [Measure]
+, CONVERT(VARCHAR(3),@CPUcount) [Value] 
 
 UNION ALL
-SELECT 0, 'Databases(_total)\log bytes flushed/sec (MB)', AVG(CONVERT(MONEY,CounterValue))/1024/1024
+SELECT 0
+, 'Databases(_total)\log bytes flushed/sec (MB)'
+, AVG(CONVERT(MONEY,CounterValue))/1024/1024
 FROM @PerformanceCounter T1
 WHERE T1.CounterName LIKE '%databases(_total)\log bytes flushed/sec'
 
 UNION ALL
-SELECT 0, 'Average IOPS', SUM(CONVERT(MONEY,CounterValue))/@loops
+SELECT 0
+, 'Average IOPS'
+, SUM(CONVERT(MONEY,CounterValue))/@loops
 FROM @PerformanceCounter T1
 WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Reads/sec'
 OR  T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
 
 UNION ALL
-SELECT 0, 'Disk Read IOPS', AVG(CONVERT(MONEY,CounterValue))
+SELECT 0
+, 'Disk Read IOPS'
+, AVG(CONVERT(MONEY,CounterValue))
 FROM @PerformanceCounter T1
 WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Reads/sec'
 
 UNION ALL
-SELECT 0, 'Disk Write IOPS', AVG(CONVERT(MONEY,CounterValue))
+SELECT 0
+, 'Disk Write IOPS'
+, AVG(CONVERT(MONEY,CounterValue))
 FROM @PerformanceCounter T1
 WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
 
-UNION ALL
-SELECT 0 ,'SQL Avg Usage %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SQLProcessUtilization)
-FROM 
+
+
+	DECLARE @CPURingBuffer TABLE
 	(
-		SELECT SQLProcessUtilization
+		SQLProcessUtilization SMALLINT
+		,SystemIdle SMALLINT
+		,[Event_Time] DATETIME
+	)
+
+	INSERT @CPURingBuffer
+	SELECT SQLProcessUtilization
 		, SystemIdle
 		, DATEADD(ms,-1 *(@ts - [timestamp]), GETDATE())AS [Event_Time]
 		FROM 
@@ -1038,7 +1206,18 @@ FROM
 				AND record LIKE'%%'
 			)AS x
 		) as y
-	) T1
+	
+
+INSERT #output_man_script (SectionID, Section,Summary)
+SELECT 0 ,'SQL Avg Usage %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SQLProcessUtilization) FROM @CPURingBuffer T1
+UNION ALL
+SELECT 0 ,'SQL Avg NOT 0 %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SQLProcessUtilization) FROM @CPURingBuffer T1 WHERE SQLProcessUtilization <> 0
+UNION ALL
+SELECT 0 ,'SQL MAX Usage %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , MAX(SQLProcessUtilization) FROM @CPURingBuffer T1
+UNION ALL
+SELECT 0 ,'OS idle CPU %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SystemIdle) FROM @CPURingBuffer T1 
+
+
 
 	RAISERROR (N'Finished rough IOPS calculation',0,1) WITH NOWAIT;
 
@@ -1294,6 +1473,8 @@ DECLARE @Databases TABLE
 		, recovery_model_desc  NVARCHAR(50)
 		, create_date DATETIME
 		, AGReplicaRole INT
+		, [BackupPref] NVARCHAR(250)
+		, [CurrentLocation] NVARCHAR(250)
 	);
 	SET @dynamicSQL = 'SELECT 
 	db.name
@@ -1307,6 +1488,8 @@ DECLARE @Databases TABLE
 	, db.create_date
 	
 	, 1
+	, NULL
+	, NULL
 	FROM 
 	sys.databases db 
 	WHERE 1 = 1 '
@@ -1335,6 +1518,8 @@ DECLARE @Databases TABLE
 	, db.recovery_model_desc
 	, db.create_date
 	, LocalReplicaRole
+	, [BackupPref]
+	, [CurrentLocation]
 	FROM 
 	sys.databases db 
 	LEFT OUTER JOIN(
@@ -1349,8 +1534,9 @@ DECLARE @Databases TABLE
 	ISNULL(dbcs.is_database_joined, 0) AS [IsJoined]
 	, AG.automated_backup_preference_desc [BackupPref]
 	, AR.availability_mode_desc
-	,agstates.primary_replica
-	,dbrs.is_primary_replica
+	, agstates.primary_replica [CurrentLocation]
+
+
 	FROM master.sys.availability_groups AS AG
 	LEFT OUTER JOIN master.sys.dm_hadr_availability_group_states as agstates
 	   ON AG.group_id = agstates.group_id
@@ -1363,17 +1549,12 @@ DECLARE @Databases TABLE
 	LEFT OUTER JOIN master.sys.dm_hadr_database_replica_states AS dbrs
 	   ON dbcs.replica_id = dbrs.replica_id AND dbcs.group_database_id = dbrs.group_database_id
 	WHERE dbcs.is_database_joined = 1 AND agstates.primary_replica = '''+@ThisServer+'''
-	OR 
-	(
-	(dbrs.is_primary_replica = 0 AND AG.automated_backup_preference_desc <>'primary')
-	
-	OR (dbrs.is_primary_replica = 1 AND AG.automated_backup_preference_desc ='primary')
-	)
 	ORDER BY AG.name ASC, dbcs.database_name
 	
 	) t1 on t1.DatabaseName = db.name 
 	WHERE db.database_id > 4 AND db.user_access = 0 AND db.State = 0 
-	AND t1.LocalReplicaRole IS NOT NULL'
+	AND t1.LocalReplicaRole IS NOT NULL
+	'
 	END
 	END TRY
 	BEGIN CATCH
@@ -1695,6 +1876,7 @@ DECLARE @Databases TABLE
 			)    
 		) a  
 		RIGHT OUTER JOIN sys.databases b  ON a.database_name =   b.name  
+		INNER JOIN @Databases D ON b.database_id = D.id
 		WHERE b.name <> 'tempdb' /*Exclude tempdb*/
 		AND (backup_finish_date < DATEADD(d,-1,GETDATE())  
 		OR backup_finish_date IS NULL) 
@@ -1725,6 +1907,7 @@ DECLARE @Databases TABLE
 		)    
 	) a  
 	RIGHT OUTER JOIN sys.databases b  ON a.database_name =   b.name  
+	INNER JOIN @Databases D ON b.database_id = D.id
 	WHERE b.name <> 'tempdb' /*Exclude tempdb*/
 	AND (backup_finish_date < DATEADD(d,-1,GETDATE())  
 	OR backup_finish_date IS NULL)
@@ -1753,23 +1936,26 @@ DECLARE @DatabasesForLOG TABLE
 		, recovery_model_desc  NVARCHAR(50)
 		, create_date DATETIME
 		, AGReplicaRole INT
+		, [BackupPref] NVARCHAR(250)
+		, [CurrentLocation] NVARCHAR(250)
 	);
 
 INSERT INTO @DatabasesForLOG
 SELECT * FROM @Databases
+--WHERE (CurrentLocation = @ThisServer AND BackupPref ='primary')
 
 --variables to hold each 'iteration'  
-declare @query NVARCHAR(1000)  
-declare @dbname sysname  
-declare @vlfs int  
+DECLARE @query NVARCHAR(1000)  
+DECLARE @dbname sysname  
+DECLARE @vlfs int  
  
   
 --table variable to hold results  
-declare @vlfcounts table  
+DECLARE @vlfcounts table  
     (dbname sysname,  
     vlfcount int)  
 
-declare @avg_max_log_size table 
+DECLARE @avg_max_log_size table 
 	(dbname sysname,
 	avgsize money,
 	maxsize money)
@@ -1778,12 +1964,9 @@ declare @avg_max_log_size table
 --table variable to capture DBCC loginfo output  
 --changes in the output of DBCC loginfo from SQL2012 mean we have to determine the version 
  
-declare @MajorVersion tinyint  
-set @MajorVersion = LEFT(CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max)),CHARINDEX('.',CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max)))-1) 
- 
-if @MajorVersion < 11 -- pre-SQL2012 
-begin 
-    declare @dbccloginfo table  
+DECLARE @MajorVersion tinyint  
+set @MajorVersion = LEFT(CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(max)),CHARINDEX('.',CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(max)))-1) 
+DECLARE @dbccloginfo table  
     (  
         fileid tinyint,  
         file_size bigint,  
@@ -1792,29 +1975,32 @@ begin
         [status] tinyint,  
         parity tinyint,  
         create_lsn numeric(25,0)  
-    )  
+    )
+if @MajorVersion < 11 -- pre-SQL2012 
+BEGIN 
+      
   
     while exists(select top 1 T1.databasename from @DatabasesForLOG T1)  
-    begin  
+    BEGIN  
   
         set @dbname = (select top 1 databasename from @DatabasesForLOG)  
         set @query = 'dbcc loginfo (' + '''' + @dbname + ''') '  
   
-        insert into @dbccloginfo  
+        INSERT into @dbccloginfo  
         exec (@query)  
   
         set @vlfs = @@rowcount  
   
-        insert @vlfcounts  
+        INSERT @vlfcounts  
         values(@dbname, @vlfs)  
   
         delete from @DatabasesForLOG where databasename = @dbname  
   
-    end --while 
-end 
+    END --while 
+END 
 else 
-begin 
-    declare @dbccloginfo2012 table  
+BEGIN 
+    DECLARE @dbccloginfo2012 table  
     (  
         RecoveryUnitId int, 
         fileid tinyint,  
@@ -1827,23 +2013,31 @@ begin
     )  
   
     while exists(select top 1 databasename from @DatabasesForLOG)  
-    begin  
+    BEGIN  
   
         set @dbname = (select top 1 databasename from @DatabasesForLOG)  
         set @query = 'dbcc loginfo (' + '''' + @dbname + ''') '  
   
-        insert into @dbccloginfo2012  
+        INSERT into @dbccloginfo2012  
         exec (@query)  
   
         set @vlfs = @@rowcount  
   
-        insert @vlfcounts  
+        INSERT @vlfcounts  
         values(@dbname, @vlfs)  
   
         delete from @DatabasesForLOG where databasename = @dbname  
   
-    end --while 
-end 
+    END --while 
+	
+	
+	INSERT INTO @dbccloginfo (fileid, file_size, start_offset, fseqno, [status], parity, create_lsn )
+	
+	SELECT fileid, file_size, start_offset, fseqno, [status], parity, create_lsn  FROM @dbccloginfo2012
+	
+	
+		
+END 
   
 ----output the full list  
 --select dbname, vlfcount  
@@ -1855,12 +2049,13 @@ ROUND(SUM(case when type =0 then cast(mf.size as bigint) else 0 end) * 8 / 1024,
 into #db_size
 FROM sys.master_files mf
 INNER JOIN sys.databases d ON d.database_id = mf.database_id   
+INNER JOIN @Databases DB ON d.database_id = DB.id
 WHERE d.database_id > 4   -- Skip system databases 
 GROUP BY d.name
 ORDER BY Size_MBs desc,d.name
 
 
-insert into @avg_max_log_size(dbname,avgsize,maxsize)
+INSERT into @avg_max_log_size(dbname,avgsize,maxsize)
 
 SELECT  [database_name] AS [DATABASE] ,
 
@@ -1888,15 +2083,15 @@ select 8
 + case 
 	when log_size_mb>Size_MBs then ' .LOG too big compared to Data' 
 	else ''
-end --as LogSizeCommentary1
+END --as LogSizeCommentary1
 + case 
 	when vlfcount>50 then ' .High VLFs' 
 	else ''
-end --as VLFCommentary 
+END --as VLFCommentary 
 + case 
 	when log_size_mb/2 > ls.maxsize  then ' .LOG too big compared to Max LOG Backup' /*'Log Size is more than twice the size of the maximum needed based on 3 month history' */
 	else ''
-end --as LogSizeCOmmentary2
+END --as LogSizeCOmmentary2
  [Summary]
 
 ---
@@ -1974,10 +2169,12 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 		, MIN(CASE WHEN  type = 'D' THEN backup_start_date ELSE 0 END) 'First Full'             
 		, MAX(CASE WHEN  type = 'L' THEN backup_finish_date ELSE 0 END) 'Last Transaction Log'  
 		, MIN(CASE WHEN  type = 'L' THEN backup_start_date ELSE 0 END) 'First Transaction Log'  
-		, MAX(create_date) create_date
+		, MAX(dbs.create_date) create_date
 		--SELECT *
 		FROM  msdb.sys.databases dbs
+		INNER JOIN @Databases D ON dbs.database_id = D.id
 		LEFT OUTER JOIN  msdb.dbo.backupset bs WITH (NOLOCK)  ON dbs.name = bs.database_name  
+		
 		AND dbs.recovery_model_desc COLLATE DATABASE_DEFAULT = bs.recovery_model COLLATE DATABASE_DEFAULT
 		/*Do not filter out only databases with backups.. some have never had.. --WHERE type IN ('D', 'L')*/
 		GROUP BY database_id, dbs.[compatibility_level],dbs.recovery_model_desc
@@ -2052,6 +2249,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			 ) END + ' (ms)'
 			 
 			, CASE 
+			WHEN SUM(num_of_reads+num_of_writes) = 0 THEN ''
 			WHEN SUM(io_stall)/SUM(num_of_reads+num_of_writes) < 10 THEN @Result_Good
 			WHEN SUM(io_stall)/SUM(num_of_reads+num_of_writes) BETWEEN 10 AND 100 THEN @Result_Warning
 			WHEN SUM(io_stall)/SUM(num_of_reads+num_of_writes) > 100 THEN @Result_YourServerIsDead
@@ -2073,6 +2271,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			, CONVERT(VARCHAR(20),CASE WHEN [num_of_reads] = 0 THEN 0 ELSE ([io_stall_read_ms] / [num_of_reads]) END ) + ' (ms)'
 			+ '; '+CONVERT(VARCHAR(20),CASE WHEN [num_of_writes] = 0 THEN 0 ELSE ([io_stall_write_ms] / [num_of_writes]) END ) + ' (ms)'
 			, CASE 
+			WHEN (num_of_reads+num_of_writes) = 0 THEN ''
 			WHEN (io_stall)/(num_of_reads+num_of_writes) < 10 THEN @Result_Good
 			WHEN (io_stall)/(num_of_reads+num_of_writes) BETWEEN 10 AND 100 THEN @Result_Warning
 			WHEN (io_stall)/(num_of_reads+num_of_writes) > 100 THEN @Result_YourServerIsDead
@@ -3282,7 +3481,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	SELECT  29, dtb.name
 	, 'Active: ' + CONVERT(VARCHAR(20),(select count(*) from master.dbo.sysprocesses p where dtb.database_id=p.dbid))
 	+ '; LastActivity:' +CONVERT(VARCHAR, ISNULL(lastactive.LastActivity,lastactive.create_date),120)
-	, 'Updatable: ' + ( case LOWER(convert( nvarchar(128), DATABASEPROPERTYEX(dtb.name, 'Updateability'))) when 'read_write'then 'Yes' else 'No' end)
+	, 'Updatable: ' + ( case LOWER(convert( NVARCHAR(128), DATABASEPROPERTYEX(dtb.name, 'Updateability'))) when 'read_write'then 'Yes' else 'No' end)
 	+ '; ReplicationOptions:' + CONVERT(VARCHAR(20),(dtb.is_published*1+dtb.is_subscribed*2+dtb.is_merge_published*4))
 	FROM master.sys.databases AS dtb 
 
@@ -3541,7 +3740,7 @@ VALUES(8259,	'Check Constraint')
 
 --https://www.ptr.co.uk/blog/how-improve-your-sql-server-speed
 --The script below can be use to search for automatic Log File Growths, using the background profiler trace that SQL Server maintains.
-DECLARE @tracepath nvarchar(260)
+DECLARE @tracepath NVARCHAR(260)
 
 --Pick up the path of the background profiler trace for the instance
 SELECT 
@@ -3586,14 +3785,14 @@ SELECT
 , EventName   = te.name
 , EventGrowthMB  = CONVERT(MONEY,g.IntegerData*8/1024.) -- Number of 8-kilobyte (KB) pages by which the file increased.
 , EventTime   = g.StartTime
-, EventDurationSec = CONVERT(MONEY,g.Duration/1000./1000.) -- Length of time necessary to extend the file.
+, EventDurationSec = CONVERT(MONEY,g.Duration/1000./1000.) -- Length of time necessary to extEND the file.
 , CurrentAutoGrowthSet= CASE
         WHEN mf.is_percent_growth = 1
         THEN CONVERT(char(2), mf.growth) + '%' 
-        ELSE CONVERT(varchar(30), CONVERT(MONEY, mf.growth*8./1024.)) + 'MB'
+        ELSE CONVERT(VARCHAR(30), CONVERT(MONEY, mf.growth*8./1024.)) + 'MB'
        END
 , CurrentFileSizeMB = CONVERT(MONEY,mf.size* 8./1024.)
-, MaxFileSizeMB  = CASE WHEN mf.max_size = -1 THEN 'Unlimited' ELSE CONVERT(varchar(30), CONVERT(MONEY,mf.max_size*8./1024.)) END
+, MaxFileSizeMB  = CASE WHEN mf.max_size = -1 THEN 'Unlimited' ELSE CONVERT(VARCHAR(30), CONVERT(MONEY,mf.max_size*8./1024.)) END
 FROM fn_trace_gettable(@tracepath, default) g
 cross apply sys.trace_events te 
 inner join sys.master_files mf
@@ -3675,7 +3874,7 @@ ORDER BY DBName
 				, objectId INT
 				, dbName sysname collate database_default null
 				, objectName sysname collate database_default null
-				, objectType nvarchar(5) collate database_default null
+				, objectType NVARCHAR(5) collate database_default null
 				, schemaName sysname collate database_default null
 				)
 
@@ -3685,7 +3884,7 @@ ORDER BY DBName
 			ID INT IDENTITY(1,1)
 			, evaldate NVARCHAR(20)
 			, domain NVARCHAR(50) DEFAULT DEFAULT_DOMAIN()
-			, SQLInstance NVARCHAR(50) DEFAULT @@SERVERNAME
+			, SQLInstance NVARCHAR(50) NULL --DEFAULT @@SERVERNAME
 			, [Type] NVARCHAR(25) NOT NULL
 			, l1 INT NULL
 			, l2 BIGINT NULL
@@ -3737,7 +3936,7 @@ ORDER BY DBName
 		, dense_RANK() over (order by s2.dbid,s2.objectid) AS SPRank 
 		, s2.dbid
 		, s2.objectid
-		, (SELECT top 1 substring(text,(s1.statement_start_offset+2)/2, (CASE WHEN s1.statement_end_offset = -1 then len(convert(nvarchar(max),text))*2 else s1.statement_end_offset end - s1.statement_start_offset) /2 ) FROM sys.dm_exec_sql_text(s1.sql_handle)) AS [SQL Statement]
+		, (SELECT top 1 substring(text,(s1.statement_start_offset+2)/2, (CASE WHEN s1.statement_end_offset = -1 then len(convert(NVARCHAR(max),text))*2 else s1.statement_end_offset END - s1.statement_start_offset) /2 ) FROM sys.dm_exec_sql_text(s1.sql_handle)) AS [SQL Statement]
 		, execution_count
 		, plan_generation_num
 		, last_execution_time
@@ -3782,12 +3981,12 @@ ORDER BY DBName
 		 FROM #LEXEL_OES_stats_sql_handle_convert_table WHERE row_id = @cnt; 
 		 if not exists (SELECT 1 FROM #LEXEL_OES_stats_object_name WHERE objectId = @objectid AND dbId = @dbid )
 		 BEGIN
-		 SET @cmd = 'SELECT '+convert(nvarchar(10),@dbid)+','+convert(nvarchar(100),@objectid)+','''+db_name(@dbid)+'''
+		 SET @cmd = 'SELECT '+convert(NVARCHAR(10),@dbid)+','+convert(NVARCHAR(100),@objectid)+','''+db_name(@dbid)+'''
 					 , obj.name,obj.type
 					 , CASE WHEN sch.name IS NULL THEN '''' ELSE sch.name END 
 		 FROM ['+db_name(@dbid)+'].sys.objects obj 
 					 LEFT OUTER JOIN ['+db_name(@dbid)+'].sys.schemas sch on(obj.schema_id = sch.schema_id) 
-		 WHERE obj.object_id = '+convert(nvarchar(100),@objectid)+ ';'
+		 WHERE obj.object_id = '+convert(NVARCHAR(100),@objectid)+ ';'
 		 INSERT INTO #LEXEL_OES_stats_object_name
 		 EXEC(@cmd)
 				END
@@ -3845,8 +4044,8 @@ ORDER BY DBName
 	set @dbid = db_id(); 
 	SET @cnt = 0; 
 	SET @record_count = 0; 
-	declare @sql_handle varbinary(64); 
-	declare @sql_handle_string NVARCHAR(130); 
+	DECLARE @sql_handle varbinary(64); 
+	DECLARE @sql_handle_string NVARCHAR(130); 
 	SET @grand_total_worker_time = 0 ; 
 	SET @grand_total_IO = 0 ; 
 
@@ -3912,7 +4111,7 @@ ORDER BY DBName
 	, master.dbo.fn_varbintohexstr(sql_handle)
 	, dense_RANK() over (order by s1.sql_handle) AS SPRank 
 	, dense_RANK() over (partition by s1.sql_handle order by s1.statement_start_offset) AS SPRank2
-	, replace(replace(replace(replace(CONVERT(NVARCHAR(MAX),(SELECT top 1 substring(text,(s1.statement_start_offset+2)/2, (CASE WHEN s1.statement_end_offset = -1 then len(convert(nvarchar(max),text))*2 else s1.statement_end_offset end - s1.statement_start_offset) /2 ) FROM sys.dm_exec_sql_text(s1.sql_handle))), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') AS [SQL Statement]
+	, replace(replace(replace(replace(CONVERT(NVARCHAR(MAX),(SELECT top 1 substring(text,(s1.statement_start_offset+2)/2, (CASE WHEN s1.statement_end_offset = -1 then len(convert(NVARCHAR(max),text))*2 else s1.statement_end_offset END - s1.statement_start_offset) /2 ) FROM sys.dm_exec_sql_text(s1.sql_handle))), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') AS [SQL Statement]
 	, execution_count
 	, plan_generation_num
 	, last_execution_time
@@ -3946,8 +4145,8 @@ ORDER BY DBName
 	, @grand_total_IO = SUM(t_total_logical_reads + t_total_logical_writes) 
 	from #sql_handle_convert_table; 
 
-	SELECT @grand_total_worker_time = CASE WHEN @grand_total_worker_time > 0 then @grand_total_worker_time else 1.0 end ; 
-	SELECT @grand_total_IO = CASE WHEN @grand_total_IO > 0 then @grand_total_IO else 1.0 end ; 
+	SELECT @grand_total_worker_time = CASE WHEN @grand_total_worker_time > 0 then @grand_total_worker_time else 1.0 END ; 
+	SELECT @grand_total_IO = CASE WHEN @grand_total_IO > 0 then @grand_total_IO else 1.0 END ; 
 
 	Insert INTo #perf_report_objects 
 	SELECT t_SPRank
@@ -3987,7 +4186,7 @@ ORDER BY DBName
 
 
 	END TRY
-	begin catch
+	BEGIN catch
 	SELECT -100 AS l1
 	, ERROR_NUMBER() AS l2
 	, ERROR_SEVERITY() AS row_id
@@ -3995,7 +4194,7 @@ ORDER BY DBName
 	, ERROR_MESSAGE() AS t_display_option
 	, 1 AS t_display_optionIO, 1 AS t_sql_handle_text, 1 AS t_SPRank, 1 AS t_SPRank2, 1 AS t_SQLStatement, 1 AS t_execution_count , 1 AS t_plan_generation_num, 1 AS t_last_execution_time, 1 AS t_avg_worker_time, 1 AS t_total_worker_time, 1 AS t_last_worker_time, 1 AS t_min_worker_time, 1 AS t_max_worker_time, 1 AS t_avg_logical_reads 
 	, 1 AS t_total_logical_reads, 1 AS t_last_logical_reads, 1 AS t_min_logical_reads, 1 AS t_max_logical_reads, 1 AS t_avg_logical_writes, 1 AS t_total_logical_writes, 1 AS t_last_logical_writes, 1 AS t_min_logical_writes, 1 AS t_max_logical_writes, 1 AS t_avg_IO, 1 AS t_total_IO, 1 AS t_last_IO, 1 AS t_min_IO, 1 AS t_max_IO, 1 AS t_CPURank, 1 AS t_ReadRank, 1 AS t_WriteRank
-	end catch
+	END catch
 
 
 
@@ -4173,6 +4372,7 @@ ORDER BY DBName
 RAISERROR (N'Cleaning up output table',0,1) WITH NOWAIT;
 UPDATE  #output_man_script
 SET evaldate = @evaldate
+, SQLInstance = @ThisServer
 
 
 
@@ -4293,7 +4493,7 @@ BEGIN
 	SELECT T1.ID
 	,  evaldate
 	, T1.domain
-	, @ThisServer  
+	,'''+ @ThisServer  +'''
 	, T1.SectionID
 	, T1.Section
 	, T1.Summary

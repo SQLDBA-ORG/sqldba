@@ -1,7 +1,7 @@
-ALTER PROCEDURE [dbo].[sqlsteward] 
+ALTER PROCEDURE [dbo].[sqldba_sqlmagic] 
 /* 
 Sample command:
-	EXEC  [dbo].[sqlsteward] 
+	EXEC  [dbo].[sqldba_sqlmagic] 
 */
 WITH RECOMPILE
 AS
@@ -18,11 +18,11 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 	
 /* Sample command ❇️❇️❇️❇️
-	EXEC  [dbo].[sqlsteward] 
+	EXEC  [dbo].[sqldba_sqlmagic] 
 RAISERROR (N'SQL server evaluation script @ 9 July 2020 adrian.sullivan@lexel.co.nz. ﷽',0,1) WITH NOWAIT;
 RAISERROR (NCHAR(65021),0,1) WITH NOWAIT;
 --Clean up
-DROP PROCEDURE [master].[dbo].[sqlsteward]
+DROP PROCEDURE [master].[dbo].[sqldba_sqlmagic]
 */
  /*@TopQueries. How many queries need to be looked at, TOP xx*/
 DECLARE @TopQueries int  
@@ -55,7 +55,7 @@ SET @ExportSchema= 'dbo'
 DECLARE @ExportDBName  NVARCHAR(20) 
 sET @ExportDBName = 'master'
 DECLARE @ExportTableName NVARCHAR(20) 
-SET @ExportTableName= 'sqlsteward_output'
+SET @ExportTableName= 'sqldba_sqlmagic_output'
 DECLARE @ExportCleanupDays INT 
 SET @ExportCleanupDays = 180
 /* @PrintMatrixHeader. Added to turn it off since some control chars coming through stopping a copy/paste from the messages window in SSMS */
@@ -74,7 +74,7 @@ SET @PrepForExport = 1
 SET @Export = 'Screen' 
 SET @ExportSchema   = 'dbo'
 SET @ExportDBName = 'master'
-SET  @ExportTableName = 'sqlsteward_output'
+SET  @ExportTableName = 'sqldba_sqlmagic_output'
 SET  @ExportCleanupDays  = 180
 SET  @ShowMigrationRelatedOutputs = 1
 BEGIN
