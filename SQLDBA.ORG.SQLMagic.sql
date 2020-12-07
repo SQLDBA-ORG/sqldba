@@ -4457,8 +4457,9 @@ BEGIN
 	, CONVERT(NVARCHAR(4000),Details)
 	FROM master.dbo.sp_Blitz_output 
 	WHERE CheckDate = (SELECT max([CheckDate]) FROM master.dbo.sp_Blitz_output HAVING DATEADD(DAY,-2,GETDATE()) < max([CheckDate]) )
-	ORDER BY id ASC'
+	ORDER BY ID ASC'
 	)
+
 END
 
 			/*----------------------------------------
@@ -4471,12 +4472,9 @@ EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE', 'SYSTEM\CurrentControlSet\servi
 UPDATE  #output_man_script
 SET evaldate = @evaldate
 , SQLInstance = @ThisServer
-, Domain = @ThisDomain
+, domain = @ThisDomain
 
-
-
-
-			IF UPPER(LEFT(@Export,1)) = 'S'
+IF UPPER(LEFT(@Export,1)) = 'S'
 BEGIN	
 	SELECT T1.ID
 	,  evaldate
