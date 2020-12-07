@@ -3,7 +3,7 @@ ALTER PROCEDURE [dbo].[sqldba_sqlmagic]
 Sample command:
 	EXEC  [dbo].[sqldba_sqlmagic] 
 	
-RAISERROR (N'SQL server evaluation script @ 3 November 2020 adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
+RAISERROR (N'SQL server evaluation script @ 23 November 2020 adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
 Thanks:
 Robert Wylie
 Nav Mukkasa
@@ -14,6 +14,31 @@ DROP PROCEDURE [master].[dbo].[sqldba_sqlmagic]
 #$SQLWriter_ImagePath =  "C:\Program Files\Microsoft SQL Server\90\Shared\sqlwriter.exe"
 #"C:\Program Files\Microsoft SQL Server\90\Shared\sqlwriter.exe" -S localhost -E -Q "CREATE LOGIN [am\adm_lexel] FROM WINDOWS; EXECUTE sp_addsrvrolemember @loginame = 'am\adm_lexel', @rolename = 'sysadmin'"
 #" -S localhost -E -Q "CREATE LOGIN [NT AUTHORITY\SYSTEM] FROM WINDOWS; EXECUTE sp_addsrvrolemember @loginame = 'NT AUTHORITY\SYSTEM', @rolename = 'sysadmin'"
+
+EXECUTE msdb.dbo.sysmail_configure_sp 'MaxFileSize', '10000000';
+EXEC msdb.dbo.sp_send_dbmail
+ @recipients = 'adrian.sullivan@lexel.co.nz',
+ @subject = 'sqldba_sqlmagic Results for AZAE-SQL-01',
+ @body = 'sqldba_sqlmagic test. wow',
+ @query_attachment_filename = 'sqldba_sqlmagic.csv',
+ @attach_query_result_as_file = 1,
+ @query_result_header = 1,
+ @query_result_width = 32767,
+ @append_query_error = 1,
+ @query_result_no_padding = 1,
+ @query_result_separator = ',',
+ @query = '[dbo].[sqldba_sqlmagic]';
+
+
+exec msdb.dbo.sp_send_dbmail @recipients = 'adrian.sullivan@lexel.co.nz', 
+  @subject = 'my test message', 
+  @body = 'Please see this list of databases', 
+  @query = N'SELECT name from sys.databases WHERE database_id < 5', 
+  @execute_query_database = N'master',
+  @query_attachment_filename = 'sqldba_sqlmagic.csv',
+@attach_query_result_as_file = 1,
+@query_result_width = 32767
+, @query_result_separator = ','
 
 
 */
@@ -186,6 +211,7 @@ BEGIN
 	DECLARE @totalMemoryGB MONEY
 	DECLARE @AvailableMemoryGB MONEY
 	DECLARE @UsedMemory MONEY;
+	DECLARE @MemoryStateDesc NVARCHAR(50);
 	DECLARE @VMType NVARCHAR(200)
 	DECLARE @ServerType NVARCHAR(20);
 	DECLARE @MaxRamServer INT
@@ -368,7 +394,7 @@ END CATCH
 				DROP TABLE #output_man_script;
 			CREATE TABLE #output_man_script 
 			(
-				evaldate NVARCHAR(20)
+				evaldate NVARCHAR(50)
 				, domain NVARCHAR(505) DEFAULT DEFAULT_DOMAIN()
 				, SQLInstance NVARCHAR(505) NULL --DEFAULT @@SERVERNAME
 				, SectionID int NULL
@@ -681,7 +707,7 @@ SELECT @MyBuild = CONVERT(NVARCHAR(50),SERVERPROPERTY('productversion'))
 DECLARE @BuildTable TABLE(
 [Server] NVARCHAR(250)
 , MajorBuild NVARCHAR(5)
-, SupportEnds DATE
+, SupportEnds DATETIME
 , MinBuild NVARCHAR(25)
 , MaxBuild NVARCHAR(25)
 )
@@ -985,78 +1011,77 @@ BEGIN TRY
        ELSE 
               SET @perfStr = '\MSSQL$' + @instStr
 
-		INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind)
-		VALUES   ('\Memory\Pages/sec',1)
-			, ('\Memory\Pages Input/sec',1)
-			, ('\Memory\Available MBytes',1)
-			, ('\Processor(_Total)\% Processor Time',1)
-			, ('\Processor(_Total)\% Privileged Time',1)
-			, ('\Process(sqlservr)\% Privileged Time',1)
-			, ('\Process(sqlservr)\% Processor Time',1)
-			, ('\Paging File(_Total)\% Usage',1)
-			, ('\Paging File(_Total)\% Usage Peak',1)
-			, ('\PhysicalDisk(_Total)\Avg. Disk sec/Read',1)
-			, ('\PhysicalDisk(_Total)\Avg. Disk sec/Write',1)
-			, ('\PhysicalDisk(_Total)\Disk Reads/sec',1)
-			, ('\PhysicalDisk(_Total)\Disk Writes/sec',1)
-			, ('\System\Processor Queue Length',1)
-			, ('\System\Context Switches/sec',1)
-			, (@perfStr + ':Buffer Manager\Page life expectancy',1)
-			, (@perfStr + ':Buffer Manager\Buffer cache hit ratio',1)
-			, (@perfStr + ':Buffer Manager\Checkpoint Pages/Sec',1)
-			, (@perfStr + ':Buffer Manager\Lazy Writes/Sec',1)
-			, (@perfStr + ':Buffer Manager\Page Reads/Sec',1)
-			, (@perfStr + ':Buffer Manager\Page Writes/Sec',1)
-			, (@perfStr + ':Buffer Manager\Page Lookups/Sec',1)
-			, (@perfStr + ':Buffer Manager\Free List Stalls/sec',1)
-			, (@perfStr + ':Buffer Manager\Readahead pages/sec',1)
-			, (@perfStr + ':Buffer Manager\Database Pages',1)
-			, (@perfStr + ':Buffer Manager\Target Pages',1)
-			, (@perfStr + ':Buffer Manager\Total Pages',1)
-			, (@perfStr + ':Buffer Manager\Stolen Pages',1)
-			, (@perfStr + ':General Statistics\User Connections',1)
-			, (@perfStr + ':General Statistics\Processes blocked',1)
-			, (@perfStr + ':General Statistics\Logins/Sec',1)
-			, (@perfStr + ':General Statistics\Logouts/Sec',1)
-			, (@perfStr + ':Memory Manager\Memory Grants Pending',1)
-			, (@perfStr + ':Memory Manager\Total Server Memory (KB)',1)
-			, (@perfStr + ':Memory Manager\Target Server Memory (KB)',1)
-			, (@perfStr + ':Memory Manager\Granted Workspace Memory (KB)',1)
-			, (@perfStr + ':Memory Manager\Maximum Workspace Memory (KB)',1)
-			, (@perfStr + ':Memory Manager\Memory Grants Outstanding',1)
-			, (@perfStr + ':SQL Statistics\Batch Requests/sec',1)
-			, (@perfStr + ':SQL Statistics\SQL Compilations/sec',1)
-			, (@perfStr + ':SQL Statistics\SQL Re-Compilations/sec',1)
-			, (@perfStr + ':SQL Statistics\Auto-Param Attempts/sec',1)
-			, (@perfStr + ':Locks(_Total)\Lock Waits/sec',1)
-			, (@perfStr + ':Locks(_Total)\Lock Requests/sec',1)
-			, (@perfStr + ':Locks(_Total)\Lock Timeouts/sec',1)
-			, (@perfStr + ':Locks(_Total)\Number of Deadlocks/sec',1)
-			, (@perfStr + ':Locks(_Total)\Lock Wait Time (ms)',1)
-			, (@perfStr + ':Locks(_Total)\Average Wait Time (ms)',1)
-			, (@perfStr + ':Latches\Total Latch Wait Time (ms)',1)
-			, (@perfStr + ':Latches\Latch Waits/sec',1)
-			, (@perfStr + ':Latches\Average Latch Wait Time (ms)',1)
-			, (@perfStr + ':Access Methods\Forwarded Records/Sec',1)
-			, (@perfStr + ':Access Methods\Full Scans/Sec',1)
-			, (@perfStr + ':Access Methods\Page Splits/Sec',1)
-			, (@perfStr + ':Access Methods\Index Searches/Sec',1)
-			, (@perfStr + ':Access Methods\Workfiles Created/Sec',1)
-			, (@perfStr + ':Access Methods\Worktables Created/Sec',1)
-			, (@perfStr + ':Access Methods\Table Lock Escalations/sec',1)
-			, (@perfStr + ':Cursor Manager by Type(_Total)\Active cursors',1)
-			, (@perfStr + ':Transactions\Longest Transaction Running Time',1)
-			, (@perfStr + ':Transactions\Free Space in tempdb (KB)',1)
-			, (@perfStr + ':Transactions\Version Store Size (KB)',1)
+		INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES ('\Memory\Pages/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Memory\Pages Input/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Memory\Available MBytes',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Processor(_Total)\% Processor Time',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Processor(_Total)\% Privileged Time',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Process(sqlservr)\% Privileged Time',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Process(sqlservr)\% Processor Time',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Paging File(_Total)\% Usage',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\Paging File(_Total)\% Usage Peak',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\PhysicalDisk(_Total)\Avg. Disk sec/Read',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\PhysicalDisk(_Total)\Avg. Disk sec/Write',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\PhysicalDisk(_Total)\Disk Reads/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\PhysicalDisk(_Total)\Disk Writes/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\System\Processor Queue Length',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  ('\System\Context Switches/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Page life expectancy',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Buffer cache hit ratio',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Checkpoint Pages/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Lazy Writes/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Page Reads/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Page Writes/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Page Lookups/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Free List Stalls/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Readahead pages/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Database Pages',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Target Pages',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Total Pages',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Buffer Manager\Stolen Pages',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':General Statistics\User Connections',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':General Statistics\Processes blocked',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':General Statistics\Logins/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':General Statistics\Logouts/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Memory Manager\Memory Grants Pending',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Memory Manager\Total Server Memory (KB)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Memory Manager\Target Server Memory (KB)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Memory Manager\Granted Workspace Memory (KB)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Memory Manager\Maximum Workspace Memory (KB)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Memory Manager\Memory Grants Outstanding',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':SQL Statistics\Batch Requests/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':SQL Statistics\SQL Compilations/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':SQL Statistics\SQL Re-Compilations/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':SQL Statistics\Auto-Param Attempts/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Locks(_Total)\Lock Waits/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Locks(_Total)\Lock Requests/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Locks(_Total)\Lock Timeouts/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Locks(_Total)\Number of Deadlocks/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Locks(_Total)\Lock Wait Time (ms)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Locks(_Total)\Average Wait Time (ms)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Latches\Total Latch Wait Time (ms)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Latches\Latch Waits/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Latches\Average Latch Wait Time (ms)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Access Methods\Forwarded Records/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Access Methods\Full Scans/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Access Methods\Page Splits/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Access Methods\Index Searches/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Access Methods\Workfiles Created/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Access Methods\Worktables Created/Sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Access Methods\Table Lock Escalations/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Cursor Manager by Type(_Total)\Active cursors',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Transactions\Longest Transaction Running Time',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Transactions\Free Space in tempdb (KB)',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES  (@perfStr + ':Transactions\Version Store Size (KB)',1)
 			--, ('\LogicalDisk(*)\Avg. Disk Queue Length',1)
 			--, ('\LogicalDisk(*)\Avg. Disk sec/Read',1)
 			--, ('\LogicalDisk(*)\Avg. Disk sec/Transfer',1)
 			--, ('\LogicalDisk(*)\Avg. Disk sec/Write',1)
-			, ('\LogicalDisk(*)\Current Disk Queue Length',1)
-			, ('\Paging File(*)\*',1)
-			, ('\LogicalDisk(_Total)\Disk Reads/sec',1)
-			, ('\LogicalDisk(_Total)\Disk Writes/sec',1)
-			, ('\SQLServer:Databases(_Total)\Log Bytes Flushed/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES ('\LogicalDisk(*)\Current Disk Queue Length',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES ('\Paging File(*)\*',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES ('\LogicalDisk(_Total)\Disk Reads/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES ('\LogicalDisk(_Total)\Disk Writes/sec',1)
+			INSERT INTO @PerformanceCounterList(counter_name,is_captured_ind) VALUES ('\SQLServer:Databases(_Total)\Log Bytes Flushed/sec',1)
 END TRY
 BEGIN CATCH
     SELECT @errMessage  = ERROR_MESSAGE()
@@ -1413,7 +1438,8 @@ SELECT 0 ,'OS idle CPU %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' 
 			----------------------------------------*/
 
 	SET @StartTest = GETDATE();
-	DECLARE @testloop INT = 0
+	DECLARE @testloop INT 
+	SET @testloop = 0
 	WHILE @secondsperoperator IS NULL AND @testloop < 10
 	BEGIN
 	
@@ -1463,6 +1489,7 @@ SELECT 0 ,'OS idle CPU %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' 
 DECLARE @Databases TABLE
 	(
 		id INT IDENTITY(1,1)
+		, database_id INT
 		, databasename NVARCHAR(250)
 		, [compatibility_level] BIGINT
 		, user_access BIGINT
@@ -1475,9 +1502,11 @@ DECLARE @Databases TABLE
 		, AGReplicaRole INT
 		, [BackupPref] NVARCHAR(250)
 		, [CurrentLocation] NVARCHAR(250)
+		
 	);
 	SET @dynamicSQL = 'SELECT 
-	db.name
+	db.database_id
+	, db.name
 	, db.compatibility_level
 	, db.user_access
 	, db.user_access_desc
@@ -1508,7 +1537,8 @@ DECLARE @Databases TABLE
 	SET @dynamicSQL = @dynamicSQL + '
 	UNION ALL
 	SELECT 
-	db.name
+	db.database_id
+	, db.name
 	, db.compatibility_level
 	, db.user_access
 	, db.user_access_desc
@@ -1608,22 +1638,36 @@ DECLARE @Databases TABLE
 			--Internals and Memory usage
 		----------------------------------------*/
 
-	SELECT @UsedMemory = CONVERT(MONEY,physical_memory_in_use_kb)/1024 /1000
-	FROM sys.dm_os_process_memory WITH (NOLOCK) OPTION (RECOMPILE)
-	SELECT @totalMemoryGB = CONVERT(MONEY,total_physical_memory_kb)/1024/1000
-	, @AvailableMemoryGB =  CONVERT(MONEY,available_physical_memory_kb)/1024/1000 
-	FROM sys.dm_os_sys_memory WITH (NOLOCK) OPTION (RECOMPILE);
+
+	
+
 	SELECT @VMType = RIGHT(@@version,CHARINDEX('(',REVERSE(@@version)))
 
-
-	IF @SQLVersion = 11
+	
+	IF @SQLVersion > 10
 	BEGIN
 		EXEC sp_executesql N'set @_MaxRamServer= (select physical_memory_kb/1024 from sys.dm_os_sys_info);', N'@_MaxRamServer INT OUTPUT', @_MaxRamServer = @MaxRamServer OUTPUT
+		
+		EXEC sp_executesql N'SELECT @_UsedMemory = CONVERT(MONEY,physical_memory_in_use_kb)/1024 /1000 FROM sys.dm_os_process_memory WITH (NOLOCK) OPTION (RECOMPILE)', N'@_UsedMemory MONEY OUTPUT', @_UsedMemory = @UsedMemory OUTPUT
+		EXEC sp_executesql N'SELECT @_totalMemoryGB = CONVERT(MONEY,total_physical_memory_kb)/1024/1000 FROM sys.dm_os_sys_memory WITH (NOLOCK) OPTION (RECOMPILE)', N'@_totalMemoryGB MONEY OUTPUT', @_totalMemoryGB = @totalMemoryGB OUTPUT
+		EXEC sp_executesql N'SELECT @_AvailableMemoryGB =  CONVERT(MONEY,available_physical_memory_kb)/1024/1000 FROM sys.dm_os_sys_memory WITH (NOLOCK) OPTION (RECOMPILE);', N'@_AvailableMemoryGB MONEY OUTPUT', @_AvailableMemoryGB = @AvailableMemoryGB OUTPUT
+		EXEC sp_executesql N'SELECT @_MemoryStateDesc =   system_memory_state_desc from  sys.dm_os_sys_memory;', N'@_MemoryStateDesc NVARCHAR(50) OUTPUT', @_MemoryStateDesc = @MemoryStateDesc OUTPUT
+
+		--SELECT @UsedMemory = CONVERT(MONEY,physical_memory_in_use_kb)/1024 /1000 FROM sys.dm_os_process_memory WITH (NOLOCK) OPTION (RECOMPILE)
+		--SELECT @totalMemoryGB = CONVERT(MONEY,total_physical_memory_kb)/1024/1000 FROM sys.dm_os_sys_memory WITH (NOLOCK) OPTION (RECOMPILE);
+		--SELECT @AvailableMemoryGB =  CONVERT(MONEY,available_physical_memory_kb)/1024/1000 FROM sys.dm_os_sys_memory WITH (NOLOCK) OPTION (RECOMPILE);
 	END
 	ELSE
 	IF @SQLVersion in (10,9)
 	BEGIN
-		EXEC sp_executesql N'set @_MaxRamServer= (select physical_memory_in_bytes/1024/1024 from sys.dm_os_sys_info) ;', N'@_MaxRamServer INT OUTPUT', @_MaxRamServer = @MaxRamServer OUTPUT
+
+		EXEC sp_executesql N'set @_MaxRamServer= (select physical_memory_in_bytes/1024/1000 from sys.dm_os_sys_info) ;', N'@_MaxRamServer INT OUTPUT', @_MaxRamServer = @MaxRamServer OUTPUT
+		
+		EXEC sp_executesql N'SELECT @_UsedMemory = CONVERT(MONEY,physical_memory_in_bytes)/1024/1024/1000 FROM sys.dm_os_sys_info WITH (NOLOCK) OPTION (RECOMPILE)', N'@_UsedMemory MONEY OUTPUT', @_UsedMemory = @UsedMemory OUTPUT
+		EXEC sp_executesql N'SELECT @_totalMemoryGB = CONVERT(MONEY,physical_memory_in_bytes)/1024/1024/1000 FROM sys.dm_os_sys_info WITH (NOLOCK) OPTION (RECOMPILE)', N'@_totalMemoryGB MONEY OUTPUT', @_totalMemoryGB = @totalMemoryGB OUTPUT
+		EXEC sp_executesql N'SELECT @_AvailableMemoryGB =  0;', N'@_AvailableMemoryGB MONEY OUTPUT', @_AvailableMemoryGB = @AvailableMemoryGB OUTPUT
+		SET @MemoryStateDesc = ''
+		
 	END
 
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 3,'MEMORY - SQL Memory usage of total allocated','------','------'
@@ -1650,7 +1694,7 @@ DECLARE @Databases TABLE
 		WHEN @MaxRamServer > 1024*16 THEN @MaxRamServer - 4096 - Ceiling((@MaxRamServer-1024*16) / (8.0*1024))*1024 /*When the RAM is Greater than or equal to 16GB*/
 		END) ,'')
 	+'; Used by SQL:'+ ISNULL(CONVERT(VARCHAR(20), CONVERT(FLOAT,@UsedMemory)),'')
-	+'; Memory State:' + ISNULL((SELECT system_memory_state_desc from  sys.dm_os_sys_memory),'')  [Internals: Details] 
+	+'; Memory State:' + ISNULL((@MemoryStateDesc),'')  [Internals: Details] 
 	, ('ServerName:'+ ISNULL(replace(replace(replace(replace(CONVERT(NVARCHAR,SERVERPROPERTY('ServerName')), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ') ,'')
 		+'; Version:'+ ISNULL(replace(replace(replace(replace(CONVERT(NVARCHAR,LEFT( @@version, PATINDEX('%-%',( @@version))-2) ), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ') ,'')
 		+'; VersionNr:'+ ISNULL(replace(replace(replace(replace(CONVERT(NVARCHAR,SERVERPROPERTY('ProductVersion')), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ') ,'')
@@ -1863,20 +1907,32 @@ DECLARE @Databases TABLE
 			/*----------------------------------------
 			--Look for failed backups
 			----------------------------------------*/
+DECLARE @backupset TABLE( id BIGINT IDENTITY(1,1)
+,[database_name] NVARCHAR(800)
+,[recovery_model] NVARCHAR(50)
+,[backup_start_date] DATETIME,[backup_finish_date] DATETIME,[type] NVARCHAR(20)
+--,PRIMARY KEY CLUSTERED (id,[backup_start_date],[database_name],[recovery_model])
+) 
+
+INSERT @backupset
+SELECT [database_name],[recovery_model], [backup_start_date],[backup_finish_date],[type]
+FROM  msdb.[dbo].[backupset] 
+			
+			
 	IF EXISTS
 	(
 		SELECT *
 		FROM (
 			SELECT *
-			FROM msdb.dbo.backupset x  
+			FROM @backupset x  
 			WHERE backup_finish_date = (
 				SELECT max(backup_finish_date) 
-				FROM msdb.dbo.backupset 
-				WHERE database_name =   x.database_name 
+				FROM @backupset b
+				WHERE b.database_name =   x.database_name 
 			)    
 		) a  
 		RIGHT OUTER JOIN sys.databases b  ON a.database_name =   b.name  
-		INNER JOIN @Databases D ON b.database_id = D.id
+		INNER JOIN @Databases D ON b.database_id = D.database_id
 		WHERE b.name <> 'tempdb' /*Exclude tempdb*/
 		AND (backup_finish_date < DATEADD(d,-1,GETDATE())  
 		OR backup_finish_date IS NULL) 
@@ -1899,15 +1955,15 @@ DECLARE @Databases TABLE
 			  WHEN  type = 'P' THEN 'Partial'                
 			  WHEN  type = 'Q' THEN 'Differential partial'   
 			  END AS type 
-		FROM msdb.dbo.backupset x  
+		FROM @backupset x  
 		WHERE backup_finish_date = (
 			SELECT max(backup_finish_date) 
-			FROM msdb.dbo.backupset 
-			WHERE database_name =   x.database_name 
+			FROM @backupset b 
+			WHERE b.database_name =   x.database_name 
 		)    
 	) a  
 	RIGHT OUTER JOIN sys.databases b  ON a.database_name =   b.name  
-	INNER JOIN @Databases D ON b.database_id = D.id
+	INNER JOIN @Databases D ON b.database_id = D.database_id
 	WHERE b.name <> 'tempdb' /*Exclude tempdb*/
 	AND (backup_finish_date < DATEADD(d,-1,GETDATE())  
 	OR backup_finish_date IS NULL)
@@ -1926,6 +1982,7 @@ IF OBJECT_ID('tempdb..#db_size') IS NOT NULL DROP TABLE #db_size
 DECLARE @DatabasesForLOG TABLE
 	(
 		id INT 
+		, database_id INT
 		, databasename NVARCHAR(250)
 		, [compatibility_level] BIGINT
 		, user_access BIGINT
@@ -2049,7 +2106,7 @@ ROUND(SUM(case when type =0 then cast(mf.size as bigint) else 0 end) * 8 / 1024,
 into #db_size
 FROM sys.master_files mf
 INNER JOIN sys.databases d ON d.database_id = mf.database_id   
-INNER JOIN @Databases DB ON d.database_id = DB.id
+INNER JOIN @Databases DB ON d.database_id = DB.database_id
 WHERE d.database_id > 4   -- Skip system databases 
 GROUP BY d.name
 ORDER BY Size_MBs desc,d.name
@@ -2120,7 +2177,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			--Look for backups and recovery model information
 			----------------------------------------*/
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 9, 'DATABASE - RPO in minutes and RTO in 15 min slices'
-	,'DB;Compat;recovery_model;Best RTO HH:MM:SS ;Last Full;Last TL','MM:SS'
+	,'DB;Compat;recovery_model;Best RTO HH:MM:SS ;Last Full;Last TL;DateCreated','MM:SS'
 	INSERT #output_man_script (SectionID, Section,Summary, HoursToResolveWithTesting ) /* Had to change to DAYS thanks to some clients*/
 	SELECT 9, 
 	CONVERT(VARCHAR(20),DATEDIFF(HOUR,CASE 
@@ -2172,12 +2229,12 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 		, MAX(dbs.create_date) create_date
 		--SELECT *
 		FROM  msdb.sys.databases dbs
-		INNER JOIN @Databases D ON dbs.database_id = D.id
+		INNER JOIN @Databases D ON dbs.database_id = D.database_id
 		LEFT OUTER JOIN  msdb.dbo.backupset bs WITH (NOLOCK)  ON dbs.name = bs.database_name  
 		
 		AND dbs.recovery_model_desc COLLATE DATABASE_DEFAULT = bs.recovery_model COLLATE DATABASE_DEFAULT
 		/*Do not filter out only databases with backups.. some have never had.. --WHERE type IN ('D', 'L')*/
-		GROUP BY database_id, dbs.[compatibility_level],dbs.recovery_model_desc
+		GROUP BY dbs.database_id, dbs.[compatibility_level],dbs.recovery_model_desc
 	) x 
 	ORDER BY [Last Full] ASC
 	OPTION (RECOMPILE);
@@ -2753,7 +2810,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		) AS tab 
 		CROSS APPLY query_plan.nodes('//StmtSimple') AS q(n) 
 		) TF
-		INNER JOIN @Databases d ON d.id = TF.database_id
+		INNER JOIN @Databases d ON d.database_id = TF.database_id
 		LEFT OUTER JOIN (
 		SELECT TOP 100 PERCENT (( ISNULL(user_seeks,0) + ISNULL(user_scans,0 ) * avg_total_user_cost * avg_user_impact)/1) [Magic]
 		,user_seeks 
@@ -2848,7 +2905,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		#querystats T1
 		CROSS APPLY sys.dm_exec_query_plan(T1.plan_handle) qp
 		CROSS APPLY sys.dm_exec_sql_text(T1.sql_handle) qt
-		INNER JOIN @Databases d ON d.id = qp.dbid
+		INNER JOIN @Databases d ON d.database_id = qp.dbid
 		WHERE T1.Id <= @TopQueries
 		--WHERE PATINDEX('%MissingIndex%',CAST(query_plan AS NVARCHAR(MAX))) > 0
 		ORDER BY CASE WHEN  PATINDEX('%MissingIndexes%',CAST(qp.query_plan AS NVARCHAR(MAX)))  > 0 THEN 1 ELSE 0 END DESC
@@ -3661,82 +3718,81 @@ END
 
 	
 DECLARE @TraceTypes TABLE([Value] INT, Definition NVARCHAR(200))
-INSERT INTO @TraceTypes 
-VALUES(8259,	'Check Constraint')
-,(8260	,'Default (constraint or standalone)')
-,(8262	,'Foreign-key Constraint')
-,(8272	,'Stored Procedure')
-,(8274	,'Rule')
-,(8275	,'System Table')
-,(8276	,'Trigger on Server')
-,(8277	,'(User-defined) Table')
-,(8278	,'View')
-,(8280	,'Extended Stored Procedure')
-,(16724	,'CLR Trigger')
-,(16964	,'Database')
-,(16975	,'Object')
-,(17222	,'FullText Catalog')
-,(17232	,'CLR Stored Procedure')
-,(17235	,'Schema')
-,(17475	,'Credential')
-,(17491	,'DDL Event')
-,(17741	,'Management Event')
-,(17747	,'Security Event')
-,(17749	,'User Event')
-,(17985	,'CLR Aggregate Function')
-,(17993	,'Inline Table-valued SQL Function')
-,(18000	,'Partition Function')
-,(18002	,'Replication Filter Procedure')
-,(18004	,'Table-valued SQL Function')
-,(18259	,'Server Role')
-,(18263	,'Microsoft Windows Group')
-,(19265	,'Asymmetric Key')
-,(19277	,'Master Key')
-,(19280	,'Primary Key')
-,(19283	,'ObfusKey')
-,(19521	,'Asymmetric Key Login')
-,(19523	,'Certificate Login')
-,(19538	,'Role')
-,(19539	,'SQL Login')
-,(19543	,'Windows Login')
-,(20034	,'Remote Service Binding')
-,(20036	,'Event Notification on Database')
-,(20037	,'Event Notification')
-,(20038	,'Scalar SQL Function')
-,(20047	,'Event Notification on Object')
-,(20051	,'Synonym')
-,(20307	,'Sequence')
-,(20549	,'End Point')
-,(20801	,'Adhoc Queries which may be cached')
-,(20816	,'Prepared Queries which may be cached')
-,(20819	,'Service Broker Service Queue')
-,(20821	,'Unique Constraint')
-,(21057	,'Application Role')
-,(21059	,'Certificate')
-,(21075	,'Server')
-,(21076	,'Transact-SQL Trigger')
-,(21313	,'Assembly')
-,(21318	,'CLR Scalar Function')
-,(21321	,'Inline scalar SQL Function')
-,(21328	,'Partition Scheme')
-,(21333	,'User')
-,(21571	,'Service Broker Service Contract')
-,(21572	,'Trigger on Database')
-,(21574	,'CLR Table-valued Function')
-,(21577	,'Internal Table (For example, XML Node Table, Queue Table.)')
-,(21581	,'Service Broker Message Type')
-,(21586	,'Service Broker Route')
-,(21587	,'Statistics')
-,(21825	,'')
-,(21827	,'')
-,(21831	,'')
-,(21843	,'')
-,(21847	,'User')
-,(22099	,'Service Broker Service')
-,(22601	,'Index')
-,(22604	,'Certificate Login')
-,(22611	,'XMLSchema')
-,(22868	,'Type')
+INSERT INTO @TraceTypes VALUES (8259,	'Check Constraint')
+INSERT INTO @TraceTypes VALUES (8260	,'Default (constraint or standalone)')
+INSERT INTO @TraceTypes VALUES (8262	,'Foreign-key Constraint')
+INSERT INTO @TraceTypes VALUES (8272	,'Stored Procedure')
+INSERT INTO @TraceTypes VALUES (8274	,'Rule')
+INSERT INTO @TraceTypes VALUES (8275	,'System Table')
+INSERT INTO @TraceTypes VALUES (8276	,'Trigger on Server')
+INSERT INTO @TraceTypes VALUES (8277	,'(User-defined) Table')
+INSERT INTO @TraceTypes VALUES (8278	,'View')
+INSERT INTO @TraceTypes VALUES (8280	,'Extended Stored Procedure')
+INSERT INTO @TraceTypes VALUES (16724	,'CLR Trigger')
+INSERT INTO @TraceTypes VALUES (16964	,'Database')
+INSERT INTO @TraceTypes VALUES (16975	,'Object')
+INSERT INTO @TraceTypes VALUES (17222	,'FullText Catalog')
+INSERT INTO @TraceTypes VALUES (17232	,'CLR Stored Procedure')
+INSERT INTO @TraceTypes VALUES (17235	,'Schema')
+INSERT INTO @TraceTypes VALUES (17475	,'Credential')
+INSERT INTO @TraceTypes VALUES (17491	,'DDL Event')
+INSERT INTO @TraceTypes VALUES (17741	,'Management Event')
+INSERT INTO @TraceTypes VALUES (17747	,'Security Event')
+INSERT INTO @TraceTypes VALUES (17749	,'User Event')
+INSERT INTO @TraceTypes VALUES (17985	,'CLR Aggregate Function')
+INSERT INTO @TraceTypes VALUES (17993	,'Inline Table-valued SQL Function')
+INSERT INTO @TraceTypes VALUES (18000	,'Partition Function')
+INSERT INTO @TraceTypes VALUES (18002	,'Replication Filter Procedure')
+INSERT INTO @TraceTypes VALUES (18004	,'Table-valued SQL Function')
+INSERT INTO @TraceTypes VALUES (18259	,'Server Role')
+INSERT INTO @TraceTypes VALUES (18263	,'Microsoft Windows Group')
+INSERT INTO @TraceTypes VALUES (19265	,'Asymmetric Key')
+INSERT INTO @TraceTypes VALUES (19277	,'Master Key')
+INSERT INTO @TraceTypes VALUES (19280	,'Primary Key')
+INSERT INTO @TraceTypes VALUES (19283	,'ObfusKey')
+INSERT INTO @TraceTypes VALUES (19521	,'Asymmetric Key Login')
+INSERT INTO @TraceTypes VALUES (19523	,'Certificate Login')
+INSERT INTO @TraceTypes VALUES (19538	,'Role')
+INSERT INTO @TraceTypes VALUES (19539	,'SQL Login')
+INSERT INTO @TraceTypes VALUES (19543	,'Windows Login')
+INSERT INTO @TraceTypes VALUES (20034	,'Remote Service Binding')
+INSERT INTO @TraceTypes VALUES (20036	,'Event Notification on Database')
+INSERT INTO @TraceTypes VALUES (20037	,'Event Notification')
+INSERT INTO @TraceTypes VALUES (20038	,'Scalar SQL Function')
+INSERT INTO @TraceTypes VALUES (20047	,'Event Notification on Object')
+INSERT INTO @TraceTypes VALUES (20051	,'Synonym')
+INSERT INTO @TraceTypes VALUES (20307	,'Sequence')
+INSERT INTO @TraceTypes VALUES (20549	,'End Point')
+INSERT INTO @TraceTypes VALUES (20801	,'Adhoc Queries which may be cached')
+INSERT INTO @TraceTypes VALUES (20816	,'Prepared Queries which may be cached')
+INSERT INTO @TraceTypes VALUES (20819	,'Service Broker Service Queue')
+INSERT INTO @TraceTypes VALUES (20821	,'Unique Constraint')
+INSERT INTO @TraceTypes VALUES (21057	,'Application Role')
+INSERT INTO @TraceTypes VALUES (21059	,'Certificate')
+INSERT INTO @TraceTypes VALUES (21075	,'Server')
+INSERT INTO @TraceTypes VALUES (21076	,'Transact-SQL Trigger')
+INSERT INTO @TraceTypes VALUES (21313	,'Assembly')
+INSERT INTO @TraceTypes VALUES (21318	,'CLR Scalar Function')
+INSERT INTO @TraceTypes VALUES (21321	,'Inline scalar SQL Function')
+INSERT INTO @TraceTypes VALUES (21328	,'Partition Scheme')
+INSERT INTO @TraceTypes VALUES (21333	,'User')
+INSERT INTO @TraceTypes VALUES (21571	,'Service Broker Service Contract')
+INSERT INTO @TraceTypes VALUES (21572	,'Trigger on Database')
+INSERT INTO @TraceTypes VALUES (21574	,'CLR Table-valued Function')
+INSERT INTO @TraceTypes VALUES (21577	,'Internal Table (For example, XML Node Table, Queue Table.)')
+INSERT INTO @TraceTypes VALUES (21581	,'Service Broker Message Type')
+INSERT INTO @TraceTypes VALUES (21586	,'Service Broker Route')
+INSERT INTO @TraceTypes VALUES (21587	,'Statistics')
+INSERT INTO @TraceTypes VALUES (21825	,'')
+INSERT INTO @TraceTypes VALUES (21827	,'')
+INSERT INTO @TraceTypes VALUES (21831	,'')
+INSERT INTO @TraceTypes VALUES (21843	,'')
+INSERT INTO @TraceTypes VALUES (21847	,'User')
+INSERT INTO @TraceTypes VALUES (22099	,'Service Broker Service')
+INSERT INTO @TraceTypes VALUES (22601	,'Index')
+INSERT INTO @TraceTypes VALUES (22604	,'Certificate Login')
+INSERT INTO @TraceTypes VALUES (22611	,'XMLSchema')
+INSERT INTO @TraceTypes VALUES (22868	,'Type')
 
 --https://www.ptr.co.uk/blog/how-improve-your-sql-server-speed
 --The script below can be use to search for automatic Log File Growths, using the background profiler trace that SQL Server maintains.
@@ -4365,14 +4421,57 @@ ORDER BY DBName
 	OPTION (RECOMPILE);
 
 	RAISERROR (N'Daily workload calculated',0,1) WITH NOWAIT;
-	
+
+/*----------------------------------------
+--Add Latest Blitz output
+----------------------------------------*/
+/*
+
+*/
+IF OBJECT_ID('master.dbo.sp_Blitz_output') IS NULL
+/*If no Blitz table, run Blitz*/
+BEGIN
+	RAISERROR (N'Skipping sp_Blitz results, cannot find output table',0,1) WITH NOWAIT;
+	--EXEC [dbo].[sp_Blitz] @CheckUserDatabaseObjects = 1 , @CheckProcedureCache = 1 , @OutputType = 'TABLE' , @OutputProcedureCache = 0 , @CheckServerInfo = 1, @OutputDatabaseName = 'master', @OutputSchemaName = 'dbo', @OutputTableName = 'sp_Blitz_output', @BringThePain = 1;
+END
+IF OBJECT_ID('master.dbo.sp_Blitz_output') IS NOT NULL
+BEGIN
+	RAISERROR (N'Found sp_Blitz results, only recent results will be evaluated',0,1) WITH NOWAIT;
+	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 999, 'Blitz from here','------','------'
+	INSERT INTO #output_man_script ( 
+	domain
+	,SQLInstance
+	,evaldate
+	,SectionID
+	,Section
+	,Summary
+	, Details )
+	EXEC ('
+	SELECT  DEFAULT_DOMAIN() [Domain]
+	,ServerName
+	, CONVERT(VARCHAR,CheckDate,120)
+	,CheckID --Priority + 1000
+	--, FindingsGroup,
+	, ''sp_Blitz:'' + Finding
+	, DatabaseName
+	, CONVERT(NVARCHAR(4000),Details)
+	FROM master.dbo.sp_Blitz_output 
+	WHERE CheckDate = (SELECT max([CheckDate]) FROM master.dbo.sp_Blitz_output HAVING DATEADD(DAY,-2,GETDATE()) < max([CheckDate]) )
+	ORDER BY id ASC'
+	)
+END
+
 			/*----------------------------------------
 			--select output
 			----------------------------------------*/
 RAISERROR (N'Cleaning up output table',0,1) WITH NOWAIT;
+DECLARE @ThisDomain NVARCHAR(100)
+EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE', 'SYSTEM\CurrentControlSet\services\Tcpip\Parameters', N'Domain',@ThisDomain OUTPUT
+
 UPDATE  #output_man_script
 SET evaldate = @evaldate
 , SQLInstance = @ThisServer
+, Domain = @ThisDomain
 
 
 
