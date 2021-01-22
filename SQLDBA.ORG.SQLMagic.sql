@@ -3772,8 +3772,7 @@ ELSE 0.015
 			WHEN s.Rows BETWEEN 5000000 AND 50000000 THEN 'WITH SAMPLE 10 PECENT'
 			WHEN s.Rows > 50000000 THEN 'WITH SAMPLE 52 PECENT'
 			ELSE 'WITH SAMPLE ' + CONVERT(VARCHAR(3),CONVERT(INT,EstPerc)*2) + 'PERCENT' 
-			END +'			
-			; PRINT ''[' + DBname + '].['+SchemaName+'].['+TableName+'] ['+StatisticsName+'] Done ''' [UpdateStats]
+			END +'; PRINT ''[' + DBname + '].['+SchemaName+'].['+TableName+'] ['+StatisticsName+'] Done ''' [UpdateStats]
 			, 0.15
 			 FROM #Action_Statistics s 
 			 ORDER BY s.[ModPerc] DESC OPTION (RECOMPILE);/*They are like little time capsules.. just sitting there.. waiting*/
