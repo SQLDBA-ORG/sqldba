@@ -1887,6 +1887,8 @@ DECLARE @Databases TABLE
 		, AGReplicaRole INT
 		, [BackupPref] NVARCHAR(250)
 		, [CurrentLocation] NVARCHAR(250)
+		, AGName NVARCHAR(250)
+		, [ReadSecondary] NVARCHAR(250)
 		
 	);
 	SET @dynamicSQL = 'SELECT 
@@ -1902,6 +1904,8 @@ DECLARE @Databases TABLE
 	, db.create_date
 	
 	, 1
+	, NULL
+	, NULL
 	, NULL
 	, NULL
 	FROM 
@@ -1935,6 +1939,8 @@ DECLARE @Databases TABLE
 	, LocalReplicaRole
 	, [BackupPref]
 	, [CurrentLocation]
+	, AGName
+	, [ReadSecondary]
 	FROM 
 	sys.databases db 
 	LEFT OUTER JOIN(
@@ -1951,7 +1957,8 @@ DECLARE @Databases TABLE
 	, AR.availability_mode_desc
 	, agstates.primary_replica [CurrentLocation]
 
-
+	, AG.name AGName
+	, AR.secondary_role_allow_connections_desc [ReadSecondary]
 	FROM master.sys.availability_groups AS AG
 	LEFT OUTER JOIN master.sys.dm_hadr_availability_group_states as agstates
 	   ON AG.group_id = agstates.group_id
@@ -2391,6 +2398,8 @@ DECLARE @DatabasesForLOG TABLE
 		, AGReplicaRole INT
 		, [BackupPref] NVARCHAR(250)
 		, [CurrentLocation] NVARCHAR(250)
+		, AGName NVARCHAR(250)
+		, [ReadSecondary] NVARCHAR(250)
 	);
 
 INSERT INTO @DatabasesForLOG
@@ -2574,7 +2583,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			--Look for backups and recovery model information
 			----------------------------------------*/
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 9, 'DATABASE - RPO in minutes and RTO in 15 min slices'
-	,'DB;Compat;recovery_model;Best RTO HH:MM:SS ;Last Full;Last TL;DateCreated','MM:SS'
+	,'DB;Compat;recovery_model;Best RTO HH:MM:SS ;Last Full;Last TL;DateCreated;AGName;ReadSecondary','MM:SS'
 	INSERT #output_man_script (SectionID, Section,Summary, HoursToResolveWithTesting ) /* Had to change to DAYS thanks to some clients*/
 	SELECT 9, 
 	CONVERT(VARCHAR(20),DATEDIFF(HOUR,CASE 
@@ -2588,6 +2597,8 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),x.[Last Full],120),'')
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),x.[Last Transaction Log],120),'')
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),x.create_date,120),'')
+	+ '; ' + ISNULL(x.AGName,'')
+	+ '; ' + ISNULL(x.ReadSecondary,'')
 	)
 	, 
 	CONVERT(VARCHAR(20),CASE 
@@ -2617,7 +2628,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 
 	FROM 
 	(
-		SELECT  DB_NAME(dbs.database_id) [database_name], dbs.[compatibility_level] , dbs.recovery_model_desc [recovery_model]
+		SELECT  DB_NAME(dbs.database_id) [database_name], dbs.[compatibility_level] , dbs.recovery_model_desc [recovery_model],D.AGName, D.ReadSecondary
 		, MAX(DATEDIFF(SECOND,backup_start_date, backup_finish_date)) 'Timetaken'
 		, MAX(CASE WHEN  type = 'D' THEN backup_finish_date ELSE 0 END) 'Last Full'   
 		, MIN(CASE WHEN  type = 'D' THEN backup_start_date ELSE 0 END) 'First Full'             
@@ -2631,7 +2642,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 		
 		AND dbs.recovery_model_desc COLLATE DATABASE_DEFAULT = bs.recovery_model COLLATE DATABASE_DEFAULT
 		/*Do not filter out only databases with backups.. some have never had.. --WHERE type IN ('D', 'L')*/
-		GROUP BY dbs.database_id, dbs.[compatibility_level],dbs.recovery_model_desc
+		GROUP BY dbs.database_id, dbs.[compatibility_level],dbs.recovery_model_desc,D.AGName, D.ReadSecondary
 	) x 
 	ORDER BY [Last Full] ASC
 	OPTION (RECOMPILE);
@@ -2765,12 +2776,18 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	, NULL
 	FROM @LogSpace 
 	OPTION (RECOMPILE)
+	DECLARE @SecondaryReadRole NVARCHAR(250)
+	DECLARE @AGBackupPref NVARCHAR(250)
 
 	SET @Databasei_Count = 1; 
 	WHILE @Databasei_Count <= @Databasei_Max 
 	BEGIN 
-		SELECT @DatabaseName = d.databasename, @DatabaseState = d.state FROM @Databases d WHERE id = @Databasei_Count AND d.state NOT IN (2,6)
-		IF EXISTS( SELECT @DatabaseName)
+		SELECT @DatabaseName = d.databasename
+		, @DatabaseState = d.state 
+		, @AGBackupPref = BackupPref
+		, @SecondaryReadRole = ReadSecondary
+		FROM @Databases d WHERE id = @Databasei_Count AND d.state NOT IN (2,6)
+		IF (@SecondaryReadRole <> 'NO' AND @AGBackupPref <> 'primary') AND EXISTS( SELECT @DatabaseName)
 		BEGIN
 			SET @dynamicSQL = 'USE [' + @DatabaseName + '];
 			DBCC showfilestats WITH NO_INFOMSGS;'
@@ -3382,11 +3399,17 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	BEGIN 
 	
 		
-		SELECT @DatabaseName = d.databasename, @DatabaseState = d.state FROM @Databases d WHERE id = @Databasei_Count AND d.state NOT IN (2,6) OPTION (RECOMPILE)
+		SELECT @DatabaseName = d.databasename
+		, @DatabaseState = d.state 
+		, @AGBackupPref = BackupPref
+		, @SecondaryReadRole = ReadSecondary
+		FROM @Databases d WHERE id = @Databasei_Count AND d.state NOT IN (2,6)
+
+		OPTION (RECOMPILE)
 		SET @ErrorMessage = 'Looping Database ' + CONVERT(VARCHAR(4),@Databasei_Count) +' of ' + CONVERT(VARCHAR(4),@Databasei_Max ) + ': [' + @DatabaseName + '] ';
 		IF @Debug = 0
 			RAISERROR (@ErrorMessage,0,1) WITH NOWAIT;
-		IF EXISTS( SELECT @DatabaseName)
+		IF (@SecondaryReadRole <> 'NO' AND @AGBackupPref <> 'primary') AND EXISTS( SELECT @DatabaseName)
 		BEGIN  
 			
 		
@@ -3656,11 +3679,11 @@ ELSE 0.015
 		INSERT #output_man_script (SectionID, Section,Summary ,Severity, Details,HoursToResolveWithTesting )
 			SELECT 18
 			, REPLICATE('|',ROUND(LOG(T1.magic_benefit_number),0)) + ' ' + CONVERT(VARCHAR(20),LOG(T1.magic_benefit_number)) + '' 
-			, 'Benefit:'+  CONVERT(VARCHAR(20),CONVERT(BIGINT,T1.magic_benefit_number),0)
+			, CONVERT(NVARCHAR(4000),'Benefit:'+  CONVERT(VARCHAR(20),CONVERT(BIGINT,T1.magic_benefit_number),0)
 			+ '; ' + T1.[Table]
 			+ '; Eq:' + ISNULL(T1.equality_columns,'')
 			+ '; Ineq:' +  ISNULL(T1.inequality_columns,'')
-			+ '; Incl:' +  ISNULL(T1.included_columns,'')
+			+ '; Incl:' +  ISNULL(T1.included_columns,''))
 			,CASE WHEN LOG(T1.magic_benefit_number)  < 13 THEN @Result_Warning 
 			WHEN LOG(T1.magic_benefit_number) >= 13 AND LOG(T1.magic_benefit_number) < 20 THEN @Result_YourServerIsDead  
 			WHEN LOG(T1.magic_benefit_number) >= 20  THEN @Result_ReallyBad
@@ -3768,9 +3791,9 @@ ELSE 0.015
 			
 			+ CASE 
 			WHEN s.Rows BETWEEN 0 AND 500000 THEN 'WITH FULLSCAN' 
-			WHEN s.Rows BETWEEN 500000 AND 5000000 THEN 'WITH SAMPLE 20 PECENT'
-			WHEN s.Rows BETWEEN 5000000 AND 50000000 THEN 'WITH SAMPLE 10 PECENT'
-			WHEN s.Rows > 50000000 THEN 'WITH SAMPLE 52 PECENT'
+			WHEN s.Rows BETWEEN 500000 AND 5000000 THEN 'WITH SAMPLE 20 PERCENT'
+			WHEN s.Rows BETWEEN 5000000 AND 50000000 THEN 'WITH SAMPLE 10 PERCENT'
+			WHEN s.Rows > 50000000 THEN 'WITH SAMPLE 5 PERCENT'
 			ELSE 'WITH SAMPLE ' + CONVERT(VARCHAR(3),CONVERT(INT,EstPerc)*2) + 'PERCENT' 
 			END +'; PRINT ''[' + DBname + '].['+SchemaName+'].['+TableName+'] ['+StatisticsName+'] Done ''' [UpdateStats]
 			, 0.15
@@ -4937,6 +4960,7 @@ IF @Debug = 0
 		RAISERROR (N'Cleaning up output table',0,1) WITH NOWAIT;
 DECLARE @ThisDomain NVARCHAR(100)
 EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE', 'SYSTEM\CurrentControlSet\services\Tcpip\Parameters', N'Domain',@ThisDomain OUTPUT
+SET @ThisDomain = ISNULL(@ThisDomain, DEFAULT_DOMAIN())
 
 UPDATE  #output_man_script
 SET evaldate = @evaldate
@@ -4973,11 +4997,11 @@ BEGIN
 	( 
 	ID INT
 	,  evaldate NVARCHAR(20)
-	, domain NVARCHAR(50)
-	, SQLInstance NVARCHAR(50)
+	, domain NVARCHAR(505)
+	, SQLInstance NVARCHAR(505)
 	, SectionID INT
-	, Section NVARCHAR(2000)
-	, Summary NVARCHAR(2000)
+	, Section NVARCHAR(4000)
+	, Summary NVARCHAR(4000)
 	, Severity NVARCHAR(5)
 	, Details NVARCHAR(4000)
 	, HoursToResolveWithTesting MONEY 
@@ -5176,6 +5200,7 @@ ORDER BY Sorter ASC
 						 @query_attachment_filename =@AttachfileName,
 						 @attach_query_result_as_file = 1,
 						 @query_result_header = 0,/*Set to 0 to Turn Headers off, makes for better CSV files as long as we include headers in Select statement*/
+						  @execute_query_database = @ExportDBName, 
 						 @query_result_width = 32767,
 						 @append_query_error = 1,
 						 @query_result_no_padding = 1,
