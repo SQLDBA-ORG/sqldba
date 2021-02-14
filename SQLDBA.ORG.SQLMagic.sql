@@ -690,61 +690,88 @@ END CATCH
 
 		IF OBJECT_ID('tempdb..#IgnorableWaits') IS NOT NULL
 			DROP TABLE #IgnorableWaits;
-		CREATE TABLE #IgnorableWaits (wait_type NVARCHAR(60));
-		INSERT INTO #IgnorableWaits VALUES ('BROKER_EVENTHANDLER');
-		INSERT INTO #IgnorableWaits VALUES ('BROKER_RECEIVE_WAITFOR');
-		INSERT INTO #IgnorableWaits VALUES ('BROKER_TASK_STOP');
-		INSERT INTO #IgnorableWaits VALUES ('BROKER_TO_FLUSH');
-		INSERT INTO #IgnorableWaits VALUES ('BROKER_TRANSMITTER');
-		INSERT INTO #IgnorableWaits VALUES ('CHECKPOINT_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('CLR_AUTO_EVENT');
-		INSERT INTO #IgnorableWaits VALUES ('CLR_MANUAL_EVENT');
-		INSERT INTO #IgnorableWaits VALUES ('CLR_SEMAPHORE');
-		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_DBM_EVENT');
-		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_DBM_MUTEX');
-		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_EVENTS_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_WORKER_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('DBMIRRORING_CMD');
-		INSERT INTO #IgnorableWaits VALUES ('DIRTY_PAGE_POLL');
-		INSERT INTO #IgnorableWaits VALUES ('DISPATCHER_QUEUE_SEMAPHORE');
-		INSERT INTO #IgnorableWaits VALUES ('FT_IFTS_SCHEDULER_IDLE_WAIT');
-		INSERT INTO #IgnorableWaits VALUES ('FT_IFTSHC_MUTEX');
-		INSERT INTO #IgnorableWaits VALUES ('HADR_CLUSAPI_CALL');
-		INSERT INTO #IgnorableWaits VALUES ('HADR_FABRIC_CALLBACK');
-		INSERT INTO #IgnorableWaits VALUES ('HADR_FILESTREAM_IOMGR_IOCOMPLETION');
-		INSERT INTO #IgnorableWaits VALUES ('HADR_LOGCAPTURE_WAIT');
-		INSERT INTO #IgnorableWaits VALUES ('HADR_NOTIFICATION_DEQUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('HADR_TIMER_TASK');
-		INSERT INTO #IgnorableWaits VALUES ('HADR_WORK_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('LAZYWRITER_SLEEP');
-		INSERT INTO #IgnorableWaits VALUES ('LOGMGR_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('ONDEMAND_TASK_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_DRAIN_WORKER');
-		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_LOG_CACHE');
-		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_TRAN_LIST');
-		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_WORKER_SYNC');
-		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_WORKER_WAIT_WORK');
-		INSERT INTO #IgnorableWaits VALUES ('PREEMPTIVE_HADR_LEASE_MECHANISM');
-		INSERT INTO #IgnorableWaits VALUES ('PREEMPTIVE_SP_SERVER_DIAGNOSTICS');
-		INSERT INTO #IgnorableWaits VALUES ('QDS_ASYNC_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP');
-		INSERT INTO #IgnorableWaits VALUES ('QDS_PERSIST_TASK_MAIN_LOOP_SLEEP');
-		INSERT INTO #IgnorableWaits VALUES ('QDS_SHUTDOWN_QUEUE');
-		INSERT INTO #IgnorableWaits VALUES ('REDO_THREAD_PENDING_WORK');
-		INSERT INTO #IgnorableWaits VALUES ('REQUEST_FOR_DEADLOCK_SEARCH');
-		INSERT INTO #IgnorableWaits VALUES ('SLEEP_SYSTEMTASK');
-		INSERT INTO #IgnorableWaits VALUES ('SLEEP_TASK');
-		INSERT INTO #IgnorableWaits VALUES ('SOS_WORK_DISPATCHER');
-		INSERT INTO #IgnorableWaits VALUES ('SP_SERVER_DIAGNOSTICS_SLEEP');
-		INSERT INTO #IgnorableWaits VALUES ('SQLTRACE_BUFFER_FLUSH');
-		INSERT INTO #IgnorableWaits VALUES ('SQLTRACE_INCREMENTAL_FLUSH_SLEEP');
-		INSERT INTO #IgnorableWaits VALUES ('UCS_SESSION_REGISTRATION');
-		INSERT INTO #IgnorableWaits VALUES ('WAIT_XTP_OFFLINE_CKPT_NEW_LOG');
-		INSERT INTO #IgnorableWaits VALUES ('WAITFOR');
-		INSERT INTO #IgnorableWaits VALUES ('XE_DISPATCHER_WAIT');
-		INSERT INTO #IgnorableWaits VALUES ('XE_LIVE_TARGET_TVF');
-		INSERT INTO #IgnorableWaits VALUES ('XE_TIMER_EVENT');
+		CREATE TABLE #IgnorableWaits (wait_type NVARCHAR(60), Source NVARCHAR(500));
+		INSERT INTO #IgnorableWaits VALUES ('BROKER_EVENTHANDLER','');
+		INSERT INTO #IgnorableWaits VALUES ('BROKER_RECEIVE_WAITFOR','');
+		INSERT INTO #IgnorableWaits VALUES ('BROKER_TASK_STOP','');
+		INSERT INTO #IgnorableWaits VALUES ('BROKER_TO_FLUSH','');
+		INSERT INTO #IgnorableWaits VALUES ('BROKER_TRANSMITTER','');
+		INSERT INTO #IgnorableWaits VALUES ('CHECKPOINT_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('CLR_AUTO_EVENT','');
+		INSERT INTO #IgnorableWaits VALUES ('CLR_MANUAL_EVENT','');
+		INSERT INTO #IgnorableWaits VALUES ('CLR_SEMAPHORE','');
+		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_DBM_EVENT','');
+		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_DBM_MUTEX','');
+		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_EVENTS_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('DBMIRROR_WORKER_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('DBMIRRORING_CMD','');
+		INSERT INTO #IgnorableWaits VALUES ('DIRTY_PAGE_POLL','');
+		INSERT INTO #IgnorableWaits VALUES ('DISPATCHER_QUEUE_SEMAPHORE','');
+		INSERT INTO #IgnorableWaits VALUES ('FT_IFTS_SCHEDULER_IDLE_WAIT','');
+		INSERT INTO #IgnorableWaits VALUES ('FT_IFTSHC_MUTEX','');
+		INSERT INTO #IgnorableWaits VALUES ('HADR_CLUSAPI_CALL','');
+		INSERT INTO #IgnorableWaits VALUES ('HADR_FABRIC_CALLBACK','');
+		INSERT INTO #IgnorableWaits VALUES ('HADR_FILESTREAM_IOMGR_IOCOMPLETION','');
+		INSERT INTO #IgnorableWaits VALUES ('HADR_LOGCAPTURE_WAIT','');
+		INSERT INTO #IgnorableWaits VALUES ('HADR_NOTIFICATION_DEQUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('HADR_TIMER_TASK','');
+		INSERT INTO #IgnorableWaits VALUES ('HADR_WORK_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('LAZYWRITER_SLEEP','');
+		INSERT INTO #IgnorableWaits VALUES ('LOGMGR_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('ONDEMAND_TASK_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_DRAIN_WORKER','');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_LOG_CACHE','');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_TRAN_LIST','');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_WORKER_SYNC','');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_WORKER_WAIT_WORK','');
+		INSERT INTO #IgnorableWaits VALUES ('PREEMPTIVE_HADR_LEASE_MECHANISM','');
+		INSERT INTO #IgnorableWaits VALUES ('PREEMPTIVE_SP_SERVER_DIAGNOSTICS','');
+		INSERT INTO #IgnorableWaits VALUES ('QDS_ASYNC_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP','');
+		INSERT INTO #IgnorableWaits VALUES ('QDS_PERSIST_TASK_MAIN_LOOP_SLEEP','');
+		INSERT INTO #IgnorableWaits VALUES ('QDS_SHUTDOWN_QUEUE','');
+		INSERT INTO #IgnorableWaits VALUES ('REDO_THREAD_PENDING_WORK','');
+		INSERT INTO #IgnorableWaits VALUES ('REQUEST_FOR_DEADLOCK_SEARCH','');
+		INSERT INTO #IgnorableWaits VALUES ('SLEEP_SYSTEMTASK','');
+		INSERT INTO #IgnorableWaits VALUES ('SLEEP_TASK','');
+		INSERT INTO #IgnorableWaits VALUES ('SOS_WORK_DISPATCHER','');
+		INSERT INTO #IgnorableWaits VALUES ('SP_SERVER_DIAGNOSTICS_SLEEP','');
+		INSERT INTO #IgnorableWaits VALUES ('SQLTRACE_BUFFER_FLUSH','');
+		INSERT INTO #IgnorableWaits VALUES ('SQLTRACE_INCREMENTAL_FLUSH_SLEEP','');
+		INSERT INTO #IgnorableWaits VALUES ('UCS_SESSION_REGISTRATION','');
+		INSERT INTO #IgnorableWaits VALUES ('WAIT_XTP_OFFLINE_CKPT_NEW_LOG','');
+		INSERT INTO #IgnorableWaits VALUES ('WAITFOR','');
+		INSERT INTO #IgnorableWaits VALUES ('XE_DISPATCHER_WAIT','');
+		INSERT INTO #IgnorableWaits VALUES ('XE_LIVE_TARGET_TVF','');
+		INSERT INTO #IgnorableWaits VALUES ('XE_TIMER_EVENT','');
 
+        INSERT INTO #IgnorableWaits VALUES ('CHKPT', 'https://www.sqlskills.com/help/waits/CHKPT');
+        INSERT INTO #IgnorableWaits VALUES ('EXECSYNC', 'https://www.sqlskills.com/help/waits/EXECSYNC');
+        INSERT INTO #IgnorableWaits VALUES ('FSAGENT', 'https://www.sqlskills.com/help/waits/FSAGENT');
+        INSERT INTO #IgnorableWaits VALUES ('KSOURCE_WAKEUP', 'https://www.sqlskills.com/help/waits/KSOURCE_WAKEUP');
+        INSERT INTO #IgnorableWaits VALUES ('MEMORY_ALLOCATION_EXT', 'https://www.sqlskills.com/help/waits/MEMORY_ALLOCATION_EXT');
+        INSERT INTO #IgnorableWaits VALUES ('PREEMPTIVE_XE_GETTARGETSTATE', 'https://www.sqlskills.com/help/waits/PREEMPTIVE_XE_GETTARGETSTATE');
+        INSERT INTO #IgnorableWaits VALUES ('PWAIT_ALL_COMPONENTS_INITIALIZED', 'https://www.sqlskills.com/help/waits/PWAIT_ALL_COMPONENTS_INITIALIZED');
+        INSERT INTO #IgnorableWaits VALUES ('PWAIT_DIRECTLOGCONSUMER_GETNEXT', 'https://www.sqlskills.com/help/waits/PWAIT_DIRECTLOGCONSUMER_GETNEXT');
+        INSERT INTO #IgnorableWaits VALUES ('RESOURCE_QUEUE', 'https://www.sqlskills.com/help/waits/RESOURCE_QUEUE');
+        INSERT INTO #IgnorableWaits VALUES ('SERVER_IDLE_CHECK', 'https://www.sqlskills.com/help/waits/SERVER_IDLE_CHECK');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_BPOOL_FLUSH', 'https://www.sqlskills.com/help/waits/SLEEP_BPOOL_FLUSH');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_DBSTARTUP', 'https://www.sqlskills.com/help/waits/SLEEP_DBSTARTUP');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_DCOMSTARTUP', 'https://www.sqlskills.com/help/waits/SLEEP_DCOMSTARTUP');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_MASTERDBREADY', 'https://www.sqlskills.com/help/waits/SLEEP_MASTERDBREADY');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_MASTERMDREADY', 'https://www.sqlskills.com/help/waits/SLEEP_MASTERMDREADY');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_MASTERUPGRADED', 'https://www.sqlskills.com/help/waits/SLEEP_MASTERUPGRADED');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_MSDBSTARTUP', 'https://www.sqlskills.com/help/waits/SLEEP_MSDBSTARTUP');
+        INSERT INTO #IgnorableWaits VALUES ('SLEEP_TEMPDBSTARTUP', 'https://www.sqlskills.com/help/waits/SLEEP_TEMPDBSTARTUP');
+        INSERT INTO #IgnorableWaits VALUES ('SNI_HTTP_ACCEPT', 'https://www.sqlskills.com/help/waits/SNI_HTTP_ACCEPT');
+		INSERT INTO #IgnorableWaits VALUES ('SQLTRACE_WAIT_ENTRIES', 'https://www.sqlskills.com/help/waits/SQLTRACE_WAIT_ENTRIES');
+        INSERT INTO #IgnorableWaits VALUES ('WAIT_FOR_RESULTS', 'https://www.sqlskills.com/help/waits/WAIT_FOR_RESULTS');
+		INSERT INTO #IgnorableWaits VALUES ('WAIT_XTP_CKPT_CLOSE', 'https://www.sqlskills.com/help/waits/WAIT_XTP_CKPT_CLOSE');
+		INSERT INTO #IgnorableWaits VALUES ('XE_DISPATCHER_JOIN', 'https://www.sqlskills.com/help/waits/XE_DISPATCHER_JOIN');
+		INSERT INTO #IgnorableWaits VALUES ('WAITFOR_TASKSHUTDOWN', 'https://www.sqlskills.com/help/waits/WAITFOR_TASKSHUTDOWN');
+        INSERT INTO #IgnorableWaits VALUES ('WAIT_XTP_RECOVERY', 'https://www.sqlskills.com/help/waits/WAIT_XTP_RECOVERY');
+        INSERT INTO #IgnorableWaits VALUES ('WAIT_XTP_HOST_WAIT', 'https://www.sqlskills.com/help/waits/WAIT_XTP_HOST_WAIT');
+        INSERT INTO #IgnorableWaits VALUES ('WAIT_XTP_OFFLINE_CKPT_NEW_LOG', 'https://www.sqlskills.com/help/waits/WAIT_XTP_OFFLINE_CKPT_NEW_LOG');
 --the blitz
 
 	IF CONVERT( TINYINT ,@SQLVersion) >= 11 -- post-SQL2012 
@@ -1652,20 +1679,57 @@ WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
 		, DATEADD(ms,-1 *(@ts - [timestamp]), GETDATE())AS [Event_Time]
 		FROM 
 		(
-			SELECT 
-			record.value('(./Record/@id)[1]','int') AS record_id
-			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]','int') AS [SystemIdle]
-			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]','int') AS [SQLProcessUtilization]
-			, [timestamp]
-			FROM 
-			(
-				SELECT
-				[timestamp]
-				, convert(xml, record) AS [record] 
-				FROM sys.dm_os_ring_buffers 
-				WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
-				AND record LIKE'%%'
-			)AS x
+             SELECT JSON_VALUE([record JSON], '$."Record id"') AS record_id
+             ,JSON_VALUE([record JSON], '$."SystemIdle"') AS [SystemIdle]
+             ,JSON_VALUE([record JSON], '$."ProcessUtilization"') AS [SQLProcessUtilization]
+             ,orb.[timestamp]
+             FROM (
+             SELECT 
+             [timestamp]
+             ,
+             REPLACE(
+			 REPLACE(
+             REPLACE(
+		     REPLACE(
+             REPLACE(
+		     REPLACE(
+             REPLACE(
+			 REPLACE(
+             REPLACE(
+			 REPLACE(
+             REPLACE(
+			 REPLACE(
+             REPLACE(
+			 REPLACE(
+             REPLACE(
+			 REPLACE(
+			 REPLACE(
+			 REPLACE(
+			 REPLACE(
+        record
+             ,'</ProcessUtilization>','",')
+             , '<ProcessUtilization>',',"ProcessUtilization":"')
+             ,'</SystemIdle>','",')
+             , '<SystemIdle>','"SystemIdle":"')
+             , '</UserModeTime>','",')
+             , '<UserModeTime>','"UserModeTime":"')
+             , '</KernelModeTime>','",')
+             , '<KernelModeTime>','"KernelModeTime":"')
+             , '</PageFaults>','",')
+             , '<PageFaults>','"PageFaults":"')
+             , '</WorkingSetDelta>','",')
+             , '<WorkingSetDelta>','"WorkingSetDelta":"')
+             , '</MemoryUtilization>','",')
+             , '<MemoryUtilization>','"MemoryUtilization":"')
+             , '<Record id = ','{"Record id":')
+             , ' type =',',"type":')
+             , ' time =',',"time":')
+             ,'><SchedulerMonitorEvent><SystemHealth>','')
+             ,',</SystemHealth></SchedulerMonitorEvent></Record>','}') [record JSON]
+             FROM sys.dm_os_ring_buffers 
+             WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+             AND record LIKE'%%'
+          )orb
 		) as y
 	
 
@@ -2128,20 +2192,58 @@ DECLARE @Databases TABLE
 		, GETDATE())AS [Event_Time]
 		FROM 
 		(
-			SELECT 
-			record.value('(./Record/@id)[1]','int') AS record_id
-			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]','int') AS [SystemIdle]
-			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]','int') AS [SQLProcessUtilization]
-			, [timestamp]
-			FROM 
-			(
-				SELECT
-				[timestamp]
-				, convert(xml, record) AS [record] 
-				FROM sys.dm_os_ring_buffers 
-				WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
-				AND record LIKE'%%'
-			)AS x
+
+             SELECT JSON_VALUE([record JSON], '$."Record id"') AS record_id
+             ,CONVERT(MONEY,JSON_VALUE([record JSON], '$."SystemIdle"')) AS [SystemIdle]
+             ,CONVERT(MONEY,JSON_VALUE([record JSON], '$."ProcessUtilization"')) AS [SQLProcessUtilization]
+             ,orb.[timestamp]
+             FROM (
+             SELECT 
+             [timestamp]
+             ,
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+             REPLACE(
+        record
+             ,'</ProcessUtilization>','",')
+             , '<ProcessUtilization>',',"ProcessUtilization":"')
+             ,'</SystemIdle>','",')
+             , '<SystemIdle>','"SystemIdle":"')
+             , '</UserModeTime>','",')
+             , '<UserModeTime>','"UserModeTime":"')
+             , '</KernelModeTime>','",')
+             , '<KernelModeTime>','"KernelModeTime":"')
+             , '</PageFaults>','",')
+             , '<PageFaults>','"PageFaults":"')
+             , '</WorkingSetDelta>','",')
+             , '<WorkingSetDelta>','"WorkingSetDelta":"')
+             , '</MemoryUtilization>','",')
+             , '<MemoryUtilization>','"MemoryUtilization":"')
+             , '<Record id = ','{"Record id":')
+             , ' type =',',"type":')
+             , ' time =',',"time":')
+             , '><SchedulerMonitorEvent><SystemHealth>','')
+             , ',</SystemHealth></SchedulerMonitorEvent></Record>','}') [record JSON]
+             FROM sys.dm_os_ring_buffers 
+             WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+             AND record LIKE'%%'
+              )orb
 		) as y
 	) T1
 	HAVING AVG(T1.SQLProcessUtilization) >= (CASE WHEN @ShowWarnings = 1 THEN 20 ELSE 0 END)
@@ -3011,7 +3113,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	INSERT #output_man_script (SectionID, Section,Summary,Severity,HoursToResolveWithTesting )
 	SELECT TOP 10 15,
 	REPLICATE ('|', 100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER())+ REPLICATE ('''', 100- 100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER()) + CONVERT(VARCHAR(20), CONVERT(INT,ROUND(100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER(),0))) + '%'
-	, [wait_type] + ':' 
+	, S.[wait_type] + ':' 
 	+ ';HH:' + CONVERT(VARCHAR(20),CONVERT(MONEY,SUM(wait_time_ms / 1000.0 / 60 / 60) OVER (PARTITION BY wait_type)))
 	+ ':MM/HH/VCPU:' + CONVERT(VARCHAR(20),CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY wait_type) / @minutesSinceRestart /60000/@CPUcount))
 	+'; Wait(s):'+ CONVERT(VARCHAR(20),CONVERT(BIGINT,[wait_time_ms] / 1000.0)) + '(s)'
@@ -3021,94 +3123,16 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY wait_type) / @minutesSinceRestart /60000/@CPUcount) > 30 THEN  @Result_YourServerIsDead
 		ELSE @Result_Good END
 	, CASE 
-		WHEN [wait_type] = 'CXPACKET' THEN 5
-		WHEN [wait_type] LIKE 'PAGEIOLATCH%' THEN 8
+		WHEN S.[wait_type] = 'CXPACKET' THEN 5
+		WHEN S.[wait_type] LIKE 'PAGEIOLATCH%' THEN 8
 		ELSE 0
 	END
 
 
-	FROM sys.dm_os_wait_stats
-	WHERE 
-	[wait_type] NOT IN (
-	/*[Last updated: November 27, 2017]*/
-		-- These wait types are almost 100% never a problem and so they are
-        -- filtered out to avoid them skewing the results. Click on the URL
-        -- for more information.
-        N'BROKER_EVENTHANDLER', -- https://www.sqlskills.com/help/waits/BROKER_EVENTHANDLER
-        N'BROKER_RECEIVE_WAITFOR', -- https://www.sqlskills.com/help/waits/BROKER_RECEIVE_WAITFOR
-        N'BROKER_TASK_STOP', -- https://www.sqlskills.com/help/waits/BROKER_TASK_STOP
-        N'BROKER_TO_FLUSH', -- https://www.sqlskills.com/help/waits/BROKER_TO_FLUSH
-        N'BROKER_TRANSMITTER', -- https://www.sqlskills.com/help/waits/BROKER_TRANSMITTER
-        N'CHECKPOINT_QUEUE', -- https://www.sqlskills.com/help/waits/CHECKPOINT_QUEUE
-        N'CHKPT', -- https://www.sqlskills.com/help/waits/CHKPT
-        N'CLR_AUTO_EVENT', -- https://www.sqlskills.com/help/waits/CLR_AUTO_EVENT
-        N'CLR_MANUAL_EVENT', -- https://www.sqlskills.com/help/waits/CLR_MANUAL_EVENT
-        N'CLR_SEMAPHORE', -- https://www.sqlskills.com/help/waits/CLR_SEMAPHORE
- 
-        -- Maybe comment these four out if you have mirroring issues
-        N'DBMIRROR_DBM_EVENT', -- https://www.sqlskills.com/help/waits/DBMIRROR_DBM_EVENT
-        N'DBMIRROR_EVENTS_QUEUE', -- https://www.sqlskills.com/help/waits/DBMIRROR_EVENTS_QUEUE
-        N'DBMIRROR_WORKER_QUEUE', -- https://www.sqlskills.com/help/waits/DBMIRROR_WORKER_QUEUE
-        N'DBMIRRORING_CMD', -- https://www.sqlskills.com/help/waits/DBMIRRORING_CMD
- 
-        N'DIRTY_PAGE_POLL', -- https://www.sqlskills.com/help/waits/DIRTY_PAGE_POLL
-        N'DISPATCHER_QUEUE_SEMAPHORE', -- https://www.sqlskills.com/help/waits/DISPATCHER_QUEUE_SEMAPHORE
-        N'EXECSYNC', -- https://www.sqlskills.com/help/waits/EXECSYNC
-        N'FSAGENT', -- https://www.sqlskills.com/help/waits/FSAGENT
-        N'FT_IFTS_SCHEDULER_IDLE_WAIT', -- https://www.sqlskills.com/help/waits/FT_IFTS_SCHEDULER_IDLE_WAIT
-        N'FT_IFTSHC_MUTEX', -- https://www.sqlskills.com/help/waits/FT_IFTSHC_MUTEX
- 
-        -- Maybe comment these six out if you have AG issues
-        N'HADR_CLUSAPI_CALL', -- https://www.sqlskills.com/help/waits/HADR_CLUSAPI_CALL
-        N'HADR_FILESTREAM_IOMGR_IOCOMPLETION', -- https://www.sqlskills.com/help/waits/HADR_FILESTREAM_IOMGR_IOCOMPLETION
-        N'HADR_LOGCAPTURE_WAIT', -- https://www.sqlskills.com/help/waits/HADR_LOGCAPTURE_WAIT
-        N'HADR_NOTIFICATION_DEQUEUE', -- https://www.sqlskills.com/help/waits/HADR_NOTIFICATION_DEQUEUE
-        N'HADR_TIMER_TASK', -- https://www.sqlskills.com/help/waits/HADR_TIMER_TASK
-        N'HADR_WORK_QUEUE', -- https://www.sqlskills.com/help/waits/HADR_WORK_QUEUE
- 
-        N'KSOURCE_WAKEUP', -- https://www.sqlskills.com/help/waits/KSOURCE_WAKEUP
-        N'LAZYWRITER_SLEEP', -- https://www.sqlskills.com/help/waits/LAZYWRITER_SLEEP
-        N'LOGMGR_QUEUE', -- https://www.sqlskills.com/help/waits/LOGMGR_QUEUE
-        N'MEMORY_ALLOCATION_EXT', -- https://www.sqlskills.com/help/waits/MEMORY_ALLOCATION_EXT
-        N'ONDEMAND_TASK_QUEUE', -- https://www.sqlskills.com/help/waits/ONDEMAND_TASK_QUEUE
-        N'PREEMPTIVE_XE_GETTARGETSTATE', -- https://www.sqlskills.com/help/waits/PREEMPTIVE_XE_GETTARGETSTATE
-        N'PWAIT_ALL_COMPONENTS_INITIALIZED', -- https://www.sqlskills.com/help/waits/PWAIT_ALL_COMPONENTS_INITIALIZED
-        N'PWAIT_DIRECTLOGCONSUMER_GETNEXT', -- https://www.sqlskills.com/help/waits/PWAIT_DIRECTLOGCONSUMER_GETNEXT
-        N'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP', -- https://www.sqlskills.com/help/waits/QDS_PERSIST_TASK_MAIN_LOOP_SLEEP
-        N'QDS_ASYNC_QUEUE', -- https://www.sqlskills.com/help/waits/QDS_ASYNC_QUEUE
-        N'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
-            -- https://www.sqlskills.com/help/waits/QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP
-        N'QDS_SHUTDOWN_QUEUE', -- https://www.sqlskills.com/help/waits/QDS_SHUTDOWN_QUEUE
-        N'REDO_THREAD_PENDING_WORK', -- https://www.sqlskills.com/help/waits/REDO_THREAD_PENDING_WORK
-        N'REQUEST_FOR_DEADLOCK_SEARCH', -- https://www.sqlskills.com/help/waits/REQUEST_FOR_DEADLOCK_SEARCH
-        N'RESOURCE_QUEUE', -- https://www.sqlskills.com/help/waits/RESOURCE_QUEUE
-        N'SERVER_IDLE_CHECK', -- https://www.sqlskills.com/help/waits/SERVER_IDLE_CHECK
-        N'SLEEP_BPOOL_FLUSH', -- https://www.sqlskills.com/help/waits/SLEEP_BPOOL_FLUSH
-        N'SLEEP_DBSTARTUP', -- https://www.sqlskills.com/help/waits/SLEEP_DBSTARTUP
-        N'SLEEP_DCOMSTARTUP', -- https://www.sqlskills.com/help/waits/SLEEP_DCOMSTARTUP
-        N'SLEEP_MASTERDBREADY', -- https://www.sqlskills.com/help/waits/SLEEP_MASTERDBREADY
-        N'SLEEP_MASTERMDREADY', -- https://www.sqlskills.com/help/waits/SLEEP_MASTERMDREADY
-        N'SLEEP_MASTERUPGRADED', -- https://www.sqlskills.com/help/waits/SLEEP_MASTERUPGRADED
-        N'SLEEP_MSDBSTARTUP', -- https://www.sqlskills.com/help/waits/SLEEP_MSDBSTARTUP
-        N'SLEEP_SYSTEMTASK', -- https://www.sqlskills.com/help/waits/SLEEP_SYSTEMTASK
-        N'SLEEP_TASK', -- https://www.sqlskills.com/help/waits/SLEEP_TASK
-        N'SLEEP_TEMPDBSTARTUP', -- https://www.sqlskills.com/help/waits/SLEEP_TEMPDBSTARTUP
-        N'SNI_HTTP_ACCEPT', -- https://www.sqlskills.com/help/waits/SNI_HTTP_ACCEPT
-        N'SP_SERVER_DIAGNOSTICS_SLEEP', -- https://www.sqlskills.com/help/waits/SP_SERVER_DIAGNOSTICS_SLEEP
-        N'SQLTRACE_BUFFER_FLUSH', -- https://www.sqlskills.com/help/waits/SQLTRACE_BUFFER_FLUSH
-        N'SQLTRACE_INCREMENTAL_FLUSH_SLEEP', -- https://www.sqlskills.com/help/waits/SQLTRACE_INCREMENTAL_FLUSH_SLEEP
-        N'SQLTRACE_WAIT_ENTRIES', -- https://www.sqlskills.com/help/waits/SQLTRACE_WAIT_ENTRIES
-        N'WAIT_FOR_RESULTS', -- https://www.sqlskills.com/help/waits/WAIT_FOR_RESULTS
-        N'WAITFOR', -- https://www.sqlskills.com/help/waits/WAITFOR
-        N'WAITFOR_TASKSHUTDOWN', -- https://www.sqlskills.com/help/waits/WAITFOR_TASKSHUTDOWN
-        N'WAIT_XTP_RECOVERY', -- https://www.sqlskills.com/help/waits/WAIT_XTP_RECOVERY
-        N'WAIT_XTP_HOST_WAIT', -- https://www.sqlskills.com/help/waits/WAIT_XTP_HOST_WAIT
-        N'WAIT_XTP_OFFLINE_CKPT_NEW_LOG', -- https://www.sqlskills.com/help/waits/WAIT_XTP_OFFLINE_CKPT_NEW_LOG
-        N'WAIT_XTP_CKPT_CLOSE', -- https://www.sqlskills.com/help/waits/WAIT_XTP_CKPT_CLOSE
-        N'XE_DISPATCHER_JOIN', -- https://www.sqlskills.com/help/waits/XE_DISPATCHER_JOIN
-        N'XE_DISPATCHER_WAIT', -- https://www.sqlskills.com/help/waits/XE_DISPATCHER_WAIT
-        N'XE_TIMER_EVENT' -- https://www.sqlskills.com/help/waits/XE_TIMER_EVENT
-		) AND [waiting_tasks_count] > 0
+	FROM sys.dm_os_wait_stats S
+	LEFT OUTER JOIN #IgnorableWaits W ON W.wait_type = S.[wait_type]
+	WHERE  1 =1 
+	AND [waiting_tasks_count] > 0
 	ORDER BY [wait_time_ms] DESC
 	OPTION (RECOMPILE)
 
