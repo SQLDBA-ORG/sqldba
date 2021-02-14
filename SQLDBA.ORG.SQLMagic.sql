@@ -3114,13 +3114,13 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	SELECT TOP 10 15,
 	REPLICATE ('|', 100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER())+ REPLICATE ('''', 100- 100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER()) + CONVERT(VARCHAR(20), CONVERT(INT,ROUND(100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER(),0))) + '%'
 	, S.[wait_type] + ':' 
-	+ ';HH:' + CONVERT(VARCHAR(20),CONVERT(MONEY,SUM(wait_time_ms / 1000.0 / 60 / 60) OVER (PARTITION BY wait_type)))
-	+ ':MM/HH/VCPU:' + CONVERT(VARCHAR(20),CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY wait_type) / @minutesSinceRestart /60000/@CPUcount))
+	+ ';HH:' + CONVERT(VARCHAR(20),CONVERT(MONEY,SUM(wait_time_ms / 1000.0 / 60 / 60) OVER (PARTITION BY S.[wait_type])))
+	+ ':MM/HH/VCPU:' + CONVERT(VARCHAR(20),CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / @minutesSinceRestart /60000/@CPUcount))
 	+'; Wait(s):'+ CONVERT(VARCHAR(20),CONVERT(BIGINT,[wait_time_ms] / 1000.0)) + '(s)'
 	+'; Wait count:' + CONVERT(VARCHAR(20),[waiting_tasks_count])
 	, CASE 
-		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY wait_type) / @minutesSinceRestart /60000/@CPUcount) BETWEEN 10 AND 30 THEN @Result_Warning
-		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY wait_type) / @minutesSinceRestart /60000/@CPUcount) > 30 THEN  @Result_YourServerIsDead
+		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / @minutesSinceRestart /60000/@CPUcount) BETWEEN 10 AND 30 THEN @Result_Warning
+		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / @minutesSinceRestart /60000/@CPUcount) > 30 THEN  @Result_YourServerIsDead
 		ELSE @Result_Good END
 	, CASE 
 		WHEN S.[wait_type] = 'CXPACKET' THEN 5
