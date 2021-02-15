@@ -3,7 +3,7 @@ ALTER PROCEDURE [dbo].[sqldba_sqlmagic]  --@MailResults = 1
 Sample command:
 	EXEC  [dbo].[sqldba_sqlmagic]  @MailResults = 1
 	
-RAISERROR (N'SQL server evaluation script @ 15 Feburary 2021  adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
+RAISERROR (N'SQL server evaluation script @ 18 January 2021  adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
 Thanks:
 Robert Wylie
 Nav Mukkasa
@@ -67,7 +67,7 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '15/02/2021' /*DD/MM/YYYY*/
+	SET @MagicVersion = '22/01/2021' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
@@ -1666,7 +1666,7 @@ WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
 
 
 
-	DECLARE @CPURingBuffer TABLE
+DECLARE @CPURingBuffer TABLE
 	(
 		SQLProcessUtilization SMALLINT
 		,SystemIdle SMALLINT
@@ -1679,57 +1679,20 @@ WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
 		, DATEADD(ms,-1 *(@ts - [timestamp]), GETDATE())AS [Event_Time]
 		FROM 
 		(
-             SELECT JSON_VALUE([record JSON], '$."Record id"') AS record_id
-             ,JSON_VALUE([record JSON], '$."SystemIdle"') AS [SystemIdle]
-             ,JSON_VALUE([record JSON], '$."ProcessUtilization"') AS [SQLProcessUtilization]
-             ,orb.[timestamp]
-             FROM (
-             SELECT 
-             [timestamp]
-             ,
-             REPLACE(
-			 REPLACE(
-             REPLACE(
-		     REPLACE(
-             REPLACE(
-		     REPLACE(
-             REPLACE(
-			 REPLACE(
-             REPLACE(
-			 REPLACE(
-             REPLACE(
-			 REPLACE(
-             REPLACE(
-			 REPLACE(
-             REPLACE(
-			 REPLACE(
-			 REPLACE(
-			 REPLACE(
-			 REPLACE(
-        record
-             ,'</ProcessUtilization>','",')
-             , '<ProcessUtilization>',',"ProcessUtilization":"')
-             ,'</SystemIdle>','",')
-             , '<SystemIdle>','"SystemIdle":"')
-             , '</UserModeTime>','",')
-             , '<UserModeTime>','"UserModeTime":"')
-             , '</KernelModeTime>','",')
-             , '<KernelModeTime>','"KernelModeTime":"')
-             , '</PageFaults>','",')
-             , '<PageFaults>','"PageFaults":"')
-             , '</WorkingSetDelta>','",')
-             , '<WorkingSetDelta>','"WorkingSetDelta":"')
-             , '</MemoryUtilization>','",')
-             , '<MemoryUtilization>','"MemoryUtilization":"')
-             , '<Record id = ','{"Record id":')
-             , ' type =',',"type":')
-             , ' time =',',"time":')
-             ,'><SchedulerMonitorEvent><SystemHealth>','')
-             ,',</SystemHealth></SchedulerMonitorEvent></Record>','}') [record JSON]
-             FROM sys.dm_os_ring_buffers 
-             WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
-             AND record LIKE'%%'
-          )orb
+			SELECT 
+			record.value('(./Record/@id)[1]','int') AS record_id
+			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]','int') AS [SystemIdle]
+			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]','int') AS [SQLProcessUtilization]
+			, [timestamp]
+			FROM 
+			(
+				SELECT
+				[timestamp]
+				, convert(xml, record) AS [record] 
+				FROM sys.dm_os_ring_buffers 
+				WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+				AND record LIKE'%%'
+			)AS x
 		) as y
 	
 
@@ -2192,58 +2155,20 @@ DECLARE @Databases TABLE
 		, GETDATE())AS [Event_Time]
 		FROM 
 		(
-
-             SELECT JSON_VALUE([record JSON], '$."Record id"') AS record_id
-             ,CONVERT(MONEY,JSON_VALUE([record JSON], '$."SystemIdle"')) AS [SystemIdle]
-             ,CONVERT(MONEY,JSON_VALUE([record JSON], '$."ProcessUtilization"')) AS [SQLProcessUtilization]
-             ,orb.[timestamp]
-             FROM (
-             SELECT 
-             [timestamp]
-             ,
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-             REPLACE(
-        record
-             ,'</ProcessUtilization>','",')
-             , '<ProcessUtilization>',',"ProcessUtilization":"')
-             ,'</SystemIdle>','",')
-             , '<SystemIdle>','"SystemIdle":"')
-             , '</UserModeTime>','",')
-             , '<UserModeTime>','"UserModeTime":"')
-             , '</KernelModeTime>','",')
-             , '<KernelModeTime>','"KernelModeTime":"')
-             , '</PageFaults>','",')
-             , '<PageFaults>','"PageFaults":"')
-             , '</WorkingSetDelta>','",')
-             , '<WorkingSetDelta>','"WorkingSetDelta":"')
-             , '</MemoryUtilization>','",')
-             , '<MemoryUtilization>','"MemoryUtilization":"')
-             , '<Record id = ','{"Record id":')
-             , ' type =',',"type":')
-             , ' time =',',"time":')
-             , '><SchedulerMonitorEvent><SystemHealth>','')
-             , ',</SystemHealth></SchedulerMonitorEvent></Record>','}') [record JSON]
-             FROM sys.dm_os_ring_buffers 
-             WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
-             AND record LIKE'%%'
-              )orb
+SELECT 
+			record.value('(./Record/@id)[1]','int') AS record_id
+			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]','int') AS [SystemIdle]
+			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]','int') AS [SQLProcessUtilization]
+			, [timestamp]
+			FROM 
+			(
+				SELECT
+				[timestamp]
+				, convert(xml, record) AS [record] 
+				FROM sys.dm_os_ring_buffers 
+				WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+				AND record LIKE'%%'
+			)AS x
 		) as y
 	) T1
 	HAVING AVG(T1.SQLProcessUtilization) >= (CASE WHEN @ShowWarnings = 1 THEN 20 ELSE 0 END)
@@ -3131,7 +3056,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 
 	FROM sys.dm_os_wait_stats S
 	LEFT OUTER JOIN #IgnorableWaits W ON W.wait_type = S.[wait_type]
-	WHERE W.wait_type IS NULL
+	WHERE  1 =1 
 	AND [waiting_tasks_count] > 0
 	ORDER BY [wait_time_ms] DESC
 	OPTION (RECOMPILE)
