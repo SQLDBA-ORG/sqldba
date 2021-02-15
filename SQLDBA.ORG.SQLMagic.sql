@@ -3,7 +3,7 @@ ALTER PROCEDURE [dbo].[sqldba_sqlmagic]  --@MailResults = 1
 Sample command:
 	EXEC  [dbo].[sqldba_sqlmagic]  @MailResults = 1
 	
-RAISERROR (N'SQL server evaluation script @ 18 January 2021  adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
+RAISERROR (N'SQL server evaluation script @ 15 Feburary 2021  adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
 Thanks:
 Robert Wylie
 Nav Mukkasa
@@ -67,7 +67,7 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '22/01/2021' /*DD/MM/YYYY*/
+	SET @MagicVersion = '15/02/2021' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
