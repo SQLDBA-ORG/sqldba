@@ -3131,7 +3131,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 
 	FROM sys.dm_os_wait_stats S
 	LEFT OUTER JOIN #IgnorableWaits W ON W.wait_type = S.[wait_type]
-	WHERE  1 =1 
+	WHERE W.wait_type IS NULL
 	AND [waiting_tasks_count] > 0
 	ORDER BY [wait_time_ms] DESC
 	OPTION (RECOMPILE)
