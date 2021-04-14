@@ -1,4 +1,4 @@
-ALTER PROCEDURE [dbo].[sqldba_sqlmagic]  --@MailResults = 1
+ALTER PROCEDURE [dbo].[sqldba_sqlmagic]  --@MailResults = 1, @Debug = 0
 /* 
 Sample command:
 	EXEC  [dbo].[sqldba_sqlmagic]  @MailResults = 1
@@ -67,7 +67,7 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '22/01/2021' /*DD/MM/YYYY*/
+	SET @MagicVersion = '14/04/2021' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
@@ -1036,7 +1036,7 @@ SELECT @MyBuild = CONVERT(NVARCHAR(50),SERVERPROPERTY('productversion'))
 DECLARE @BuildTable TABLE(
 [Server] NVARCHAR(250)
 , MajorBuild NVARCHAR(5)
-, SupportEnds DATETIME
+, SupportEnds NVARCHAR(25)
 , MinBuild NVARCHAR(25)
 , MaxBuild NVARCHAR(25)
 )
@@ -1997,7 +1997,7 @@ DECLARE @Databases TABLE
 	   ON arstates.replica_id = dbcs.replica_id
 	LEFT OUTER JOIN master.sys.dm_hadr_database_replica_states AS dbrs
 	   ON dbcs.replica_id = dbrs.replica_id AND dbcs.group_database_id = dbrs.group_database_id
-	WHERE dbcs.is_database_joined = 1 AND agstates.primary_replica = '''+@ThisServer+'''
+	WHERE dbcs.is_database_joined = 1 /*AND agstates.primary_replica = '''+@ThisServer+'''*/
 	ORDER BY AG.name ASC, dbcs.database_name
 	
 	) t1 on t1.DatabaseName = db.name 
@@ -2181,25 +2181,92 @@ SELECT
 
 
 			/*----------------------------------------
-			--Failed logins on the server
+			--Error Log issues on the server
 			----------------------------------------*/
 	IF @Debug = 0
 		RAISERROR (N'Reading Error Log..',0,1) WITH NOWAIT;
 	DECLARE @LoginLog TABLE( LogDate DATETIME, ProcessInfo NVARCHAR(200), [Text] NVARCHAR(MAX))
 	IF  @ShowWarnings = 0 
 	BEGIN
-		SET @dynamicSQL = 'EXEC sp_readerrorlog 0, 1, ''Login failed'' '
-		INSERT @LoginLog
-		EXEC sp_executesql @dynamicSQL
-		IF EXISTS (SELECT 1 FROM @LoginLog)
+
+		DECLARE @ErrorLogFiles TABLE
+		(
+			 [Archive #]	INT
+			,[Date]	NVARCHAR(259)
+			,[Log File Size (Byte)]	INT
+		)
+
+		INSERT INTO @ErrorLogFiles
+		(
+			[Archive #]
+		   ,[Date]
+		   ,[Log File Size (Byte)]
+		)
+		EXEC master.sys.xp_enumerrorlogs;
+ 
+		 DECLARE  @SQLLogData TABLE
+		(
+			 LogDate  DATETIME
+			,ProcessInfo NVARCHAR(12)
+			,LogText NVARCHAR(3999)
+		)
+
+
+		--Iterate through each log file and output to a table (separate results)
+		DECLARE @logCount INT;
+		SELECT @logCount = COUNT(*) FROM @ErrorLogFiles;
+		DECLARE @sql NVARCHAR(MAX);
+		DECLARE @i INT = 0;
+		DECLARE @tableName NVARCHAR(128);
+		DECLARE @datecheck DATETIME
+		DECLARE curReadSQLErrorLogs CURSOR FAST_FORWARD READ_ONLY FOR 
+			   SELECT [Archive #] FROM @ErrorLogFiles
+		OPEN curReadSQLErrorLogs
+		FETCH NEXT FROM curReadSQLErrorLogs INTO @i
+		WHILE @@FETCH_STATUS = 0
 		BEGIN
-			INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 5, 'LOGINS - Failed Logins','------','------'
+			SELECT @datecheck = Date FROM @ErrorLogFiles WHERE [Archive #] = @i
+			IF @datecheck > DATEADD(MONTH,-1,GETDATE())
+			/*Only use log files that were created in the last 3 months*/
+			BEGIN
+			   SELECT @sql = 'EXEC sp_readerrorlog ' + CAST(@i AS NVARCHAR(8)) + ',1, ''RESOLVING'';'
+			  -- PRINT @sql
+			   INSERT @SQLLogData
+			   EXEC sys.sp_executesql @sql;
+			   SELECT @sql = 'EXEC sp_readerrorlog ' + CAST(@i AS NVARCHAR(8)) + ',1, ''Failover'';'
+				--PRINT @sql
+			   INSERT @SQLLogData
+			   EXEC sys.sp_executesql @sql;
+				SELECT @sql = 'EXEC sp_readerrorlog ' + CAST(@i AS NVARCHAR(8)) + ',1, ''Login failed'';'
+				--PRINT @sql
+			   INSERT @SQLLogData
+			   EXEC sys.sp_executesql @sql;
+			   SELECT @sql = 'EXEC sp_readerrorlog ' + CAST(@i AS NVARCHAR(8)) + ',1, ''Error:'';'
+				--PRINT @sql
+			   INSERT @SQLLogData
+			   EXEC sys.sp_executesql @sql;
+
+			END
+			   SET @sql = '';
+			   SET @i += 1;
+			FETCH NEXT FROM curReadSQLErrorLogs INTO @i
+		END
+		CLOSE curReadSQLErrorLogs
+		DEALLOCATE curReadSQLErrorLogs
+
+ 
+		IF EXISTS (SELECT 1 FROM @SQLLogData)
+		BEGIN
+			INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 5, 'ERRORS - LOG Errors','------','------'
 			INSERT #output_man_script (SectionID, Section,Summary, Severity, HoursToResolveWithTesting  )
-			SELECT TOP 15 5, 'Date:'
+			SELECT TOP 35 5, 'Date:'
 			+ CONVERT(VARCHAR(20),LogDate,120)
-			,replace(replace(replace(replace(CONVERT(NVARCHAR(500),Text), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ')  
+			,replace(replace(replace(replace(CONVERT(NVARCHAR(500),LogText), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ')  
 			,@Result_Warning , 0.25
-			FROM @LoginLog ORDER BY LogDate DESC
+
+			FROM @SQLLogData
+			--FROM @LoginLog 
+			ORDER BY LogDate DESC
 			OPTION (RECOMPILE)
 		END
 	END
@@ -2610,7 +2677,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			--Look for backups and recovery model information
 			----------------------------------------*/
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 9, 'DATABASE - RPO in minutes and RTO in 15 min slices'
-	,'DB;Compat;recovery_model;Best RTO HH:MM:SS ;Last Full;Last TL;DateCreated;AGName;ReadSecondary','MM:SS'
+	,'DB;Compat;recovery_model;Best RTO HH:MM:SS ;Last Full;Last TL;DateCreated;AGName;ReadSecondary;CurrentLocation','MM:SS'
 	INSERT #output_man_script (SectionID, Section,Summary, HoursToResolveWithTesting ) /* Had to change to DAYS thanks to some clients*/
 	SELECT 9, 
 	CONVERT(VARCHAR(20),DATEDIFF(HOUR,CASE 
@@ -2624,8 +2691,9 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),x.[Last Full],120),'')
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),x.[Last Transaction Log],120),'')
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),x.create_date,120),'')
-	+ '; ' + ISNULL(x.AGName,'')
-	+ '; ' + ISNULL(x.ReadSecondary,'')
+	+ '; ' + ISNULL(x.AGName COLLATE DATABASE_DEFAULT,'')
+	+ '; ' + ISNULL(x.ReadSecondary COLLATE DATABASE_DEFAULT,'')
+	+ '; ' + ISNULL(x.[CurrentLocation] COLLATE DATABASE_DEFAULT,'')
 	)
 	, 
 	CONVERT(VARCHAR(20),CASE 
@@ -2655,7 +2723,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 
 	FROM 
 	(
-		SELECT  DB_NAME(dbs.database_id) [database_name], dbs.[compatibility_level] , dbs.recovery_model_desc [recovery_model],D.AGName, D.ReadSecondary
+		SELECT  DB_NAME(dbs.database_id) [database_name], dbs.[compatibility_level] , dbs.recovery_model_desc [recovery_model],D.AGName, D.ReadSecondary, [CurrentLocation]
 		, MAX(DATEDIFF(SECOND,backup_start_date, backup_finish_date)) 'Timetaken'
 		, MAX(CASE WHEN  type = 'D' THEN backup_finish_date ELSE 0 END) 'Last Full'   
 		, MIN(CASE WHEN  type = 'D' THEN backup_start_date ELSE 0 END) 'First Full'             
@@ -2669,7 +2737,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 		
 		AND dbs.recovery_model_desc COLLATE DATABASE_DEFAULT = bs.recovery_model COLLATE DATABASE_DEFAULT
 		/*Do not filter out only databases with backups.. some have never had.. --WHERE type IN ('D', 'L')*/
-		GROUP BY dbs.database_id, dbs.[compatibility_level],dbs.recovery_model_desc,D.AGName, D.ReadSecondary
+		GROUP BY dbs.database_id, dbs.[compatibility_level],dbs.recovery_model_desc,D.AGName, D.ReadSecondary,[CurrentLocation]
 	) x 
 	ORDER BY [Last Full] ASC
 	OPTION (RECOMPILE);
@@ -3056,7 +3124,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 
 	FROM sys.dm_os_wait_stats S
 	LEFT OUTER JOIN #IgnorableWaits W ON W.wait_type = S.[wait_type]
-	WHERE  1 =1 
+	WHERE  W.wait_type IS NULL
 	AND [waiting_tasks_count] > 0
 	ORDER BY [wait_time_ms] DESC
 	OPTION (RECOMPILE)
@@ -5076,6 +5144,103 @@ END
 
 /*Check to send out the results over email as well*/
 IF @MailResults = 1 
+
+/*
+DECLARE @EmailSubject NVARCHAR(500)
+DECLARE @EmailRecipients NVARCHAR(500) 
+DECLARE @MaxID NVARCHAR(25)
+SELECT @MaxID= MAX(ID)  FROM   [master].[dbo].[sqldba_sqlmagic_output]
+DECLARE @evaldate NVARCHAR(25)
+DECLARE @ThisDomain NVARCHAR(50)
+DECLARE @ThisServer NVARCHAR(50)
+DECLARE @CharToCheck CHAR(1)
+SET @CharToCheck = '\'
+
+SELECT @evaldate = evaldate, @ThisDomain = domain , @ThisServer = SQLInstance 
+FROM   [master].[dbo].[sqldba_sqlmagic_output]
+WHERE ID = @MaxID
+
+DECLARE @EmailBody NVARCHAR(500) 
+DECLARE @query_result_separator NVARCHAR(50)
+DECLARE @StringToExecute NVARCHAR(4000)
+DECLARE @EmailProfile NVARCHAR(500)
+DECLARE @AttachfileName NVARCHAR(500)
+SET @query_result_separator = '~';--char(9);
+SET @EmailRecipients ='scriptoutput@sqldba.org'
+SET @EmailSubject = 'Sqldba_sqlmagic_data for ' +@ThisDomain + ' '+@ThisServer + '' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','');
+
+SET @AttachfileName = 'sqldba_sqlmagic_data__' +REPLACE(@ThisDomain,'.','_') + '_'+ REPLACE(@ThisServer,@CharToCheck,'_') + '_' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','') +'.csv' 
+
+	SET @StringToExecute = '
+SET NOCOUNT ON;
+SELECT ID,evaldate,domain,SQLInstance,SectionID,Section,Summary,Severity,Details,HoursToResolveWithTesting,QueryPlan
+FROM (
+SELECT 
+CONVERT(NVARCHAR(25),		''ID'') ID
+, CONVERT(NVARCHAR(50),		''evaldate'') evaldate
+, CONVERT(NVARCHAR(50),		''domain'') domain
+, CONVERT(NVARCHAR(50),		''SQLInstance'' ) SQLInstance
+, CONVERT(NVARCHAR(10),		''SectionID'') SectionID
+, CONVERT(NVARCHAR(1000),	''Section'') Section
+, CONVERT(NVARCHAR(4000),	''Summary'') Summary
+, CONVERT(NVARCHAR(15),		''Severity'') Severity
+, CONVERT(NVARCHAR(4000),	''Details'') Details
+, CONVERT(NVARCHAR(35),		''HoursToResolveWithTesting'') HoursToResolveWithTesting
+, CONVERT(NVARCHAR(4000),	''QueryPlan'') QueryPlan
+, 0 Sorter
+UNION ALL
+SELECT 
+ID,evaldate,domain,SQLInstance,SectionID,Section,Summary,Severity,Details,HoursToResolveWithTesting,QueryPlan, Sorter
+FROM 
+(
+SELECT TOP 100 PERCENT CONVERT(NVARCHAR(25),T1.ID) ID
+,  REPLACE(T1.evaldate,''~'',''-'') evaldate
+,  REPLACE(domain,''~'',''-'') domain
+,  REPLACE(SQLInstance ,''~'',''-'') SQLInstance
+,  REPLACE(CONVERT(NVARCHAR(10), SectionID),''~'',''-'')  SectionID
+,  REPLACE(Section,''~'',''-'') Section
+,  REPLACE(Summary,''~'',''-'') Summary
+,  REPLACE(Severity,''~'',''-'') Severity
+,  replace(replace(replace(replace( ISNULL(REPLACE(Details,''~'',''-''),''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' '') [Details]
+,  REPLACE(CONVERT(NVARCHAR(10),HoursToResolveWithTesting),''~'',''-'') HoursToResolveWithTesting
+,  REPLACE(QueryPlan,''~'',''-'')QueryPlan
+,T1.ID Sorter
+ FROM   [master].[dbo].[sqldba_sqlmagic_output]
+T1
+INNER JOIN (
+SELECT MAX(evaldate) evaldate   FROM   [master].[dbo].[sqldba_sqlmagic_output]
+) T2
+ON T1.evaldate = T2.evaldate
+) T3
+) T4
+ORDER BY Sorter ASC
+
+; SET NOCOUNT OFF;';
+
+					
+SET @EmailBody = @EmailSubject;
+
+--EXECUTE msdb.dbo.sysmail_configure_sp 'MaxFileSize', '10000000';
+IF @EmailProfile IS NULL
+BEGIN
+	EXEC msdb.dbo.sp_send_dbmail
+	 @recipients = @EmailRecipients,
+	 @subject = @EmailSubject,
+	 @body = @EmailBody,
+	 @query_attachment_filename =@AttachfileName,
+	 @attach_query_result_as_file = 1,
+	 @query_result_header = 0,
+	  @execute_query_database = 'master', 
+	 @query_result_width = 32767,
+	 @append_query_error = 1,
+	 @query_result_no_padding = 1,
+	 @query_result_separator = @query_result_separator,
+	 @query = @StringToExecute EXECUTE AS LOGIN = N'sa';
+ END
+
+
+
+*/
 BEGIN
 IF @Debug = 0
 		RAISERROR (N'Results to mail',0,1) WITH NOWAIT;
@@ -5124,10 +5289,10 @@ SELECT TOP 100 PERCENT CONVERT(NVARCHAR(25),T1.ID) ID
 ,  REPLACE(CONVERT(NVARCHAR(10),HoursToResolveWithTesting),''~'',''-'') HoursToResolveWithTesting
 ,  REPLACE(QueryPlan,''~'',''-'')QueryPlan
 ,T1.ID Sorter
-FROM ['+ @ExportDBName +'].[' + @ExportSchema +'].[' + @ExportTableName + ']
+ FROM   ['+ @ExportDBName +'].[' + @ExportSchema +'].[' + @ExportTableName + ']
 T1
 INNER JOIN (
-SELECT MAX(evaldate) evaldate FROM ['+ @ExportDBName +'].[' + @ExportSchema +'].[' + @ExportTableName + ']
+SELECT MAX(evaldate) evaldate   FROM   ['+ @ExportDBName +'].[' + @ExportSchema +'].[' + @ExportTableName + ']
 ) T2
 ON T1.evaldate = T2.evaldate
 ) T3
