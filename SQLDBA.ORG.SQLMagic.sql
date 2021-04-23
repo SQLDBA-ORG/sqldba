@@ -4934,17 +4934,17 @@ ORDER BY DBName
 /*
 
 */
-IF OBJECT_ID('master.dbo.sp_Blitz_output') IS NULL
+IF OBJECT_ID('master.dbo.sqldba_sp_Blitz_output') IS NULL
 /*If no Blitz table, run Blitz*/
 BEGIN
 	IF @Debug = 0
-		RAISERROR (N'Skipping sp_Blitz results, cannot find output table',0,1) WITH NOWAIT;
+		RAISERROR (N'Skipping sqldba_sp_Blitz results, cannot find output table',0,1) WITH NOWAIT;
 	--EXEC [dbo].[sp_Blitz] @CheckUserDatabaseObjects = 1 , @CheckProcedureCache = 1 , @OutputType = 'TABLE' , @OutputProcedureCache = 0 , @CheckServerInfo = 1, @OutputDatabaseName = 'master', @OutputSchemaName = 'dbo', @OutputTableName = 'sp_Blitz_output', @BringThePain = 1;
 END
-IF OBJECT_ID('master.dbo.sp_Blitz_output') IS NOT NULL
+IF OBJECT_ID('master.dbo.sqldba_sp_Blitz_output') IS NOT NULL
 BEGIN
 	IF @Debug = 0
-		RAISERROR (N'Found sp_Blitz results, only recent results will be evaluated',0,1) WITH NOWAIT;
+		RAISERROR (N'Found sqldba_sp_Blitz results, only recent results will be evaluated',0,1) WITH NOWAIT;
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 999, 'Blitz from here','------','------'
 	INSERT INTO #output_man_script ( 
 	domain
@@ -4963,8 +4963,8 @@ BEGIN
 	, ''sp_Blitz:'' + Finding
 	, DatabaseName
 	, CONVERT(NVARCHAR(4000),Details)
-	FROM master.dbo.sp_Blitz_output 
-	WHERE CheckDate = (SELECT max([CheckDate]) FROM master.dbo.sp_Blitz_output HAVING DATEADD(DAY,-2,GETDATE()) < max([CheckDate]) )
+	FROM master.dbo.sqldba_sp_Blitz_output 
+	WHERE CheckDate = (SELECT max([CheckDate]) FROM master.dbo.sqldba_sp_Blitz_output HAVING DATEADD(DAY,-2,GETDATE()) < max([CheckDate]) )
 	ORDER BY ID ASC'
 	)
 
