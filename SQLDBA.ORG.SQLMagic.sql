@@ -382,6 +382,18 @@ END CATCH
 				, [BeingClever] NVARCHAR(4000)
 			);
 
+	IF OBJECT_ID('tempdb..#SqueezeMe') IS NOT NULL
+				DROP TABLE #SqueezeMe;
+			CREATE TABLE #SqueezeMe 
+			(
+				DB NVARCHAR(250)
+				, [Just compress] NVARCHAR(4000)
+				, [For LOB data] NVARCHAR(4000)
+				, reserved_page_count BIGINT
+				, row_count BIGINT
+				, data_compression_desc NVARCHAR(400)
+			);
+
 
 	/*Note, if you add columns to this table, please make sure to add them in the ADD Column clause at the bottom of the script where it writes outputs to a table.*/
 	IF OBJECT_ID('tempdb..#output_man_script') IS NOT NULL
@@ -3409,7 +3421,8 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			/*----------------------------------------
 			--Loop all the user databases to run database specific commands against them
 			----------------------------------------*/
-					
+	DECLARE @SkipthisDB BIT	
+	SET @SkipthisDB = 0
 	SET @dynamicSQL = ''
 	SET @Databasei_Count = 1; 
 	WHILE @Databasei_Count <= @Databasei_Max 
@@ -3426,11 +3439,16 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		SET @ErrorMessage = 'Looping Database ' + CONVERT(VARCHAR(4),@Databasei_Count) +' of ' + CONVERT(VARCHAR(4),@Databasei_Max ) + ': [' + @DatabaseName + '] ';
 		IF @Debug = 0
 			RAISERROR (@ErrorMessage,0,1) WITH NOWAIT;
-		IF (@SecondaryReadRole <> 'NO' AND @AGBackupPref <> 'primary') AND EXISTS( SELECT @DatabaseName)
+
+		--IF (ISNULL(@SecondaryReadRole,'YES') <> 'NO' AND ISNULL(@AGBackupPref,'') <> 'primary') AND EXISTS( SELECT @DatabaseName)
 		BEGIN  
-			
-		
+			IF (ISNULL(@SecondaryReadRole,'YES') <> 'NO') 
+			SET	@SkipthisDB = 1
+			IF @SecondaryReadRole IS NULL
+			SET	@SkipthisDB = 0
 	
+			IF @SkipthisDB = 0
+			BEGIN
 		/*13. Find idle indexes*/
 			/*---------------------------------------Shows Indexes that have never been used---------------------------------------*/
 			IF @Debug = 0
@@ -3597,60 +3615,103 @@ ELSE 0.015
 			--Find badly behaving constraints
 			----------------------------------------*/
 
-		/* Constraints behaving badly*/
-		IF @Debug = 0
-			RAISERROR	  (N'Looking for bad constraints',0,1) WITH NOWAIT;
-		SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-			USE ['+@DatabaseName+'];
-		IF EXISTS(
-		SELECT 1
-		from sys.check_constraints i 
-		WHERE i.is_not_trusted = 1 AND i.is_not_for_replication = 0 AND i.is_disabled = 0 
-		)
-		INSERT  #notrust (KeyType, Tablename, KeyName, DBCCcommand, Fix)
-		SELECT ''Check'' as [KeyType], ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + '']'' [tablename]
-		, ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS keyname
-		, ''DBCC CHECKCONSTRAINTS (['' + i.name + '']) WITH ALL_ERRORMSGS'' [DBCC]
-		, ''ALTER TABLE ['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + ''] WITH CHECK CHECK CONSTRAINT ['' + i.name + '']'' [Fix]
-		from sys.check_constraints i
-		INNER JOIN sys.objects o ON i.parent_object_id = o.object_id
-		INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
-		WHERE i.is_not_trusted = 1 
-		AND i.is_not_for_replication = 0 
-		AND i.is_disabled = 0
-		OPTION (RECOMPILE)
-		;
-
-		IF EXISTS(
-		SELECT 1
-		from sys.foreign_keys i
-			INNER JOIN sys.objects o ON i.parent_object_id = o.OBJECT_ID
-			INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
-		WHERE   i.is_not_trusted = 1
-			AND i.is_not_for_replication = 0
-			AND i.is_disabled = 0 
-			   
-		)
-		INSERT  #notrust (KeyType, Tablename, KeyName, DBCCcommand, Fix)
-		SELECT ''FK'' as[ KeyType],  ''['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + '']'' AS TableName
-			, ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS FKName
-			,''DBCC CHECKCONSTRAINTS (['' + i.name + '']) WITH ALL_ERRORMSGS'' [DBCC]
+			/* Constraints behaving badly*/
+			IF @Debug = 0
+				RAISERROR	  (N'Looking for bad constraints',0,1) WITH NOWAIT;
+			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+				USE ['+@DatabaseName+'];
+			IF EXISTS(
+			SELECT 1
+			from sys.check_constraints i 
+			WHERE i.is_not_trusted = 1 AND i.is_not_for_replication = 0 AND i.is_disabled = 0 
+			)
+			INSERT  #notrust (KeyType, Tablename, KeyName, DBCCcommand, Fix)
+			SELECT ''Check'' as [KeyType], ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + '']'' [tablename]
+			, ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS keyname
+			, ''DBCC CHECKCONSTRAINTS (['' + i.name + '']) WITH ALL_ERRORMSGS'' [DBCC]
 			, ''ALTER TABLE ['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + ''] WITH CHECK CHECK CONSTRAINT ['' + i.name + '']'' [Fix]
-
-		FROM    sys.foreign_keys i
-			INNER JOIN sys.objects o ON i.parent_object_id = o.OBJECT_ID
+			from sys.check_constraints i
+			INNER JOIN sys.objects o ON i.parent_object_id = o.object_id
 			INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
-		WHERE   i.is_not_trusted = 1
-			AND i.is_not_for_replication = 0
+			WHERE i.is_not_trusted = 1 
+			AND i.is_not_for_replication = 0 
 			AND i.is_disabled = 0
-	   ORDER BY o.name  
-	   OPTION (RECOMPILE)
-	   '
-	   --PRINT @dynamicSQL
-		EXEC sp_executesql @dynamicSQL;
+			OPTION (RECOMPILE)
+			;
+
+			IF EXISTS(
+			SELECT 1
+			from sys.foreign_keys i
+				INNER JOIN sys.objects o ON i.parent_object_id = o.OBJECT_ID
+				INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+			WHERE   i.is_not_trusted = 1
+				AND i.is_not_for_replication = 0
+				AND i.is_disabled = 0 
+				
+			)
+			INSERT  #notrust (KeyType, Tablename, KeyName, DBCCcommand, Fix)
+			SELECT ''FK'' as[ KeyType],  ''['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + '']'' AS TableName
+				, ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS FKName
+				,''DBCC CHECKCONSTRAINTS (['' + i.name + '']) WITH ALL_ERRORMSGS'' [DBCC]
+				, ''ALTER TABLE ['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + ''] WITH CHECK CHECK CONSTRAINT ['' + i.name + '']'' [Fix]
+
+			FROM    sys.foreign_keys i
+				INNER JOIN sys.objects o ON i.parent_object_id = o.OBJECT_ID
+				INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+			WHERE   i.is_not_trusted = 1
+				AND i.is_not_for_replication = 0
+				AND i.is_disabled = 0
+		ORDER BY o.name  
+		OPTION (RECOMPILE)
+		'
+		--PRINT @dynamicSQL
+			EXEC sp_executesql @dynamicSQL;
 
 
 
+
+		IF @Debug = 0
+				RAISERROR	  (N'Looking for indexes with possible compression benefit',0,1) WITH NOWAIT;
+			SET @dynamicSQL = '
+			USE ['+@DatabaseName+']
+			SELECT TOP 50 '''+@DatabaseName+'''
+			, ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''['+@DatabaseName+']'' + ''.'' + ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' REBUILD WITH (DATA_COMPRESSION=PAGE);'' [Just compress]
+			, CASE WHEN ps.lob_used_page_count > 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''['+@DatabaseName+']'' + ''.'' +  ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
+			ELSE '''' END [For LOB data]
+			, ps.[reserved_page_count]
+			, ps.row_count
+			, p.data_compression_desc
+			FROM sys.objects AS o WITH (NOLOCK)
+			INNER JOIN sys.indexes AS i WITH (NOLOCK)
+			ON o.[object_id] = i.[object_id]
+			INNER JOIN sys.schemas s WITH (NOLOCK)
+			ON o.[schema_id] = s.[schema_id]
+			INNER JOIN sys.partitions p
+			ON  i.object_id = p.object_id
+			AND i.index_id = p.index_id
+			INNER JOIN sys.dm_db_partition_stats AS ps WITH (NOLOCK)
+			ON i.[object_id] = ps.[object_id]
+			AND ps.[index_id] = i.[index_id]
+			LEFT OUTER JOIN(
+
+			select  TABLE_CATALOG,TABLE_SCHEMA [schema],TABLE_NAME [table], COUNT(COLUMN_NAME) [LobColumns]
+			from information_schema.columns 
+			where data_type in 
+				(''TEXT'', ''NTEXT'',''IMAGE'' ,''XML'', ''VARBINARY'')
+			OR
+				(data_type IN( ''VARCHAR'',''NVARCHAR'') and character_maximum_length = -1)
+			GROUP BY TABLE_CATALOG,TABLE_SCHEMA,TABLE_NAME
+
+			) Lobs ON Lobs.[schema] = s.name AND Lobs.[table] = o.name AND TABLE_CATALOG = DB_NAME()
+			WHERE o.type = ''U'' AND i.[index_id] >0
+			AND i.type_desc IN (''CLUSTERED'', ''NONCLUSTERED'')
+			AND ps.row_count > 1000
+			AND p.data_compression_desc NOT IN (''PAGE'',''ROW'')
+			ORDER BY ps.[reserved_page_count] DESC'
+			INSERT #SqueezeMe
+			EXEC sp_executesql @dynamicSQL;
+			--PRINT @dynamicSQL
+		END
 		END
 		
 		SET @Databasei_Count = @Databasei_Count + 1; 
@@ -4368,6 +4429,20 @@ ORDER BY DBName
 	IF @Debug = 0
 		RAISERROR (N'Done with Trace data',0,1) WITH NOWAIT;
 
+
+			/*----------------------------------------
+			--Compression options
+			----------------------------------------*/
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 34, 'Good index compression candidates','------','------'
+		INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 34
+		, DB 
+		, '[CurrentCompression]:' + data_compression_desc + ',[Reserved Pages]:' + CONVERT(VARCHAR(10),reserved_page_count) +',[RowCount]:' + CONVERT(VARCHAR(10),row_count)
+		, [Just compress] + ';' + [For LOB data]
+		FROM  #SqueezeMe  S
+
+
+/*ADD NEW sections before this line*/
 			/*----------------------------------------
 			--Calculate daily IO workload
 			----------------------------------------*/
@@ -5441,6 +5516,9 @@ END
 
 		IF OBJECT_ID('tempdb..#IgnorableWaits') IS NOT NULL
 			DROP TABLE #IgnorableWaits;
+
+		IF OBJECT_ID('tempdb..#SqueezeMe') IS NOT NULL
+			DROP TABLE #SqueezeMe;
 	
 
 --the blitz
