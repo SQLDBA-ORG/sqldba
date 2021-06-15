@@ -3,7 +3,7 @@ ALTER PROCEDURE [dbo].[sqldba_sqlmagic]  --@MailResults = 1, @Debug = 0
 Sample command:
 	EXEC  [dbo].[sqldba_sqlmagic]  @MailResults = 1
 	
-RAISERROR (N'SQL server evaluation script @ 18 January 2021  adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
+RAISERROR (N'SQL server evaluation script @ 14/06/2021  adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
 Thanks:
 Robert Wylie
 Nav Mukkasa
@@ -35,7 +35,7 @@ EXEC master..xp_cmdshell @cmd
 , @PrepForExport int  = 1 
 /*@ShowMigrationRelatedOutputs. When you need to show migration stuff, like possible breaking connections and DMA script outputs, set to 1 to show information*/
 , @ShowMigrationRelatedOutputs int = 1 
-, @SkipHeaps INT = 1 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
+, @SkipHeaps INT = 0 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
 
 /*Email results*/
 , @MailResults BIT = 0
@@ -67,7 +67,7 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '14/04/2021' /*DD/MM/YYYY*/
+	SET @MagicVersion = '14/06/2021' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
@@ -214,6 +214,7 @@ BEGIN
 	DECLARE @ErrorSeverity int;
 	DECLARE @ErrorState int;
 	DECLARE @ErrorMessage NVARCHAR(4000);
+	DECLARE @CustomErrorText NVARCHAR(500);
 
 	/*Performance section variables*/
 	DECLARE @cnt INT;
@@ -393,6 +394,44 @@ END CATCH
 				, row_count BIGINT
 				, data_compression_desc NVARCHAR(400)
 			);
+
+
+	IF OBJECT_ID('tempdb..#compressionstates') IS NOT NULL
+				DROP TABLE #compressionstates;
+			CREATE TABLE #compressionstates 
+			(
+				dbname NVARCHAR(250)
+				, IndexName NVARCHAR(250)
+				, index_id TINYINT
+				, partition_number TINYINT
+				, is_disabled TINYINT
+				, is_hypothetical TINYINT
+				, TableName NVARCHAR(250)
+				, IndexSizeKB BIGINT
+				, RowCounts BIGINT
+				, Compression NVARCHAR(25)
+				, CompressionObject NVARCHAR(25)
+				, [Just compress] NVARCHAR(2500)
+				, [For LOB data] NVARCHAR(2500)
+			);
+
+	IF OBJECT_ID('TempDB..#indexusage') IS NOT NULL 
+			DROP TABLE #indexusage
+			CREATE TABLE [dbo].[#indexusage](
+				dbname nvarchar(128) null,
+				[ObjectName] [nvarchar](128) NULL,
+				[IndexName] [sysname] NULL,
+				[index_id] [int] NOT NULL,
+				[Reads] [bigint] NULL,
+				[Writes] [bigint] NOT NULL,
+				[IndexType] [nvarchar](60) NULL,
+				[FillFactor] [tinyint] NOT NULL,
+				[has_filter] [bit] NULL,
+				[filter_definition] [nvarchar](max) NULL,
+				[last_user_scan] [datetime] NULL,
+				[last_user_lookup] [datetime] NULL,
+				[last_user_seek] [datetime] NULL
+			) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
 
 
 	/*Note, if you add columns to this table, please make sure to add them in the ADD Column clause at the bottom of the script where it writes outputs to a table.*/
@@ -3380,8 +3419,11 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			/*----------------------------------------
 			--Get missing index information for each database
 			----------------------------------------*/
-			IF @Debug = 0
-				RAISERROR	  (N'Looking for missing indexes in DMVs',0,1) WITH NOWAIT;
+
+				SET @CustomErrorText = '['+@DatabaseName+'] Looking for missing indexes in DMVs'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
 			SET @dynamicSQL = '
 			USE [master]
 			SELECT LEFT([statement],(PATINDEX(''%.%'',[statement]))-1) [Database]
@@ -3415,8 +3457,15 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			INNER JOIN sys.dm_db_missing_index_details AS mid ON mig.index_handle = mid.index_handle 
 			ORDER BY daily_magic_benefit_number DESC, [CreateIndexStatement] DESC OPTION (RECOMPILE);'
 
-			INSERT #MissingIndex
-			EXEC sp_executesql @dynamicSQL;
+
+			BEGIN TRY
+				INSERT #MissingIndex
+				EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 			
 			/*----------------------------------------
 			--Loop all the user databases to run database specific commands against them
@@ -3433,7 +3482,9 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		, @DatabaseState = d.state 
 		, @AGBackupPref = BackupPref
 		, @SecondaryReadRole = ReadSecondary
-		FROM @Databases d WHERE id = @Databasei_Count AND d.state NOT IN (2,6)
+		FROM @Databases d 
+		WHERE id = @Databasei_Count 
+		AND d.state NOT IN (2,6)
 
 		OPTION (RECOMPILE)
 		SET @ErrorMessage = 'Looping Database ' + CONVERT(VARCHAR(4),@Databasei_Count) +' of ' + CONVERT(VARCHAR(4),@Databasei_Max ) + ': [' + @DatabaseName + '] ';
@@ -3446,14 +3497,18 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			SET	@SkipthisDB = 1
 			IF @SecondaryReadRole IS NULL
 			SET	@SkipthisDB = 0
-	
 			IF @SkipthisDB = 0
 			BEGIN
+
+
 		/*13. Find idle indexes*/
+
 			/*---------------------------------------Shows Indexes that have never been used---------------------------------------*/
-			IF @Debug = 0
-				RAISERROR	  (N'Skipping never used indexes',0,1) WITH NOWAIT;
+				SET @CustomErrorText = '['+@DatabaseName+'] Looking at unused indexes'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			SET ANSI_WARNINGS OFF
+			
 			SET @dynamicSQL = '
 			USE ['+@DatabaseName +']
 			DECLARE @DaysAgo INT, @TheDate DATETIME
@@ -3477,13 +3532,26 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			GROUP BY t.name, b.type_desc, b.name, a.user_updates, a.last_user_scan, a.last_user_seek
 			ORDER BY [Updates] DESC OPTION (RECOMPILE)
 			'
-			INSERT #NeverUsedIndex
-			EXEC sp_executesql @dynamicSQL;
+			
+			BEGIN TRY
+				INSERT #NeverUsedIndex
+				EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 			SET ANSI_WARNINGS ON
+
+
 		/*14. Find heaps*/
+
 			/*---------------------------------------Shows tables without primary key. Heaps---------------------------------------*/
-			IF @Debug = 0
-				RAISERROR	  (N'Looking for heap tables',0,1) WITH NOWAIT;
+
+				SET @CustomErrorText = '['+@DatabaseName+'] Looking for heap tables'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
 			SET @dynamicSQL = '
 			USE ['+@DatabaseName +']
 				SELECT ''['' + DB_NAME(DB_ID()) + '']'',''['' + OBJECT_SCHEMA_NAME(IDXPS.object_id) +'']'',''['' +OBJECT_NAME(IDXPS.object_id) + '']'' AS table_name
@@ -3507,13 +3575,21 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			ORDER BY Fragmentation_Percentage DESC'
 			IF @SkipHeaps = 0
 			BEGIN
-				INSERT #HeapTable
-				EXEC sp_executesql @dynamicSQL;
+				
+				BEGIN TRY
+					INSERT #HeapTable
+					EXEC sp_executesql @dynamicSQL;
+				END TRY
+				BEGIN CATCH
+					SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+					RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+				END CATCH
 			END
-	
+		
 			
-			IF @Debug = 0
-				RAISERROR	  (N'Looking for stale statistics',0,1) WITH NOWAIT;
+			SET @CustomErrorText = '['+@DatabaseName+'] Looking for stale statistics'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 			USE ['+@DatabaseName+'];
 			SELECT 
@@ -3525,7 +3601,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 				, ModificationCount
 				, [LastUpdated] 
 				, Rows
-				, CONVERT(MONEY,ModificationCount)*100/Rows [ModPerc]
+				, CONVERT(MONEY,ModificationCount) * 100 / Rows [ModPerc]
 				, EstPerc
 			FROM (
 				SELECT 
@@ -3535,17 +3611,17 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 						, MAX(p.rows) Rows
 						, MAX(CASE WHEN p.rows > 0 THEN 
 						 CASE 
-WHEN LOG ( p.rows ) BETWEEN 0 AND 9 THEN 20
-WHEN LOG ( p.rows ) BETWEEN 9 AND 10 THEN 15
-WHEN LOG ( p.rows ) BETWEEN 10 AND 11 THEN 10
-WHEN LOG ( p.rows ) BETWEEN 11 AND 12 THEN 5
-WHEN LOG ( p.rows ) BETWEEN 12 AND 13.1 THEN 3
-WHEN LOG ( p.rows ) BETWEEN 13.1 AND 13.8 THEN 1.7
-WHEN LOG ( p.rows ) BETWEEN 13.8 AND 14.7 THEN 1.2
-WHEN LOG ( p.rows ) BETWEEN 14.7 AND 17 THEN 0.15
-WHEN LOG ( p.rows ) > 17 THEN 0.015
-ELSE 0.015
- END
+								WHEN LOG ( p.rows ) BETWEEN 0 AND 9 THEN 20
+								WHEN LOG ( p.rows ) BETWEEN 9 AND 10 THEN 15
+								WHEN LOG ( p.rows ) BETWEEN 10 AND 11 THEN 10
+								WHEN LOG ( p.rows ) BETWEEN 11 AND 12 THEN 5
+								WHEN LOG ( p.rows ) BETWEEN 12 AND 13.1 THEN 3
+								WHEN LOG ( p.rows ) BETWEEN 13.1 AND 13.8 THEN 1.7
+								WHEN LOG ( p.rows ) BETWEEN 13.8 AND 14.7 THEN 1.2
+								WHEN LOG ( p.rows ) BETWEEN 14.7 AND 17 THEN 0.15
+								WHEN LOG ( p.rows ) > 17 THEN 0.015
+								ELSE 0.015
+								 END
 						ELSE 0 END)[EstPerc]
 						, sce.name SchemaName' +
 						CASE WHEN OBJECT_ID(N'sys.dm_db_stats_properties') IS NOT NULL 
@@ -3585,12 +3661,19 @@ ELSE 0.015
 			OPTION (RECOMPILE);
 			';
 
-			INSERT #Action_Statistics
+			BEGIN TRY
+				INSERT #Action_Statistics
 			EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 		
 			
-			IF @Debug = 0
-				RAISERROR	  (N'Skipping bad NC Indexes tables',0,1) WITH NOWAIT;
+			SET @CustomErrorText = '['+@DatabaseName+'] Skipping bad NC Indexes tables'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 
 		   SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 			USE ['+@DatabaseName+'];
@@ -3610,14 +3693,27 @@ ELSE 0.015
 			ORDER BY [Difference] DESC, [Total Writes] DESC, [Total Reads] ASC OPTION (RECOMPILE);
 			'
 			--EXEC sp_executesql @dynamicSQL;
-
+			IF 1 = 1234 /*DEPRECATED*/
+			BEGIN
+			BEGIN TRY
+				/*INSERT #indexusage
+				EXEC sp_executesql @dynamicSQL;*/
+				PRINT ''
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
+			END
 			/*----------------------------------------
 			--Find badly behaving constraints
 			----------------------------------------*/
 
 			/* Constraints behaving badly*/
-			IF @Debug = 0
-				RAISERROR	  (N'Looking for bad constraints',0,1) WITH NOWAIT;
+			SET @CustomErrorText = '['+@DatabaseName+'] Looking for bad constraints'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
 			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 				USE ['+@DatabaseName+'];
 			IF EXISTS(
@@ -3665,13 +3761,20 @@ ELSE 0.015
 		OPTION (RECOMPILE)
 		'
 		--PRINT @dynamicSQL
-			EXEC sp_executesql @dynamicSQL;
+
+			BEGIN TRY
+				EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 
 
 
-
+			SET @CustomErrorText = '['+@DatabaseName+'] Looking for indexes with possible compression benefit'
 		IF @Debug = 0
-				RAISERROR	  (N'Looking for indexes with possible compression benefit',0,1) WITH NOWAIT;
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			SET @dynamicSQL = '
 			USE ['+@DatabaseName+']
 			SELECT TOP 50 '''+@DatabaseName+'''
@@ -3708,12 +3811,94 @@ ELSE 0.015
 			AND ps.row_count > 1000
 			AND p.data_compression_desc NOT IN (''PAGE'',''ROW'')
 			ORDER BY ps.[reserved_page_count] DESC'
+			BEGIN TRY
 			INSERT #SqueezeMe
 			EXEC sp_executesql @dynamicSQL;
-			--PRINT @dynamicSQL
-		END
-		END
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 		
+
+		SET @CustomErrorText = '['+@DatabaseName+'] Intelligent compression evaluation'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
+			SET @dynamicSQL='USE ['+@DatabaseName+']
+			SELECT '''+@DatabaseName+'''
+			, i.[name] AS IndexName
+			,i.index_id,p.partition_number
+			,t.[name] AS TableName
+			,i.is_disabled
+			, i.is_hypothetical
+			,SUM(s.[used_page_count]) * 8 AS IndexSizeKB
+			,sum(p.rows) AS RowCounts
+			,p.data_compression_desc Compression
+			
+			, CASE WHEN i.index_id in (0, 1) then ''Table'' else ''Index'' end CompressionObject
+			, ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''[?]'' + ''.'' + ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' REBUILD WITH (DATA_COMPRESSION=ROW);'' [Just compress]
+			, CASE WHEN SUM(s.lob_used_page_count )> 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''[?]'' + ''.'' +  ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
+						ELSE '''' END [For LOB data]
+			FROM sys.dm_db_partition_stats AS s
+			INNER JOIN sys.indexes AS i 
+				ON s.[object_id] = i.[object_id] AND s.[index_id] = i.[index_id]
+			INNER JOIN sys.tables t 
+				ON t.OBJECT_ID = i.object_id
+			INNER JOIN sys.partitions p 
+				ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
+			INNER JOIN sys.objects AS o WITH (NOLOCK)	ON o.[object_id] = i.[object_id]
+			INNER JOIN sys.schemas sc WITH (NOLOCK)	ON o.[schema_id] = sc.[schema_id]
+			GROUP BY i.[name],sc.[name], t.[name],o.[name] ,i.index_id,i.is_disabled
+			, i.is_hypotheticalp.data_compression_desc,p.partition_number
+			HAVING SUM(s.[used_page_count]) * 8 > 512
+			ORDER BY  t.[name],i.[name]
+			' 
+			BEGIN TRY
+			INSERT #compressionstates 
+			EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
+
+	
+			SET @CustomErrorText = '['+@DatabaseName+'] Index usage checks'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
+			SELECT @dynamicSQL = ' USE ['+@DatabaseName+']
+			SELECT '''+@DatabaseName+'''
+			, OBJECT_NAME(s.[object_id]) AS [ObjectName], i.name AS [IndexName], i.index_id,
+			user_seeks + user_scans + user_lookups AS [Reads], s.user_updates AS [Writes],  
+			i.type_desc AS [IndexType], i.fill_factor AS [FillFactor], i.has_filter, i.filter_definition, 
+			s.last_user_scan, s.last_user_lookup, s.last_user_seek
+			FROM sys.dm_db_index_usage_stats AS s WITH (NOLOCK)
+			INNER JOIN sys.indexes AS i WITH (NOLOCK)
+				ON s.[object_id] = i.[object_id]
+			WHERE OBJECTPROPERTY(s.[object_id],''IsUserTable'') = 1
+			AND i.index_id = s.index_id
+			AND s.database_id = DB_ID()
+
+			ORDER BY user_seeks + user_scans + user_lookups DESC OPTION (RECOMPILE); -- Order by reads'
+			BEGIN TRY
+			INSERT #indexusage 
+			EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
+
+
+/*
+LOOPING of databases ends here, add new sections above this portion
+*/
+
+/*Now increment databases*/
+		END
+		END
 		SET @Databasei_Count = @Databasei_Count + 1; 
 	END
 	IF @Debug = 0
@@ -3722,8 +3907,10 @@ ELSE 0.015
 			/*----------------------------------------
 			--Output results from all databases into results table
 			----------------------------------------*/
-			IF @Debug = 0
-				RAISERROR	  (N'Looking for Stored Procudure Workload',0,1) WITH NOWAIT;
+			SET @CustomErrorText = '['+@DatabaseName+'] Looking for Stored Procudure Workload'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
 			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 			USE [tempdb];
 			SELECT DB_NAME(dbid)
@@ -3748,11 +3935,25 @@ ELSE 0.015
 			AND objectid is not null
 			GROUP BY cp.plan_handle,DBID,objectid 
 			'
-			INSERT #db_sps
-			EXEC sp_executesql @dynamicSQL;
+
+			BEGIN TRY
+				INSERT #db_sps
+				EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
+
+
 
 	IF EXISTS (SELECT 1 FROM #MissingIndex ) 
 	BEGIN
+				SET @CustomErrorText = 'MISSING INDEXES - !Benefit > 1mm!'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
+				BEGIN TRY
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 18, 'MISSING INDEXES - !Benefit > 1mm!','------','SELECT ''All your index are belong to us'' '
 		INSERT #output_man_script (SectionID, Section,Summary ,Severity, Details,HoursToResolveWithTesting )
 			SELECT 18
@@ -3781,7 +3982,11 @@ ELSE 0.015
 			WHERE T1.magic_benefit_number > 50000
 			ORDER BY magic_benefit_number DESC OPTION (RECOMPILE)
 
-			
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 
 	END
 	IF @Debug = 0
@@ -3789,16 +3994,22 @@ ELSE 0.015
 
 		IF EXISTS (SELECT 1 FROM #HeapTable ) 
 	BEGIN
+					SET @CustomErrorText = 'HEAP TABLES - Bad news'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
+				BEGIN TRY
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 19, 'HEAP TABLES - Bad news','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary ,Severity, Details,HoursToResolveWithTesting )
 			SELECT 19, LEFT(REPLICATE('|', (ISNULL(user_scans,0)+ ISNULL(user_seeks,0) + ISNULL(user_lookups,0) + ISNULL(user_updates,0))/100) + CONVERT(VARCHAR(20),(ISNULL(user_scans,0)+ ISNULL(user_seeks,0) + ISNULL(user_lookups,0) + ISNULL(user_updates,0))/100) ,2500)
-			, LEFT('Rows:' + CONVERT(VARCHAR(20),T1.rows)
+			, REPLACE(REPLACE(LEFT('Rows:' + CONVERT(VARCHAR(20),T1.rows)
 			+ ';'+ '['+T1.DB+'].' + '['+T1.[schema]+'].' + '['+T1.[table]+']' 
 			+ '; Scan:' + CONVERT(VARCHAR(20),ISNULL(T1.last_user_scan,0) ,120)
 			+ '; Seek:' + CONVERT(VARCHAR(20),ISNULL(T1.last_user_seek,0) ,120)
 			+ '; Lookup:' + CONVERT(VARCHAR(20),ISNULL(T1.last_user_lookup,0) ,120),3800)
+			,'[[','['),']]',']')
 			, @Result_Warning
-			, LEFT('/*DIRTY FIX, assuming forwarded records*/ALTER TABLE ['+T1.DB+'].' + '['+T1.[schema]+'].' + '['+T1.[table]+'] REBUILD ; RAISERROR (N''Completed heap ['+T1.DB+'].' + '['+T1.[schema]+'].' + '['+T1.[table]+']'' ,0,1) WITH NOWAIT',3800)
+			, REPLACE(REPLACE(LEFT('/*DIRTY FIX, assuming forwarded records*/ALTER TABLE ['+T1.DB+'].' + '['+T1.[schema]+'].' + '['+T1.[table]+'] REBUILD ; RAISERROR (N''Completed heap ['+T1.DB+'].' + '['+T1.[schema]+'].' + '['+T1.[table]+']'' ,0,1) WITH NOWAIT',3800),'[[','['),']]',']')
 			, 3
 			/*SELECT
 			OBJECT_NAME(ps.object_id) as TableName,
@@ -3815,12 +4026,22 @@ ELSE 0.015
 			FROM #HeapTable T1  
 			WHERE T1.rows > 500
 			ORDER BY (ISNULL(user_scans,0)+ ISNULL(user_seeks,0) + ISNULL(user_lookups,0) + ISNULL(user_updates,0)) DESC,  DB OPTION (RECOMPILE);
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 	END
 	IF @Debug = 0
 		RAISERROR (N'Found heap tables',0,1) WITH NOWAIT;
 
 		IF EXISTS (SELECT 1 FROM #NeverUsedIndex ) 
 	BEGIN
+		SET @CustomErrorText = 'STALE INDEXES - Consider removing them at some stage'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
+				BEGIN TRY
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 20, 'STALE INDEXES - Consider removing them at some stage','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary ,Details )
 
@@ -3856,6 +4077,11 @@ ELSE 0.015
 			AND rows > 90
 			ORDER BY rows DESC, nui.TableName ASC
 	 OPTION (RECOMPILE)
+	 			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
 	END
 		IF EXISTS (SELECT 1 FROM #Action_Statistics ) 
 	BEGIN
@@ -4372,6 +4598,18 @@ WHERE is_default = 1
 
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 32, 'Trace Data','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
+
+SELECT 32
+		,'[Start-Time]:'+CONVERT(VARCHAR,MIN(StartTime),120) 
+		,'[End-Time]:'+CONVERT(VARCHAR,MAX(StartTime),120)
+		,'[TimeSpan-Minutes]:'+ CONVERT(NVARCHAR(20),DATEDIFF(MINUTE, MIN(StartTime), MAX(StartTime)))
+FROM fn_trace_gettable(@tracepath, default) g
+cross apply sys.trace_events te 
+LEFT OUTER JOIN @TraceTypes T on T.Value = g.ObjectType
+WHERE g.eventclass = te.trace_event_id
+
+
+UNION ALL
 		SELECT 32
 		,name 
 		,ISNULL(DatabaseName,'')
@@ -4383,8 +4621,35 @@ FROM fn_trace_gettable(@tracepath, default) g
 cross apply sys.trace_events te 
 LEFT OUTER JOIN @TraceTypes T on T.Value = g.ObjectType
 WHERE g.eventclass = te.trace_event_id
+AND name <> 'Audit Backup/Restore Event'
 GROUP BY name,T.Definition,DatabaseName, ApplicationName
-ORDER BY name,T.Definition,DatabaseName, ApplicationName
+
+
+UNION ALL
+		SELECT 32
+		,name 
+		,ISNULL(DatabaseName,'')
+		,'[EventDefinition]:'+ISNULL(T.Definition,'')
+		+',[Action]:'+
+		CASE 
+		WHEN PATINDEX('%BACKUP LOG%',TextData) > 0 THEN 'LOG BACKUP'
+		WHEN PATINDEX('%BACKUP DATABASE%',TextData) > 0 THEN 'DATABASE BACKUP'
+		WHEN PATINDEX('%ONLY FROM%',TextData) > 0 THEN 'VERIFY'
+		END 
+		+',[Events]:'+ CONVERT(NVARCHAR(50),count(*))
+		+',[TimeSpan-Minutes]:'+ CONVERT(NVARCHAR(20),DATEDIFF(MINUTE, MIN(StartTime), MAX(StartTime)))
+FROM fn_trace_gettable(@tracepath, default) g
+cross apply sys.trace_events te 
+LEFT OUTER JOIN @TraceTypes T on T.Value = g.ObjectType
+WHERE g.eventclass = te.trace_event_id
+AND name ='Audit Backup/Restore Event'
+GROUP BY name,T.Definition,DatabaseName, CASE 
+		WHEN PATINDEX('%BACKUP LOG%',TextData) > 0 THEN 'LOG BACKUP'
+		WHEN PATINDEX('%BACKUP DATABASE%',TextData) > 0 THEN 'DATABASE BACKUP'
+		WHEN PATINDEX('%ONLY FROM%',TextData) > 0 THEN 'VERIFY'
+		END 
+
+
 
 --Query the background trace files
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 33, 'Trace Data Autogrowth','------','------'
@@ -4442,6 +4707,38 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 34, 'Good
 		FROM  #SqueezeMe  S
 
 
+			/*----------------------------------------
+			--Compression evaluation
+			----------------------------------------*/
+
+
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 35, 'Actual Index compression validation','------','------'
+		INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 35
+		, '[DB]:'+dbname +',[TableName]:'+TableName+',[partition_number]:'+CONVERT(VARCHAR(3),partition_number)+',[is_disabled]:'+CONVERT(VARCHAR(3),is_disabled)+',[is_hypothetical]:'+ CONVERT(VARCHAR(3),is_hypothetical)
+		, '[Compression]:'+ Compression+',[CompressionObject]:'+CompressionObject+',[IndexSizeKB]:' + CONVERT(VARCHAR(10),IndexSizeKB)+',[RowCount]:' + CONVERT(VARCHAR(10),RowCounts)
+		, [Just compress] + ';' + [For LOB data]
+		FROM  #compressionstates  S
+
+
+		
+
+			/*----------------------------------------
+			--Index usage patterns
+			----------------------------------------*/
+
+		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 36, 'Index Usage Statistics','------','------'
+		INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 36
+		, '[DB]:'+dbname+',[TableName]:'+ISNULL(ObjectName,'')+',[IndexName]:'+ISNULL(IndexName,'')
+		, '[Reads]:' + CONVERT(VARCHAR(25),Reads)+',[Writes]:' + CONVERT(VARCHAR(25),Writes) +',[FillFactor]:'+ CONVERT(VARCHAR(25),[FillFactor]) +',[has_filter]:'+ CONVERT(VARCHAR(25),has_filter) 
+		, '[IndexType]:' + ISNULL(IndexType,'')+',[last_user_scan]:' + CONVERT(VARCHAR,ISNULL(IndexType,''),120) +',[last_user_lookup]:'+CONVERT(VARCHAR,ISNULL(IndexType,''),120) +',[last_user_seek]:'+ CONVERT(VARCHAR,ISNULL(IndexType,''),120)
+		FROM  #indexusage  S
+
+
+
+/*ADD NEW sections before this line*/
+/*ADD NEW sections before this line*/
 /*ADD NEW sections before this line*/
 			/*----------------------------------------
 			--Calculate daily IO workload
@@ -5520,7 +5817,11 @@ END
 		IF OBJECT_ID('tempdb..#SqueezeMe') IS NOT NULL
 			DROP TABLE #SqueezeMe;
 	
+		IF OBJECT_ID('tempdb..#compressionstates') IS NOT NULL
+			DROP TABLE #compressionstates;
 
+		IF OBJECT_ID('TempDB..#indexusage') IS NOT NULL 
+			DROP TABLE #indexusage
 --the blitz
 
 
