@@ -35,7 +35,7 @@ EXEC master..xp_cmdshell @cmd
 , @PrepForExport int  = 1 
 /*@ShowMigrationRelatedOutputs. When you need to show migration stuff, like possible breaking connections and DMA script outputs, set to 1 to show information*/
 , @ShowMigrationRelatedOutputs int = 1 
-, @SkipHeaps INT = 0 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
+, @SkipHeaps INT = 1 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
 
 /*Email results*/
 , @MailResults BIT = 0
@@ -885,9 +885,26 @@ BEGIN CATCH
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
 END CATCH
 
-	DECLARE @msversion TABLE([Index] INT, Name NVARCHAR(50), [Internal_Value] NVARCHAR(50), [Character_Value] NVARCHAR(250))
+
+
+
+SELECT @errMessage  = 'Checking xp_msver table'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
+  	DECLARE @msversion TABLE([Index] INT, Name NVARCHAR(50), [Internal_Value] NVARCHAR(50), [Character_Value] NVARCHAR(250))
 	INSERT @msversion
 	EXEC xp_msver /*Rather useful this one*/
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
+
+
+	
 
 	--DECLARE @quicksql NVARCHAR(500)
 	--SET @quicksql = N'EXEC Get_xp_msver '
@@ -898,12 +915,17 @@ END CATCH
 
 	--SELECT CONVERT(MONEY,LEFT(Character_Value,3)) FROM @msversion WHERE Name = 'WindowsVersion'
 
+SELECT @errMessage  = 'Checking power plan'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
 	DECLARE @value NVARCHAR(64);
 	DECLARE @key NVARCHAR(512); 
 	DECLARE @WindowsVersion NVARCHAR(50);
 	DECLARE @PowerPlan NVARCHAR(20)
 	SET @key = 'SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes';
 	SELECT @WindowsVersion = CONVERT(MONEY,LEFT(Character_Value,3)) FROM @msversion WHERE Name = 'WindowsVersion'
+
 
 	/*CASE WHEN windows_release IN ('6.3','10.0') AND (@@VERSION LIKE '%Build 10586%' OR @@VERSION LIKE '%Build 14393%')THEN '10.0' ELSE CONVERT(VARCHAR(5),windows_release) END 
 	FROM sys.dm_os_windows_info (NOLOCK);*/
@@ -947,7 +969,22 @@ END CATCH
 			RAISERROR (N'Power Options checked',0,1) WITH NOWAIT;
 		/*PRINT @PowerPlan*/
 	END
-	
+
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
+
+
+
+
+SELECT @errMessage  = 'Checking server properties'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
 
 	SET @rebuildonline = 'OFF';				/* Assume this is not Enterprise, we will test in the next line and if it is , woohoo. */
 	SELECT @isEnterprise = PATINDEX('%enterprise%',@@Version) OPTION (RECOMPILE);
@@ -1057,58 +1094,70 @@ END CATCH
 		, @Result_Warning 
 	END
 	
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
 /*----------------------------------------
 			--Check for current supported build of SQL server
 -------------------------------------*/
-DECLARE @CurrentBuild NVARCHAR(50)
-SELECT @CurrentBuild = [Character_Value] 
-FROM @msversion 
-WHERE [Name] = 'ProductVersion' 
 
-DECLARE @pstext NVARCHAR(4000)
+SELECT @errMessage  = 'Checking server build versions'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
+	DECLARE @CurrentBuild NVARCHAR(50)
+	SELECT @CurrentBuild = [Character_Value] 
+	FROM @msversion 
+	WHERE [Name] = 'ProductVersion' 
 
-/*What does Microsoft say about support*/
-DECLARE @SQLproductlevel NVARCHAR(50)
-DECLARE @SQLVersionText NVARCHAR(200)
+	DECLARE @pstext NVARCHAR(4000)
 
-SELECT @SQLproductlevel = CONVERT(VARCHAR(50),SERVERPROPERTY ('productlevel'))
-IF @SQLproductlevel = 'RTM'
-	SET @SQLproductlevel = '';
+	/*What does Microsoft say about support*/
+	DECLARE @SQLproductlevel NVARCHAR(50)
+	DECLARE @SQLVersionText NVARCHAR(200)
 
-
-DECLARE @TrimVersion NVARCHAR(250)
-SET @TrimVersion = RTRIM(LTRIM(REPLACE(LEFT(@@VERSION,PATINDEX('% - %',@@VERSION)), 'Microsoft SQL Server ','')))
-	
-	
-DECLARE @MyBuild NVARCHAR(50)
-SELECT @MyBuild = CONVERT(NVARCHAR(50),SERVERPROPERTY('productversion'))
+	SELECT @SQLproductlevel = CONVERT(VARCHAR(50),SERVERPROPERTY ('productlevel'))
+	IF @SQLproductlevel = 'RTM'
+		SET @SQLproductlevel = '';
 
 
-DECLARE @BuildTable TABLE(
-[Server] NVARCHAR(250)
-, MajorBuild NVARCHAR(5)
-, SupportEnds NVARCHAR(25)
-, MinBuild NVARCHAR(25)
-, MaxBuild NVARCHAR(25)
-)
-  INSERT INTO @BuildTable SELECT '2000', '8', '2007-10-07', '8.0.047', '8.0.997' 
- INSERT INTO @BuildTable SELECT '2000', '8', '2013-09-04', '8.0.2039', '8.0.2305' 
- INSERT INTO @BuildTable SELECT '2005', '9', '2016-12-04', '9.0.1399', '9.0.5324.00' 
- INSERT INTO @BuildTable SELECT '2008', '10', '2019-09-07', '10.0.1019.17', '10.0.6556.0' 
- INSERT INTO @BuildTable SELECT '2008R2', '10', '2019-09-07', '10.50.1092.20', '10.50.6560.0' 
- INSERT INTO @BuildTable SELECT '2012', '11', '2014-01-14', '11.0.1103.9', '11.0.2100.60' 
- INSERT INTO @BuildTable SELECT '2012', '11', '2015-07-14', '11.0.2214.0', '11.0.3128.0' 
- INSERT INTO @BuildTable SELECT '2012', '11', '2017-01-10', '11.0.3153.0', '11.0.5678.0' 
- INSERT INTO @BuildTable SELECT '2012', '11', '2018-10-09', '11.0.6020.0', '11.0.6615.2' 
- INSERT INTO @BuildTable SELECT '2012', '11', '2022-07-12', '11.0.7001.0', '11.0.7493.4' 
- INSERT INTO @BuildTable SELECT '2014', '12', '2016-07-12', '12.0.1524.0', '12.0.2569.0' 
- INSERT INTO @BuildTable SELECT '2014', '12', '2020-01-14', '12.0.4050.0', '12.0.5687.1' 
- INSERT INTO @BuildTable SELECT '2014', '12', '2024-07-09', '12.0.6024.0', '12.0.6372.1' 
- INSERT INTO @BuildTable SELECT '2016', '13', '2018-01-09', '13.0.1000.281', '13.0.3900.73' 
- INSERT INTO @BuildTable SELECT '2016', '13', '2019-07-09', '13.0.4001.0', '13.0.4604.0' 
- INSERT INTO @BuildTable SELECT '2016', '13', '2026-07-14', '13.0.5026.0', '13.0.5820.21' 
- INSERT INTO @BuildTable SELECT '2017', '14', '2027-10-12', '14.0.1.246', '14.0.900.75' 
- INSERT INTO @BuildTable SELECT '2019', '15', '2030-01-08', '15.0.1000.34', '15.0.4043.16'
+	DECLARE @TrimVersion NVARCHAR(250)
+	SET @TrimVersion = RTRIM(LTRIM(REPLACE(LEFT(@@VERSION,PATINDEX('% - %',@@VERSION)), 'Microsoft SQL Server ','')))
+		
+		
+	DECLARE @MyBuild NVARCHAR(50)
+	SELECT @MyBuild = CONVERT(NVARCHAR(50),SERVERPROPERTY('productversion'))
+
+
+	DECLARE @BuildTable TABLE(
+	[Server] NVARCHAR(250)
+	, MajorBuild NVARCHAR(5)
+	, SupportEnds NVARCHAR(25)
+	, MinBuild NVARCHAR(25)
+	, MaxBuild NVARCHAR(25)
+	)
+	INSERT INTO @BuildTable SELECT '2000', '8', '2007-10-07', '8.0.047', '8.0.997' 
+	INSERT INTO @BuildTable SELECT '2000', '8', '2013-09-04', '8.0.2039', '8.0.2305' 
+	INSERT INTO @BuildTable SELECT '2005', '9', '2016-12-04', '9.0.1399', '9.0.5324.00' 
+	INSERT INTO @BuildTable SELECT '2008', '10', '2019-09-07', '10.0.1019.17', '10.0.6556.0' 
+	INSERT INTO @BuildTable SELECT '2008R2', '10', '2019-09-07', '10.50.1092.20', '10.50.6560.0' 
+	INSERT INTO @BuildTable SELECT '2012', '11', '2014-01-14', '11.0.1103.9', '11.0.2100.60' 
+	INSERT INTO @BuildTable SELECT '2012', '11', '2015-07-14', '11.0.2214.0', '11.0.3128.0' 
+	INSERT INTO @BuildTable SELECT '2012', '11', '2017-01-10', '11.0.3153.0', '11.0.5678.0' 
+	INSERT INTO @BuildTable SELECT '2012', '11', '2018-10-09', '11.0.6020.0', '11.0.6615.2' 
+	INSERT INTO @BuildTable SELECT '2012', '11', '2022-07-12', '11.0.7001.0', '11.0.7493.4' 
+	INSERT INTO @BuildTable SELECT '2014', '12', '2016-07-12', '12.0.1524.0', '12.0.2569.0' 
+	INSERT INTO @BuildTable SELECT '2014', '12', '2020-01-14', '12.0.4050.0', '12.0.5687.1' 
+	INSERT INTO @BuildTable SELECT '2014', '12', '2024-07-09', '12.0.6024.0', '12.0.6372.1' 
+	INSERT INTO @BuildTable SELECT '2016', '13', '2018-01-09', '13.0.1000.281', '13.0.3900.73' 
+	INSERT INTO @BuildTable SELECT '2016', '13', '2019-07-09', '13.0.4001.0', '13.0.4604.0' 
+	INSERT INTO @BuildTable SELECT '2016', '13', '2026-07-14', '13.0.5026.0', '13.0.5820.21' 
+	INSERT INTO @BuildTable SELECT '2017', '14', '2027-10-12', '14.0.1.246', '14.0.900.75' 
+	INSERT INTO @BuildTable SELECT '2019', '15', '2030-01-08', '15.0.1000.34', '15.0.4043.16'
 	
 	/*This step requires administrative permissions on the local machine for SQL server Service account, at least it does not play nicely with "NT xx" accounts*/
 	INSERT #output_man_script (SectionID, Section,Summary,Severity, Details)
@@ -1131,9 +1180,23 @@ DECLARE @BuildTable TABLE(
 	SELECT 0, 'ServerName is wrong','Current Server Name:' + CAST (Serverproperty( 'ComputerNamePhysicalNetBIOS' ) AS NVARCHAR(250)) + '; SQL Instance Name:' + CAST (@@SERVERNAME AS NVARCHAR(250)) , @Result_Warning 
 	END
 
+ 
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
+
+
+
+
+
 
 	IF @Debug = 0
 		RAISERROR (N'CPU NUMA node details',0,1) WITH NOWAIT;
+BEGIN TRY
 	IF @CPUHyperthreadratio <> @CPUcount
 	INSERT #output_man_script (SectionID,Section,Summary, Severity)
 	SELECT 0, 'CPU NUMA node details','Socket ID;cpu_id;is_online;FlagMe;load_factor;%current_tasks;%current_workers;%active_workers;%context_switches;%preemptive_switches;%idle_switches', @Result_Warning 
@@ -1163,6 +1226,20 @@ DECLARE @BuildTable TABLE(
 	, @Result_Warning 
 	FROM sys.dm_os_schedulers
 	WHERE status = 'VISIBLE ONLINE'
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
+
+
+
+SELECT @errMessage  = 'Checking tempDB file count'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
 
 	BEGIN
 		INSERT #output_man_script (SectionID,Section,Summary, Severity, Details )
@@ -1210,9 +1287,19 @@ DECLARE @BuildTable TABLE(
 
 	END	
 			
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
 
-	
-	DECLARE @xp_errorlog TABLE(LogDate DATETIME,  ProcessInfo NVARCHAR(250), Text NVARCHAR(500))
+
+SELECT @errMessage  = 'Checking errorlog'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
+	DECLARE @xp_errorlog TABLE(LogDate DATETIME,  ProcessInfo NVARCHAR(250), Text NVARCHAR(4000))
 
 	INSERT @xp_errorlog
 	EXEC sys.xp_readerrorlog 0, 1, N'locked pages'
@@ -1259,12 +1346,22 @@ DECLARE @BuildTable TABLE(
 		, 'Consider enabling this. Speeds up database data file growth.'
 		, @Result_Warning
 	END
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
 			/*----------------------------------------
 			--Check for current service account
 			----------------------------------------*/
-		IF @Debug = 0
-			RAISERROR (N'Check for current service account',0,1) WITH NOWAIT;
-DECLARE @SQLsn NVARCHAR(128);
+
+SELECT @errMessage  = 'Checking service account details'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
+		DECLARE @SQLsn NVARCHAR(128);
 /*
 			SELECT DSS.servicename,
 			DSS.startup_type_desc,
@@ -1369,10 +1466,21 @@ DECLARE @SQLsn NVARCHAR(128);
 			RAISERROR (N'Trouble with SQL Services',0,1) WITH NOWAIT;
 	END CATCH
 
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
 	
 			/*----------------------------------------
 			--Check for high worker thread usage
 			----------------------------------------*/
+SELECT @errMessage  = 'Checking for high worker thread usage'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
+
 	DECLARE @workerthreadspercentage FLOAT;
 	SELECT @workerthreadspercentage  = 
 		(
@@ -1415,10 +1523,17 @@ DECLARE @SQLsn NVARCHAR(128);
 	IF @Debug = 0
 		RAISERROR (N'Looked at worker thread usage',0,1) WITH NOWAIT;
 
-	
-			   /*----------------------------------------
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH	
+			 /*----------------------------------------
 			--Performance counters
 			----------------------------------------*/
+
+
 	SELECT @ts =(
 	SELECT cpu_ticks/(cpu_ticks/ms_ticks)
 	FROM sys.dm_os_sys_info 
@@ -1526,6 +1641,12 @@ BEGIN CATCH
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
        
 END CATCH
+
+
+SELECT @errMessage  = 'Working those perfom counters'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
 
 BEGIN
 	DECLARE @syscounters NVARCHAR(4000)
@@ -1664,99 +1785,120 @@ BEGIN
 	END
 END
 
+
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
 /*Generate DTU calculations*/
-INSERT #output_man_script 
-(
-	SectionID
-	, Section
-	, Summary
-	, Details
-) 
-SELECT 0
-,'For Azure Calculations'
-,'------'
-,'------'
-INSERT #output_man_script 
-(
-	SectionID
-	, Section
-	,Summary
-)
-SELECT 0
-, 'Number of CPUs exposed to OS' [Measure]
-, CONVERT(VARCHAR(3),@CPUcount) [Value] 
 
-UNION ALL
-SELECT 0
-, 'Databases(_total)\log bytes flushed/sec (MB)'
-, AVG(CONVERT(MONEY,CounterValue))/1024/1024
-FROM @PerformanceCounter T1
-WHERE T1.CounterName LIKE '%databases(_total)\log bytes flushed/sec'
-
-UNION ALL
-SELECT 0
-, 'Average IOPS'
-, SUM(CONVERT(MONEY,CounterValue))/@loops
-FROM @PerformanceCounter T1
-WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Reads/sec'
-OR  T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
-
-UNION ALL
-SELECT 0
-, 'Disk Read IOPS'
-, AVG(CONVERT(MONEY,CounterValue))
-FROM @PerformanceCounter T1
-WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Reads/sec'
-
-UNION ALL
-SELECT 0
-, 'Disk Write IOPS'
-, AVG(CONVERT(MONEY,CounterValue))
-FROM @PerformanceCounter T1
-WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
+SELECT @errMessage  = 'Checking Azure calculations'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
 
 
-
-DECLARE @CPURingBuffer TABLE
+	INSERT #output_man_script 
 	(
-		SQLProcessUtilization SMALLINT
-		,SystemIdle SMALLINT
-		,[Event_Time] DATETIME
+		SectionID
+		, Section
+		, Summary
+		, Details
+	) 
+	SELECT 0
+	,'For Azure Calculations'
+	,'------'
+	,'------'
+	INSERT #output_man_script 
+	(
+		SectionID
+		, Section
+		,Summary
 	)
+	SELECT 0
+	, 'Number of CPUs exposed to OS' [Measure]
+	, CONVERT(VARCHAR(3),@CPUcount) [Value] 
 
-	INSERT @CPURingBuffer
-	SELECT SQLProcessUtilization
-		, SystemIdle
-		, DATEADD(ms,-1 *(@ts - [timestamp]), GETDATE())AS [Event_Time]
-		FROM 
+	UNION ALL
+	SELECT 0
+	, 'Databases(_total)\log bytes flushed/sec (MB)'
+	, AVG(CONVERT(MONEY,CounterValue))/1024/1024
+	FROM @PerformanceCounter T1
+	WHERE T1.CounterName LIKE '%databases(_total)\log bytes flushed/sec'
+
+	UNION ALL
+	SELECT 0
+	, 'Average IOPS'
+	, SUM(CONVERT(MONEY,CounterValue))/@loops
+	FROM @PerformanceCounter T1
+	WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Reads/sec'
+	OR  T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
+
+	UNION ALL
+	SELECT 0
+	, 'Disk Read IOPS'
+	, AVG(CONVERT(MONEY,CounterValue))
+	FROM @PerformanceCounter T1
+	WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Reads/sec'
+
+	UNION ALL
+	SELECT 0
+	, 'Disk Write IOPS'
+	, AVG(CONVERT(MONEY,CounterValue))
+	FROM @PerformanceCounter T1
+	WHERE T1.CounterName LIKE '%LogicalDisk(_Total)\Disk Writes/sec'
+
+
+
+	DECLARE @CPURingBuffer TABLE
 		(
-			SELECT 
-			record.value('(./Record/@id)[1]','int') AS record_id
-			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]','int') AS [SystemIdle]
-			, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]','int') AS [SQLProcessUtilization]
-			, [timestamp]
+			SQLProcessUtilization SMALLINT
+			,SystemIdle SMALLINT
+			,[Event_Time] DATETIME
+		)
+
+		INSERT @CPURingBuffer
+		SELECT SQLProcessUtilization
+			, SystemIdle
+			, DATEADD(ms,-1 *(@ts - [timestamp]), GETDATE())AS [Event_Time]
 			FROM 
 			(
-				SELECT
-				[timestamp]
-				, convert(xml, record) AS [record] 
-				FROM sys.dm_os_ring_buffers 
-				WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
-				AND record LIKE'%%'
-			)AS x
-		) as y
-	
+				SELECT 
+				record.value('(./Record/@id)[1]','int') AS record_id
+				, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]','int') AS [SystemIdle]
+				, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]','int') AS [SQLProcessUtilization]
+				, [timestamp]
+				FROM 
+				(
+					SELECT
+					[timestamp]
+					, convert(xml, record) AS [record] 
+					FROM sys.dm_os_ring_buffers 
+					WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+					AND record LIKE'%%'
+				)AS x
+			) as y
+		
 
-INSERT #output_man_script (SectionID, Section,Summary)
-SELECT 0 ,'SQL Avg Usage %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SQLProcessUtilization) FROM @CPURingBuffer T1
-UNION ALL
-SELECT 0 ,'SQL Avg NOT 0 %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SQLProcessUtilization) FROM @CPURingBuffer T1 WHERE SQLProcessUtilization <> 0
-UNION ALL
-SELECT 0 ,'SQL MAX Usage %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , MAX(SQLProcessUtilization) FROM @CPURingBuffer T1
-UNION ALL
-SELECT 0 ,'OS idle CPU %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SystemIdle) FROM @CPURingBuffer T1 
+	INSERT #output_man_script (SectionID, Section,Summary)
+	SELECT 0 ,'SQL Avg Usage %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SQLProcessUtilization) FROM @CPURingBuffer T1
+	UNION ALL
+	SELECT 0 ,'SQL Avg NOT 0 %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SQLProcessUtilization) FROM @CPURingBuffer T1 WHERE SQLProcessUtilization <> 0
+	UNION ALL
+	SELECT 0 ,'SQL MAX Usage %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , MAX(SQLProcessUtilization) FROM @CPURingBuffer T1
+	UNION ALL
+	SELECT 0 ,'OS idle CPU %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' to: ' + CONVERT(VARCHAR, MAX([Event_Time]),120) , AVG(SystemIdle) FROM @CPURingBuffer T1 
 
 
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
 
 	IF @Debug = 0
 		RAISERROR (N'Finished rough IOPS calculation',0,1) WITH NOWAIT;
@@ -1765,6 +1907,11 @@ SELECT 0 ,'OS idle CPU %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' 
 			/*----------------------------------------
 			--Check for any pages marked suspect for corruption
 			----------------------------------------*/
+SELECT @errMessage  = 'Checking for suspiciouns pages'
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+BEGIN TRY
+
 	DECLARE @syspectpagescount FLOAT
 	SELECT @syspectpagescount = COUNT(*) FROM msdb.dbo.suspect_pages
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 0, 'SUSPECT PAGES','------','------'
@@ -1784,7 +1931,12 @@ SELECT 0 ,'OS idle CPU %. From: ' + CONVERT(VARCHAR, MIN([Event_Time]),120) + ' 
 	IF @Debug = 0
 		RAISERROR (N'Included Suspect Pages, if any',0,1) WITH NOWAIT;
 
-
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
 			/*----------------------------------------
 			--Before anything else, look for things that might point to breaking behaviour. Look for out of support SQL bits floating around
 			--WORKAROUND - create all indexes using the deafult SET settings of the applications connecting into the server
@@ -2267,7 +2419,8 @@ SELECT
 		DECLARE @logCount INT;
 		SELECT @logCount = COUNT(*) FROM @ErrorLogFiles;
 		DECLARE @sql NVARCHAR(MAX);
-		DECLARE @i INT = 0;
+		DECLARE @i INT 
+		SET @i = 0;
 		DECLARE @tableName NVARCHAR(128);
 		DECLARE @datecheck DATETIME
 		DECLARE curReadSQLErrorLogs CURSOR FAST_FORWARD READ_ONLY FOR 
@@ -2299,7 +2452,7 @@ SELECT
 
 			END
 			   SET @sql = '';
-			   SET @i += 1;
+			   SET @i = @i + 1;
 			FETCH NEXT FROM curReadSQLErrorLogs INTO @i
 		END
 		CLOSE curReadSQLErrorLogs
