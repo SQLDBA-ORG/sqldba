@@ -67,7 +67,7 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '14/06/2021' /*DD/MM/YYYY*/
+	SET @MagicVersion = '20/08/2021' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
@@ -701,6 +701,46 @@ END CATCH
 			  [text_filtered] [nvarchar](MAX) COLLATE SQL_Latin1_General_CP1_CI_AS
 											  NULL
 			);
+
+		IF OBJECT_ID('tempdb..#blockinghistory') IS NOT NULL
+			DROP TABLE #blockinghistory;
+			CREATE TABLE #blockinghistory
+			(
+			DatabaseName NVARCHAR(2000)
+			, ObjectName NVARCHAR(2000)
+			, LocksCount BIGINT
+			, BlocksCount BIGINT
+			, BlocksWaitTimeMs BIGINT
+			, index_id BIGINT
+			, page_io_latch_wait_count BIGINT
+			, page_io_latch_wait_in_ms BIGINT
+			, page_compression_success_count BIGINT
+			, range_scan_count BIGINT
+			, singleton_lookup_count BIGINT
+			, forwarded_fetch_count BIGINT
+			, lob_fetch_in_bytes BIGINT
+			, lob_orphan_create_count BIGINT
+			, lob_orphan_insert_count BIGINT 
+			, leaf_ghost_count BIGINT 
+			, insert_count BIGINT 
+			, delete_count BIGINT
+			, update_count BIGINT
+			, allocation_count BIGINT
+			, page_merge_count BIGINT
+			)
+		
+
+		IF OBJECT_ID('tempdb..#lockinghistory') IS NOT NULL
+			DROP TABLE #lockinghistory;	
+		CREATE TABLE #lockinghistory
+			(
+			DatabaseName NVARCHAR(2000)
+			, ObjectName NVARCHAR(2000)
+			, LocksCount BIGINT
+			, BlocksCount BIGINT
+			, blocksWaitTimeMs BIGINT
+			, index_id BIGINT
+			)
 
 		IF OBJECT_ID('tempdb..#ErrorLog') IS NOT NULL
 			DROP TABLE #ErrorLog;
@@ -2079,7 +2119,7 @@ END CATCH
 		SET @EndTest = GETDATE();
 		SELECT   
 			@secondsperoperator = AVG(qs.total_worker_time/qs.execution_count/1000)/0.7248/1000  
-		FROM sys.dm_exec_query_stats qs
+		FROM  #dadatafor_exec_query_stats qs
 		CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
 		WHERE qs.total_logical_reads = 0 
 		AND qs.last_execution_time BETWEEN DATEADD(MINUTE,-2,@StartTest) AND GETDATE()
@@ -2222,7 +2262,7 @@ DECLARE @Databases TABLE
 			--Get uptime and cache age
 			----------------------------------------*/
 
-	SET @oldestcachequery = (SELECT ISNULL(  MIN(creation_time),0.1) FROM sys.dm_exec_query_stats WITH (NOLOCK));
+	SET @oldestcachequery = (SELECT ISNULL(  MIN(creation_time),0.1) FROM  #dadatafor_exec_query_stats WITH (NOLOCK));
 	SET @lastservericerestart = (SELECT create_date FROM sys.databases WHERE name = 'tempdb');
 	SET @minutesSinceRestart = (SELECT DATEDIFF(MINUTE,@lastservericerestart,GETDATE()));
 	
@@ -3251,7 +3291,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		DatabaseID
 		,DB_Name(DatabaseID)AS [DatabaseName]
 		,SUM(total_worker_time)AS [CPU_Time(Ms)]
-		FROM sys.dm_exec_query_stats AS qs
+		FROM  #dadatafor_exec_query_stats AS qs
 		CROSS APPLY
 		(
 			SELECT CONVERT(int, value)AS [DatabaseID]
@@ -3503,7 +3543,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	INSERT #output_man_script (SectionID, Section,Summary, Details, QueryPlan) SELECT 17,'PLAN INSIGHT - EVERYTHING','------','------',NULL
 	INSERT #output_man_script (SectionID, Section,Summary, Details, QueryPlan) 
 	
-	SELECT  17,
+	SELECT TOP 25 17,
 	 /*Bismillah, Find most intensive query*/
 	REPLICATE ('|', CASE WHEN [Total_GBsRead]*[Impact%] = 0 THEN 0 ELSE 100.0 * [Total_GBsRead]*[Impact%]  / SUM ([Total_GBsRead]*[Impact%]) OVER() END)   
 	+ CASE WHEN [Impact%] > 0 THEN CONVERT(VARCHAR(20),CONVERT(INT,ROUND(100.0 * [Total_GBsRead]*[Impact%]  / SUM ([Total_GBsRead]*[Impact%]) OVER(),0))) + '%' ELSE '' END [Section]
@@ -4045,6 +4085,47 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			END CATCH
 
 
+			SET @CustomErrorText = '['+@DatabaseName+'] Blocking tables'
+		IF @Debug = 0
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+
+			SELECT @dynamicSQL = ' USE ['+@DatabaseName+']
+			SELECT '''+@DatabaseName+''' DatabaseName
+			, object_name(object_id) as ObjectName
+			, row_lock_count + page_lock_count as LocksCount
+			, row_lock_wait_count + page_lock_wait_count as BlocksCount
+			, row_lock_wait_in_ms + page_lock_wait_in_ms as BlocksWaitTimeMs	
+			, index_id
+			, page_io_latch_wait_count + tree_page_io_latch_wait_count [page_io_latch_wait_count]
+			, page_io_latch_wait_in_ms + tree_page_io_latch_wait_in_ms [page_io_latch_wait_in_ms]
+			, page_compression_success_count
+			, page_io_latch_wait_in_ms
+			, range_scan_count
+			, singleton_lookup_count
+			, forwarded_fetch_count
+			, lob_fetch_in_bytes
+			, lob_orphan_create_count
+			, lob_orphan_insert_count
+			, leaf_ghost_count
+			, leaf_insert_count + nonleaf_insert_count [insert_count]
+			, leaf_delete_count + nonleaf_delete_count [delete_count]
+			, leaf_update_count + nonleaf_update_count [update_count]
+			, leaf_allocation_count + nonleaf_allocation_count [allocation_count]
+			, leaf_page_merge_count + nonleaf_page_merge_count [page_merge_count]
+			from sys.dm_db_index_operational_stats(NULL,NULL,NULL,NULL)
+			where db_name(database_id) = DB_NAME()
+			AND row_lock_count + page_lock_count > 0
+			AND object_name(object_id) NOT LIKE ''sys%''
+			' 
+			BEGIN TRY
+			INSERT #blockinghistory 
+			EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
+
 /*
 LOOPING of databases ends here, add new sections above this portion
 */
@@ -4064,34 +4145,29 @@ LOOPING of databases ends here, add new sections above this portion
 		IF @Debug = 0
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 
-			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-			USE [tempdb];
-			SELECT DB_NAME(dbid)
-			, OBJECT_NAME(objectid,dbid)AS [SP Name]
-			, SUM(total_logical_writes)[TotalLogicalWrites]
-			, SUM(total_logical_writes) / SUM(usecounts) AS [AvgLogicalWrites]
-			, SUM(usecounts) [execution_count]
-			, ISNULL(
-			CASE WHEN DATEDIFF(SECOND, MIN(qs.creation_time), GETDATE()) <5 
-			THEN SUM(usecounts)/DATEDIFF(MILLISECOND, MIN(qs.creation_time), GETDATE())/1000
-			ELSE SUM(usecounts)/DATEDIFF(SECOND, MIN(qs.creation_time), GETDATE())
-			END ,0) [Calls/Second]
-			, SUM(total_elapsed_time) [total_elapsed_time]
-			, SUM(total_elapsed_time) / SUM(usecounts) AS [avg_elapsed_time]
-			, MIN(qs.creation_time) [cached_time]
-			FROM sys.dm_exec_query_stats qs  
-			   join sys.dm_exec_cached_plans cp on qs.plan_handle = cp.plan_handle 
-			   CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) 
-			WHERE 1=1
-			AND dbid IS NOT NULL
-			AND DB_NAME(dbid) IS NOT NULL
-			AND objectid is not null
-			GROUP BY cp.plan_handle,DBID,objectid 
-			'
-
 			BEGIN TRY
 				INSERT #db_sps
-				EXEC sp_executesql @dynamicSQL;
+				SELECT DB_NAME(dbid)
+				, OBJECT_NAME(objectid,dbid)AS [SP Name]
+				, SUM(total_logical_writes)[TotalLogicalWrites]
+				, SUM(total_logical_writes) / SUM(usecounts) AS [AvgLogicalWrites]
+				, SUM(usecounts) [execution_count]
+				, ISNULL(
+				CASE WHEN DATEDIFF(SECOND, MIN(qs.creation_time), GETDATE()) <5 
+				THEN SUM(usecounts)/DATEDIFF(MILLISECOND, MIN(qs.creation_time), GETDATE())/1000
+				ELSE SUM(usecounts)/DATEDIFF(SECOND, MIN(qs.creation_time), GETDATE())
+				END ,0) [Calls/Second]
+				, SUM(total_elapsed_time) [total_elapsed_time]
+				, SUM(total_elapsed_time) / SUM(usecounts) AS [avg_elapsed_time]
+				, MIN(qs.creation_time) [cached_time]
+				FROM  #dadatafor_exec_query_stats qs  
+				join sys.dm_exec_cached_plans cp on qs.plan_handle = cp.plan_handle 
+				CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) 
+				WHERE 1=1
+				AND dbid IS NOT NULL
+				AND DB_NAME(dbid) IS NOT NULL
+				AND objectid is not null
+				GROUP BY cp.plan_handle,DBID,objectid 
 			END TRY
 			BEGIN CATCH
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -4527,6 +4603,7 @@ INSERT INTO @ConfidenceLevel VALUES(1.96,'95%')
 
 SET @lastservericerestart = (SELECT create_date FROM sys.databases WHERE name = 'tempdb');
 
+BEGIN TRY
 INSERT INTO @confidence
 select d.name, [LastSomethingHours] = DATEDIFF(HOUR,ISNULL(
 (select X1= max(bb.xx) 
@@ -4546,7 +4623,10 @@ FROM master.dbo.sysdatabases d
 left outer join sys.dm_db_index_usage_stats s on d.dbid= s.database_id 
 WHERE database_id > 4
 group by d.name
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Issue with @confidence',0,1) WITH NOWAIT;
+END CATCH
 		
 IF @ShowMigrationRelatedOutputs = 1
 BEGIN
@@ -4854,6 +4934,16 @@ ORDER BY DBName
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 34, 'Good index compression candidates','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 34
+		, DB
+		, '[CurrentCompression]:' + data_compression_desc 
+		, '[SizeGB]:' + CONVERT(VARCHAR(30),CONVERT(MONEY,SUM(reserved_page_count))*8/1024/1024)
+		+ ',[Reserved Pages]:' + CONVERT(VARCHAR(30),SUM(reserved_page_count))
+		+ ',[Rows]:' + CONVERT(VARCHAR(30),SUM(row_count))
+		FROM  #SqueezeMe  S
+		GROUP BY DB,data_compression_desc
+
+		INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 34
 		, DB 
 		, '[CurrentCompression]:' + data_compression_desc + ',[Reserved Pages]:' + CONVERT(VARCHAR(10),reserved_page_count) +',[RowCount]:' + CONVERT(VARCHAR(10),row_count)
 		, [Just compress] + ';' + [For LOB data]
@@ -4873,21 +4963,243 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 35, 'Actu
 		, [Just compress] + ';' + [For LOB data]
 		FROM  #compressionstates  S
 
-
-		
-
 			/*----------------------------------------
-			--Index usage patterns
+			-- TOP n Index usage patterns
 			----------------------------------------*/
 
-		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 36, 'Index Usage Statistics','------','------'
+		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 36, 'Index Usage Statistics TOP 25','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 36
 		, '[DB]:'+dbname+',[TableName]:'+ISNULL(ObjectName,'')+',[IndexName]:'+ISNULL(IndexName,'')
 		, '[Reads]:' + CONVERT(VARCHAR(25),Reads)+',[Writes]:' + CONVERT(VARCHAR(25),Writes) +',[FillFactor]:'+ CONVERT(VARCHAR(25),[FillFactor]) +',[has_filter]:'+ CONVERT(VARCHAR(25),has_filter) 
 		, '[IndexType]:' + ISNULL(IndexType,'')+',[last_user_scan]:' + CONVERT(VARCHAR,ISNULL(IndexType,''),120) +',[last_user_lookup]:'+CONVERT(VARCHAR,ISNULL(IndexType,''),120) +',[last_user_seek]:'+ CONVERT(VARCHAR,ISNULL(IndexType,''),120)
-		FROM  #indexusage  S
+		FROM  
+		(
+			SELECT RANK() OVER(ORDER BY([Reads] + [Writes]) DESC) RankMe
+			,dbname
+			,ObjectName
+			,IndexName
+			,IndexType
+			,Reads
+			,Writes
+			,[FillFactor]
+			,has_filter
+		FROM #indexusage
+		)  S
+		WHERE RankMe < 25
 
+
+
+
+
+			/*----------------------------------------
+			--Our INdex usage statistics evaluation
+			----------------------------------------*/
+
+
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 37, 'Our Index Usage Evaluation','------','------'
+		INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 37
+		, '[DB]:'+dbname
+		, '[IndexCount]:'+CONVERT(VARCHAR(25),COUNT(IndexName)) 
+		, '[Reads]:' + CONVERT(VARCHAR(25),SUM(Reads))+',[Writes]:' + CONVERT(VARCHAR(25),SUM(Writes))  
+		FROM  
+		(
+			SELECT RANK() OVER(ORDER BY([Reads] + [Writes]) DESC) RankMe
+			,dbname
+			,ObjectName
+			,IndexName
+			,IndexType
+			,Reads
+			,Writes
+			,[FillFactor]
+			,has_filter
+		FROM #indexusage
+		)  S
+		WHERE UPPER(IndexName) LIKE '%LEXEL%' 
+		OR UPPER(IndexName) LIKE '%SQLDBA_ORG%'
+		GROUP BY dbname
+
+
+			/*----------------------------------------
+			--Blocking tables
+			----------------------------------------*/
+
+
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 38, 'Currently blocking tables','------','------'
+		INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 38
+		, 'DatabaseName:'+DatabaseName
+		+ '; ObjectName:'							+ ObjectName
+		+ '; index_id:'							+ CONVERT(VARCHAR(20),index_id)
+		+ '; LocksCount:'						+ CONVERT(VARCHAR(20),LocksCount)
+		+ '; BlocksCount:'						+ CONVERT(VARCHAR(20),BlocksCount)
+		+ '; BlocksWaitTimeMs:'					+ CONVERT(VARCHAR(20),BlocksWaitTimeMs)
+
+
+		, '; page_io_latch_wait_in_ms:'			+ CONVERT(VARCHAR(20),page_io_latch_wait_in_ms)
+		+ '; range_scan_count:'					+ CONVERT(VARCHAR(20),range_scan_count)
+		+ '; singleton_lookup_count:'			+ CONVERT(VARCHAR(20),singleton_lookup_count)
+		+ '; forwarded_fetch_count:'			+ CONVERT(VARCHAR(20),forwarded_fetch_count)
+		+ '; DML_count:'						+ CONVERT(VARCHAR(20),insert_count + delete_count + update_count)
+
+
+		, 'page_io_latch_wait_count:'			+ CONVERT(VARCHAR(20),page_io_latch_wait_count)
+		+ '; page_compression_success_count:'	+ CONVERT(VARCHAR(20),page_compression_success_count)
+		+ '; lob_fetch_in_bytes:'				+ CONVERT(VARCHAR(20),lob_fetch_in_bytes)
+		+ '; lob_orphan_create_count:'			+ CONVERT(VARCHAR(20),lob_orphan_create_count)
+		+ '; lob_orphan_insert_count:'			+ CONVERT(VARCHAR(20),lob_orphan_insert_count)
+		+ '; leaf_ghost_count:'					+ CONVERT(VARCHAR(20),leaf_ghost_count)
+		+ '; insert_count:'						+ CONVERT(VARCHAR(20),insert_count)
+		+ '; delete_count:'						+ CONVERT(VARCHAR(20),delete_count)
+		+ '; update_count:'						+ CONVERT(VARCHAR(20),update_count)
+		+ '; allocation_count:'					+ CONVERT(VARCHAR(20),allocation_count)
+		+ '; page_merge_count:'					+ CONVERT(VARCHAR(20),page_merge_count)
+
+		FROM  #blockinghistory  b
+		ORDER BY [page_io_latch_wait_in_ms] DESC
+
+
+			/*----------------------------------------
+			--Usage top xx queries
+			----------------------------------------*/
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 39, 'Top Queries - minus the plan','------','------'
+INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 39
+	, '[DB]:'+DBs.name
+	+ '; [Total Elapsed Time in S]:' + CONVERT(VARCHAR(20),s.[Total Elapsed Time in S])
+	+ '; [Total Execution Count]:' +CONVERT(VARCHAR(20),s.[Total Execution Count])
+	+ '; [RankIO]:' + CONVERT(VARCHAR(20),s.[RankIO])
+	+ '; [RankExec]:' + CONVERT(VARCHAR(20),s.[RankExec])
+	+ '; [RankCompute]:'+CONVERT(VARCHAR(20),s.[RankCompute])
+	
+	
+	
+	, '[Pages]:'+CONVERT(VARCHAR(20),s.[Pages])
+	+ '; [I/O GB]:'+CONVERT(VARCHAR(20),s.[I/O GB])
+	+ '; [Avg CPU Time in MS]:'+CONVERT(VARCHAR(20),s.[Avg CPU Time in MS])
+	+ '; [Total physical Reads]:'+CONVERT(VARCHAR(20),s.[Total physical Reads])
+	+ '; [Total Logical Reads]:'+CONVERT(VARCHAR(20),s.[Total Logical Reads])
+	+ '; [Total Logical Writes]:'+CONVERT(VARCHAR(20),s.[Total Logical Writes])
+
+	, LEFT('[MAX plan generation Number]:'+CONVERT(VARCHAR(20),s.[MAX plan generation Number])
+	+ '; [MAX plan generation Number]:'+CONVERT(VARCHAR(20),s.[MAX plan generation Number])
+	+ '; [Avg Logical Reads]:'+CONVERT(VARCHAR(20),s.[Avg Logical Reads])
+	+ '; [Total CPU Time in S]:'+CONVERT(VARCHAR(20),s.[Total CPU Time in S])
+	+ '; [Min CPU Time in MS]:'+CONVERT(VARCHAR(20),s.[Min CPU Time in MS])
+	+ '; [Max CPU Time in MS]:'+CONVERT(VARCHAR(20),s.[Max CPU Time in MS])
+	+ '; [Last CPU Time in MS]:'+CONVERT(VARCHAR(20),s.[Last CPU Time in MS])
+	+ '; [AVG used_threads]:'+CONVERT(VARCHAR(20),s.[AVG used_threads])
+	+ '; [Avg Logical Writes]:'+CONVERT(VARCHAR(20),s.[Avg Logical Writes])
+	+ '; [Max Logical Reads]:'+CONVERT(VARCHAR(20),s.[Max Logical Reads])
+	+ '; [Max Logical Writes]:'+CONVERT(VARCHAR(20),s.[Max Logical Writes])
+	+ '; [total_grant_kb]:'+CONVERT(VARCHAR(20),s.[total_grant_kb])
+	+ '; [total_used_grant_kb]:'+CONVERT(VARCHAR(20),s.[total_used_grant_kb])
+	+ '; [Total CLR Time]:'+CONVERT(VARCHAR(20),s.[Total CLR Time])
+	+ '; [Avg CLR Time in MS]:'+CONVERT(VARCHAR(20),s.[Avg CLR Time in MS])
+	+ '; [Plan Handle]:'+CONVERT(VARCHAR(20),s.[Plan Handle])
+	+ '; [Last Execution Time]:'+CONVERT(VARCHAR,s.[Last Execution Time],120)
+	+ '; [Query]:'+st.text ,3800)
+
+FROM
+(
+	SELECT
+		CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)  [Total Elapsed Time in S]
+		, RANK() OVER(ORDER BY((SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))) DESC) [RankIO]
+		, RANK() OVER(ORDER BY(SUM(qs.execution_count)) DESC) [RankExec]
+		, RANK() OVER(ORDER BY(SUM(qs.total_worker_time)) DESC) [RankCompute]
+		, SUM(qs.execution_count)  [Total Execution Count]
+		, MAX(qs.plan_generation_num) [MAX plan generation Number]
+		, MAX(qs.last_execution_time) AS [Last Execution Time]
+		/*ALL I/O*/
+		,(SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  [Pages]
+		, CONVERT(MONEY,SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  * 8 /1024/1024 [I/O GB]
+		/*Compute*/
+		, CONVERT(MONEY,SUM(qs.total_worker_time) / 1000000.0 )  [Total CPU Time in S]
+		, CONVERT(MONEY,SUM(qs.total_worker_time) / SUM(qs.execution_count) / 1000.0 )  [Avg CPU Time in MS]
+		, CONVERT(MONEY,SUM(qs.min_worker_time) / 1000.0 ) AS [Min CPU Time in MS]
+		, CONVERT(MONEY,SUM(qs.max_worker_time) / 1000.0 ) AS [Max CPU Time in MS]
+		, CONVERT(MONEY,SUM(qs.last_worker_time) / 1000.0 ) AS [Last CPU Time in MS]
+		, AVG(qs.total_used_threads) [AVG used_threads]
+		/*Storage Physical*/
+		, SUM(qs.total_physical_reads) AS [Total physical Reads]
+		, CONVERT(MONEY,SUM(qs.total_physical_reads) / SUM(qs.execution_count) )  [Avg physical Reads]
+		/*Storage Memory*/
+		, SUM(qs.total_logical_reads) AS [Total Logical Reads]
+		, CAST(CAST(SUM(qs.total_logical_reads) AS FLOAT) / CAST(SUM(qs.execution_count) AS FLOAT) AS DECIMAL(20, 2))  [Avg Logical Reads]
+		, SUM(qs.total_logical_writes) AS [Total Logical Writes]
+		, CAST(CAST(SUM(qs.total_logical_writes) AS FLOAT) / CAST(SUM(qs.execution_count) AS FLOAT) AS DECIMAL(20, 2))  [Avg Logical Writes]
+		, SUM(qs.min_logical_reads)  [Min Logical Reads]
+		, SUM(qs.max_logical_reads)  [Max Logical Reads]
+		, SUM(qs.min_logical_writes)  [Min Logical Writes]
+		, SUM(qs.max_logical_writes)  [Max Logical Writes]
+		/*Memory grants*/
+		, CONVERT(MONEY,SUM(qs.total_grant_kb))/SUM(qs.execution_count) [total_grant_kb]
+		, CONVERT(MONEY,SUM(qs.total_used_grant_kb))/SUM(qs.execution_count) [total_used_grant_kb]
+		, SUM(qs.total_clr_time) AS [Total CLR Time]
+		, CAST(SUM(qs.total_clr_time) / SUM(qs.execution_count) / 1000.0 AS DECIMAL(20, 2))  [Avg CLR Time in MS]
+		, qs.plan_handle AS [Plan Handle]
+	FROM
+		#dadatafor_exec_query_stats qs
+	GROUP BY qs.plan_handle 
+	--HAVING CONVERT(MONEY,(SUM(qs.total_elapsed_time) / 1000000.0)) > 1
+	) s
+OUTER APPLY
+	sys.dm_exec_query_plan(s.[Plan Handle]) AS qp
+LEFT OUTER JOIN
+	sys.databases DBs ON qp.dbid = DBs.database_id
+OUTER APPLY
+	sys.dm_exec_sql_text(s.[Plan Handle]) AS st
+WHERE [RankIO] <= 35
+ORDER BY [RankIO]  ASC
+
+
+			/*----------------------------------------
+			--Maintenance Summary
+			----------------------------------------*/
+			/*First check if Ola table exists in master.. sorry, too dumb to look anywhwere else*/
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 98, 'Maintenance Summary','------','------'
+IF EXISTS (SELECT 1 FROM master.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'CommandLog')
+BEGIN
+
+INSERT #output_man_script (SectionID, Section,Summary,Details)
+  SELECT 98
+  , [CommandType]
+  , CASE [CommandType]
+  WHEN 'ALTER_INDEX' THEN 'IndexMaintenanceSummary'
+  WHEN 'BACKUP_DATABASE' THEN 'Database Backup'
+  WHEN 'BACKUP_LOG' THEN 'Log Backup'
+  WHEN 'DBCC_CHECKDB' THEN 'Consistency Check'
+  WHEN 'RESTORE_VERIFYONLY' THEN 'Database Restore test'
+  WHEN 'xp_delete_file' THEN 'Old Backup file removed'
+  END [JobType]
+  , '[AvgJobs]:' + CONVERT(VARCHAR(20),AVG([Jobs]))
+  + '; [AvgPagesDone]:'+ ISNULL(CONVERT(VARCHAR(20),AVG([PagesDone]) ),'')
+  + '; [AvgIO]:'+ ISNULL(CONVERT(VARCHAR(20),AVG(CONVERT(MONEY,[PagesDone])*8/1024/1024) ),'')
+  + '; [AvgDurationInSeconds]:'+ ISNULL(CONVERT(VARCHAR(20),AVG([DurationInSeconds]) ),'')
+  FROM(
+
+	  SELECT [CommandType]
+	  , LEFT([StartTime],10) [Date]
+	  , COUNT(*) [Jobs]
+	  , SUM([pagecount]) [PagesDone]
+	  ,SUM([DurationInSeconds]) [DurationInSeconds]
+	  FROM (
+	  SELECT [ID],[DatabaseName],[SchemaName],[ObjectName]
+		  ,[ObjectType],[IndexName],[IndexType],[StatisticsName]
+		  ,[PartitionNumber],[ExtendedInfo],[Command]
+		  ,[CommandType],[StartTime],[EndTime]
+		  ,[ErrorNumber],[ErrorMessage]
+	  ,datediff(second,startTime,EndTime)  [DurationInSeconds]
+	  ,ExtendedInfo.value('(/ExtendedInfo/PageCount)[1]','bigint') as [pagecount]
+	  ,ExtendedInfo.value('(/ExtendedInfo/Fragmentation)[1]','numeric(7,5)') as [Fragmentation]
+	  FROM [dbo].[CommandLog] 
+	  --WHERE IndexName IS NOT NULL
+	  ) OlaMaintenance
+	    GROUP BY [CommandType], LEFT([StartTime],10)
+  ) OlaMaintenanceSummary
+    GROUP BY [CommandType]
+END
 
 
 /*ADD NEW sections before this line*/
@@ -5962,10 +6274,15 @@ END
 
 		IF OBJECT_ID('tempdb..#Instances') IS NOT NULL
 			DROP TABLE #Instances;
-	
+
+		IF OBJECT_ID('tempdb..#lockinghistory') IS NOT NULL
+			DROP TABLE #lockinghistory;	
 
 		IF OBJECT_ID('tempdb..#IgnorableWaits') IS NOT NULL
 			DROP TABLE #IgnorableWaits;
+
+		IF OBJECT_ID('tempdb..#blockinghistory') IS NOT NULL
+			DROP TABLE #blockinghistory;
 
 		IF OBJECT_ID('tempdb..#SqueezeMe') IS NOT NULL
 			DROP TABLE #SqueezeMe;
