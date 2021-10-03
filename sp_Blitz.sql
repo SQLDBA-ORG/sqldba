@@ -180,7 +180,7 @@ AS
             ,@CurrentComponentSchema         VARCHAR(256)
             ,@CurrentComponentName           VARCHAR(256)
             ,@CurrentComponentType           VARCHAR(256)
-            ,@CurrentComponentVersionDate    DATETIME2
+            ,@CurrentComponentVersionDate    DATETIME
             ,@CurrentComponentFullName       VARCHAR(1024)
             ,@CurrentComponentMandatory      BIT
             ,@MaximumVersionDate             DATETIME
@@ -351,9 +351,9 @@ AS
 				FROM '
 				IF LTRIM(RTRIM(@SkipChecksServer)) <> ''
 					BEGIN
-					SET @StringToExecute += QUOTENAME(@SkipChecksServer) + N'.';
+					SET @StringToExecute = @StringToExecute +  QUOTENAME(@SkipChecksServer) + N'.';
 					END
-				SET @StringToExecute += QUOTENAME(@SkipChecksDatabase) + N'.' + QUOTENAME(@SkipChecksSchema) + N'.' + QUOTENAME(@SkipChecksTable)
+				SET @StringToExecute = @StringToExecute + QUOTENAME(@SkipChecksDatabase) + N'.' + QUOTENAME(@SkipChecksSchema) + N'.' + QUOTENAME(@SkipChecksTable)
 					+ N' WHERE ServerName IS NULL OR ServerName = SERVERPROPERTY(''ServerName'') OPTION (RECOMPILE);';
 				EXEC(@StringToExecute);
 			END;
@@ -3622,14 +3622,15 @@ AS
 							
 							IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 125) WITH NOWAIT;
 							
-								DECLARE @user_perm_sql NVARCHAR(MAX) = N'';
+								DECLARE @user_perm_sql NVARCHAR(MAX) 
+								SET @user_perm_sql = N'';
 								DECLARE @user_perm_gb_out DECIMAL(38,2);
 								
 								IF @ProductVersionMajor >= 11
 								
 								BEGIN
 								
-								SET @user_perm_sql += N'
+								SET @user_perm_sql = @user_perm_sql +  N'
 									SELECT @user_perm_gb = CASE WHEN (pages_kb / 128.0 / 1024.) >= 2.
 											THEN CONVERT(DECIMAL(38, 2), (pages_kb / 128.0 / 1024.))
 											ELSE NULL 
@@ -3644,7 +3645,7 @@ AS
 								IF @ProductVersionMajor < 11
 								
 								BEGIN
-								SET @user_perm_sql += N'
+								SET @user_perm_sql = @user_perm_sql +  N'
 									SELECT @user_perm_gb = CASE WHEN ((single_pages_kb + multi_pages_kb) / 1024.0 / 1024.) >= 2.
 											THEN CONVERT(DECIMAL(38, 2), ((single_pages_kb + multi_pages_kb)  / 1024.0 / 1024.))
 											ELSE NULL 

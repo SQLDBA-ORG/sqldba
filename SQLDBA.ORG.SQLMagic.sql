@@ -67,14 +67,14 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '20/08/2021' /*DD/MM/YYYY*/
+	SET @MagicVersion = '17/09/2021' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
-	All copyrights for sqldba_sqlmagic are held by Adrian Sullivan, 2020.
+	All copyrights for sqldba_sqlmagic are held by Adrian Sullivan and SQLDBA.ORG, 2021.
 	Copyright (c) ' + CONVERT(VARCHAR(4),DATEPART(YEAR,GETDATE())) + ' Adrian Sullivan
 
-	When things start going poorly for you when you run this script, get in touch with me linkedin.com/in/milliondollardba/,adrian.sullivan@lexel.co.nz, or adrian@sqldba.org
+	When things start going poorly for you when you run this script, get in touch with me linkedin.com/in/milliondollardba/, or adrian@sqldba.org
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal
 	in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
@@ -537,7 +537,7 @@ END CATCH
 			, [Service Pack Support End Date]  NVARCHAR(250)
 			)	
 			
-	IF OBJECT_ID('tempdb..##spnCheck') IS NOT NULL
+	IF OBJECT_ID('tempdb..#spnCheck') IS NOT NULL
 				DROP TABLE #spnCheck
 	CREATE TABLE #spnCheck (
 		output varchar(1024) null
@@ -5153,6 +5153,52 @@ OUTER APPLY
 WHERE [RankIO] <= 35
 ORDER BY [RankIO]  ASC
 
+	/*----------------------------------------
+			--Maintenance Ola checks
+			----------------------------------------*/
+			/*First check if Ola table exists in master.. sorry, too dumb to look anywhwere else*/
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 97, 'Check Ola','------','------'
+IF EXISTS (SELECT 1 FROM master.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'CommandLog')
+BEGIN
+
+INSERT #output_man_script (SectionID, Section,Summary,Details)
+  SELECT 98
+  , [CommandType]
+  , CASE [CommandType]
+  WHEN 'ALTER_INDEX' THEN 'IndexMaintenanceSummary'
+  WHEN 'BACKUP_DATABASE' THEN 'Database Backup'
+  WHEN 'BACKUP_LOG' THEN 'Log Backup'
+  WHEN 'DBCC_CHECKDB' THEN 'Consistency Check'
+  WHEN 'RESTORE_VERIFYONLY' THEN 'Database Restore test'
+  WHEN 'xp_delete_file' THEN 'Old Backup file removed'
+  END [JobType]
+  , '[AvgJobs]:' + CONVERT(VARCHAR(20),AVG([Jobs]))
+  + '; [AvgPagesDone]:'+ ISNULL(CONVERT(VARCHAR(20),AVG([PagesDone]) ),'')
+  + '; [AvgIO]:'+ ISNULL(CONVERT(VARCHAR(20),AVG(CONVERT(MONEY,[PagesDone])*8/1024/1024) ),'')
+  + '; [AvgDurationInSeconds]:'+ ISNULL(CONVERT(VARCHAR(20),AVG([DurationInSeconds]) ),'')
+  FROM(
+
+	  SELECT [CommandType]
+	  , LEFT([StartTime],10) [Date]
+	  , COUNT(*) [Jobs]
+	  , SUM([pagecount]) [PagesDone]
+	  ,SUM([DurationInSeconds]) [DurationInSeconds]
+	  FROM (
+	  SELECT [ID],[DatabaseName],[SchemaName],[ObjectName]
+		  ,[ObjectType],[IndexName],[IndexType],[StatisticsName]
+		  ,[PartitionNumber],[ExtendedInfo],[Command]
+		  ,[CommandType],[StartTime],[EndTime]
+		  ,[ErrorNumber],[ErrorMessage]
+	  ,datediff(second,StartTime,EndTime)  [DurationInSeconds]
+	  ,ExtendedInfo.value('(/ExtendedInfo/PageCount)[1]','bigint') as [pagecount]
+	  ,ExtendedInfo.value('(/ExtendedInfo/Fragmentation)[1]','numeric(7,5)') as [Fragmentation]
+	  FROM [dbo].[CommandLog] 
+	  --WHERE IndexName IS NOT NULL
+	  ) OlaMaintenance
+	    GROUP BY [CommandType], LEFT([StartTime],10)
+  ) OlaMaintenanceSummary
+    GROUP BY [CommandType]
+END
 
 			/*----------------------------------------
 			--Maintenance Summary
@@ -5190,7 +5236,7 @@ INSERT #output_man_script (SectionID, Section,Summary,Details)
 		  ,[PartitionNumber],[ExtendedInfo],[Command]
 		  ,[CommandType],[StartTime],[EndTime]
 		  ,[ErrorNumber],[ErrorMessage]
-	  ,datediff(second,startTime,EndTime)  [DurationInSeconds]
+	  ,datediff(second,StartTime,EndTime)  [DurationInSeconds]
 	  ,ExtendedInfo.value('(/ExtendedInfo/PageCount)[1]','bigint') as [pagecount]
 	  ,ExtendedInfo.value('(/ExtendedInfo/Fragmentation)[1]','numeric(7,5)') as [Fragmentation]
 	  FROM [dbo].[CommandLog] 
@@ -6217,7 +6263,7 @@ END
 		DROP TABLE #perf_report_objects;
 	IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_output', 'U') IS NOT NULL
 		DROP TABLE #LEXEL_OES_stats_output;
-	IF OBJECT_ID('tempdb..##spnCheck') IS NOT NULL
+	IF OBJECT_ID('tempdb..#spnCheck') IS NOT NULL
 				DROP TABLE #spnCheck
 
 --The blitz
