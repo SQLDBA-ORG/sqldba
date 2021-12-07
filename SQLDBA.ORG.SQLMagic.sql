@@ -51,8 +51,8 @@ EXEC master..xp_cmdshell @cmd
 /* @PrintMatrixHeader. Added to turn it off since some control chars coming through stopping a copy/paste from the messages window in SSMS */
 , @PrintMatrixHeader int = 0
 , @Debug BIT = 0 /*0 is off, 1 is on, no internal raiserror will be shown*/
-
-WITH RECOMPILE
+, @CleanupTime INT = 180 /*If output goes to a table then clean up records older than this many days*/
+WITH RECOMPILE, ENCRYPTION
 AS
 BEGIN
 	SET NOCOUNT ON;
@@ -107,6 +107,300 @@ BEGIN
 	--------
 	Do stuff
 */
+
+
+/*Check that all schema related objects are escaped with brackets [ ] */
+IF(LEFT(@ExportSchema,1) <> '[')
+BEGIN
+	SET @ExportSchema = '[' + @ExportSchema + ']'
+END
+IF(LEFT(@ExportDBName,1) <> '[')
+BEGIN
+	SET @ExportDBName = '[' + @ExportDBName + ']'
+END
+IF(LEFT(@ExportTableName,1) <> '[')
+BEGIN
+	SET @ExportTableName = '[' + @ExportTableName + ']'
+END
+
+/*Before anything, start a trace and get some information.*/
+
+		
+DECLARE @errMessage VARCHAR(MAX) 
+SET @errMessage = ERROR_MESSAGE()
+
+DECLARE @ThisServer NVARCHAR(500)
+DECLARE @CharToCheck NVARCHAR(5) 
+SET @CharToCheck = CHAR(92)
+BEGIN TRY
+  IF (select CHARINDEX(@CharToCheck,@@SERVERNAME)) > 0
+  /*Named instance will always use NetBIOS name*/
+    SELECT @ThisServer = @@SERVERNAME
+  IF (select CHARINDEX(@CharToCheck,@@SERVERNAME)) = 0
+  /*Not named, use the NetBIOS name instead of @@ServerName*/
+    SELECT @ThisServer = CAST( Serverproperty( 'ComputerNamePhysicalNetBIOS' ) AS NVARCHAR(500))
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END CATCH
+
+
+IF 'DoTrace' = '1' 
+BEGIN
+	DECLARE @tcid INT  
+	DECLARE @format_datetime VARCHAR(50)  
+	DECLARE @file NVARCHAR(500)  
+	DECLARE @file2 NVARCHAR(500)  
+	DECLARE @cmd NVARCHAR(4000)  
+	DECLARE @cmd2 NVARCHAR(4000)  
+	DECLARE @file_path NVARCHAR(500)  
+	DECLARE @catchout NVARCHAR(250)
+	SET NOCOUNT ON
+
+	DECLARE @file_list TABLE  
+		(  
+		fl_name VARCHAR(500)  
+		)  
+
+	SET @thisserver = REPLACE(@@servername, '\', '_')
+	/*Create folder for output*/
+	SET @file_path = 'C:\Temp'
+	SELECT @cmd2 = 'mkdir "' + @file_path + '"'  
+	EXEC xp_cmdshell @cmd2   ,no_output
+	SET @cmd2 = 'EXEC xp_cmdshell ''dir "' + @file_path + '" /b /s''' 
+
+	SET @format_datetime = CONVERT(VARCHAR(10), GETDATE(), 112)  + REPLACE(CONVERT(VARCHAR(10), GETDATE(), 108), ':', '')  
+	SET @file = @file_path + '\sqldba_sqlmagic_trace_' + @thisserver 
+ 
+  
+	/*Check for existing traces that match the name*/
+	IF EXISTS ( SELECT *  FROM  sys.traces  WHERE path LIKE '%sqldba_sqlmagic_trace%' )  
+		BEGIN  
+			SELECT @tcid = id  FROM  sys.traces  WHERE path LIKE '%sqldba_sqlmagic_trace%'  
+			RAISERROR (N'Found existing trace. Stop and disable trace',0,1) WITH NOWAIT; 
+			EXEC sp_trace_setstatus @tcid, 0  
+			EXEC sp_trace_setstatus @tcid, 2  
+        
+			RAISERROR (N'Rename existing trace file. Could remove, but let us just keep it around',0,1) WITH NOWAIT;
+			SET @file2 = 'SQLDBA_TRC_' + @thisserver+ '_' + @format_datetime + '.trc'  
+			SELECT @cmd = 'RENAME ' + @file + '.trc' + ' ' + @file2 
+			EXEC xp_cmdshell @cmd  ,no_output
+		END  
+  
+ 
+
+
+	INSERT INTO @file_list  
+	EXEC  (@cmd2) 
+
+	-- This condition was added to see if a trace was abrutply stopped  
+	IF EXISTS ( SELECT 1 FROM  @file_list WHERE fl_name = @file + '.trc' )  
+		BEGIN  
+			RAISERROR (N'Rename existing trace file. Could remove, but let us just keep it around',0,1) WITH NOWAIT;
+			SET @file2 = 'SQLDBA_TRC_' + @thisserver  + '_' + @format_datetime + '.trc'  
+			SELECT @cmd = 'RENAME ' + @file + '.trc' + ' ' + @file2  
+			EXEC xp_cmdshell @cmd  ,no_output
+		END  
+	ELSE 
+		BEGIN
+			RAISERROR (N'Could not find any running trace. No file changes made.',0,1) WITH NOWAIT;
+		END
+
+
+	BEGIN
+		/*Create the next trace*/
+		DECLARE @rc int  
+		DECLARE @TraceID int  
+		DECLARE @maxfilesize bigint  
+		DECLARE @tracefile nvarchar(255) 
+
+		SET @tracefile=@file 
+		SET @maxfilesize = 3  /*MB*/
+  
+		EXEC @rc = sp_trace_create @TraceID OUTPUT, 2, @tracefile , @maxfilesize, NULL  
+		IF (@rc != 0) GOTO ERROR  
+  
+
+		DECLARE @on BIT
+		SET @on = 1
+		EXEC sp_trace_setevent @TraceID, 10, 1, @on
+		EXEC sp_trace_setevent @TraceID, 10, 9, @on
+		EXEC sp_trace_setevent @TraceID, 10, 66, @on
+		EXEC sp_trace_setevent @TraceID, 10, 10, @on
+		EXEC sp_trace_setevent @TraceID, 10, 3, @on
+		EXEC sp_trace_setevent @TraceID, 10, 4, @on
+		EXEC sp_trace_setevent @TraceID, 10, 6, @on
+		EXEC sp_trace_setevent @TraceID, 10, 7, @on
+		EXEC sp_trace_setevent @TraceID, 10, 8, @on
+		EXEC sp_trace_setevent @TraceID, 10, 11, @on
+		EXEC sp_trace_setevent @TraceID, 10, 12, @on
+		EXEC sp_trace_setevent @TraceID, 10, 13, @on
+		EXEC sp_trace_setevent @TraceID, 10, 14, @on
+		EXEC sp_trace_setevent @TraceID, 10, 15, @on
+		EXEC sp_trace_setevent @TraceID, 10, 16, @on
+		EXEC sp_trace_setevent @TraceID, 10, 17, @on
+		EXEC sp_trace_setevent @TraceID, 10, 18, @on
+		EXEC sp_trace_setevent @TraceID, 10, 25, @on
+		EXEC sp_trace_setevent @TraceID, 10, 26, @on
+		EXEC sp_trace_setevent @TraceID, 10, 31, @on
+		EXEC sp_trace_setevent @TraceID, 10, 34, @on
+		EXEC sp_trace_setevent @TraceID, 10, 35, @on
+		EXEC sp_trace_setevent @TraceID, 10, 41, @on
+		EXEC sp_trace_setevent @TraceID, 10, 48, @on
+		EXEC sp_trace_setevent @TraceID, 10, 49, @on
+		EXEC sp_trace_setevent @TraceID, 10, 50, @on
+		EXEC sp_trace_setevent @TraceID, 10, 51, @on
+		EXEC sp_trace_setevent @TraceID, 10, 60, @on
+		EXEC sp_trace_setevent @TraceID, 10, 64, @on
+		EXEC sp_trace_setevent @TraceID, 41, 1, @on
+		EXEC sp_trace_setevent @TraceID, 41, 9, @on
+		EXEC sp_trace_setevent @TraceID, 41, 3, @on
+		EXEC sp_trace_setevent @TraceID, 41, 4, @on
+		EXEC sp_trace_setevent @TraceID, 41, 6, @on
+		EXEC sp_trace_setevent @TraceID, 41, 7, @on
+		EXEC sp_trace_setevent @TraceID, 41, 8, @on
+		EXEC sp_trace_setevent @TraceID, 41, 10, @on
+		EXEC sp_trace_setevent @TraceID, 41, 11, @on
+		EXEC sp_trace_setevent @TraceID, 41, 12, @on
+		EXEC sp_trace_setevent @TraceID, 41, 13, @on
+		EXEC sp_trace_setevent @TraceID, 41, 14, @on
+		EXEC sp_trace_setevent @TraceID, 41, 15, @on
+		EXEC sp_trace_setevent @TraceID, 41, 16, @on
+		EXEC sp_trace_setevent @TraceID, 41, 17, @on
+		EXEC sp_trace_setevent @TraceID, 41, 18, @on
+		EXEC sp_trace_setevent @TraceID, 41, 25, @on
+		EXEC sp_trace_setevent @TraceID, 41, 26, @on
+		EXEC sp_trace_setevent @TraceID, 41, 35, @on
+		EXEC sp_trace_setevent @TraceID, 41, 41, @on
+		EXEC sp_trace_setevent @TraceID, 41, 48, @on
+		EXEC sp_trace_setevent @TraceID, 41, 49, @on
+		EXEC sp_trace_setevent @TraceID, 41, 50, @on
+		EXEC sp_trace_setevent @TraceID, 41, 51, @on
+		EXEC sp_trace_setevent @TraceID, 41, 60, @on
+		EXEC sp_trace_setevent @TraceID, 41, 64, @on
+		EXEC sp_trace_setevent @TraceID, 41, 66, @on
+
+
+		DECLARE @tracethetrace INT
+		EXEC sp_trace_setfilter @TraceID, 1, 0, 7, N'exec sp_reset_connection'
+		EXEC sp_trace_setfilter @TraceID, 10, 0, 7, N'SQL Server Profiler %'
+		RAISERROR (N'Events and filters set. STARTING TRACE.',0,1) WITH NOWAIT;
+		EXEC @tracethetrace = sp_trace_setstatus @TraceID, 1
+
+	END
+	GOTO FINISH  
+  
+	ERROR:  
+		SELECT ErrorCode=@rc  
+  
+	FINISH:  
+
+
+	RAISERROR (N'Waiting for trace to stop.',0,1) WITH NOWAIT;
+	WAITFOR DELAY '00:00:10'
+
+	IF EXISTS ( SELECT 1 FROM  sys.traces WHERE path LIKE '%sqldba_sqlmagic_trace%' )  
+	BEGIN  
+		SELECT @tcid = id  FROM  sys.traces  WHERE path LIKE '%sqldba_sqlmagic_trace%'  
+		RAISERROR (N'Delay finished. STOPPING TRACE',0,1) WITH NOWAIT;
+		EXEC @tracethetrace = sp_trace_setstatus @tcid, 0  
+		EXEC @tracethetrace = sp_trace_setstatus @tcid, 2  
+
+		RAISERROR (N'Loading trace file.',0,1) WITH NOWAIT;
+    
+		INSERT INTO @file_list  
+		EXEC (@cmd2)
+  
+		IF EXISTS ( SELECT 1 FROM  @file_list WHERE fl_name = @file + '.trc' )  
+		BEGIN 
+			RAISERROR (N'Loading trace file..',0,1) WITH NOWAIT;
+		END 
+    
+	   -- INSERT INTO dbo.SQLDBA_Audit  
+		SELECT  [TextData]
+		  ,[BinaryData]
+		  ,[DatabaseID]
+		  ,[TransactionID]
+		  ,[LineNumber]
+		  ,[NTUserName]
+		  ,[NTDomainName]
+		  ,[HostName]
+		  ,[ClientProcessID]
+		  ,[ApplicationName]
+		  ,[LoginName]
+		  ,[SPID]
+		  ,[Duration]
+		  ,[StartTime]
+		  ,[EndTime]
+		  ,[Reads]
+		  ,[Writes]
+		  ,[CPU]
+		  ,[Permissions]
+		  ,[Severity]
+		  ,[EventSubClass]
+		  ,[ObjectID]
+		  ,[Success]
+		  ,[IndexID]
+		  ,[IntegerData]
+		  ,[ServerName]
+		  ,[EventClass]
+		  ,[ObjectType]
+		  ,[NestLevel]
+		  ,[State]
+		  ,[Error]
+		  ,[Mode]
+		  ,[Handle]
+		  ,[ObjectName]
+		  ,[DatabaseName]
+		  ,[FileName]
+		  ,[OwnerName]
+		  ,[RoleName]
+		  ,[TargetUserName]
+		  ,[DBUserName]
+		  ,[LoginSid]
+		  ,[TargetLoginName]
+		  ,[TargetLoginSid]
+		  ,[ColumnPermissions]
+		  ,[LinkedServerName]
+		  ,[ProviderName]
+		  ,[MethodName]
+		  ,[RowCounts]
+		  ,[RequestID]
+		  ,[XactSequence]
+		  ,[EventSequence]
+		  ,[BigintData1]
+		  ,[BigintData2]
+		  ,[GUID]
+		  ,[IntegerData2]
+		  ,[ObjectID2]
+		  ,[Type]
+		  ,[OwnerID]
+		  ,[ParentName]
+		  ,[IsSystem]
+		  ,[Offset]
+		  ,[SourceDatabaseID]
+		  ,[SqlHandle]
+		  ,[SessionLoginName]
+		  ,[PlanHandle]
+		  ,[GroupID]
+	   -- INTO dbo.SQLDBA_Audit 
+		FROM  FN_TRACE_GETTABLE('' + @file + '.trc', DEFAULT) 
+		RAISERROR (N'Cleaning up.Renaming trace file.',0,1) WITH NOWAIT; 
+		--SET @file2 = 'SQLDBA_TRC_' + @thisserver + '_' + @format_datetime + '.trc'  
+		SELECT @cmd = 'RENAME ' + @file + '.trc' + ' ' + @file2   
+		EXEC xp_cmdshell @cmd  ,no_output
+  
+
+	END  
+  
+ END
+
+
+
+
+
     DECLARE @Result_Good NVARCHAR(2);
     DECLARE @Result_NA NVARCHAR(2);
     DECLARE @Result_Warning NVARCHAR(2);
@@ -221,7 +515,6 @@ BEGIN
 	DECLARE @record_count INT;
 	DECLARE @dbid INT;
 	DECLARE @objectid INT;
-	DECLARE @cmd NVARCHAR(MAX);
 	DECLARE @grand_total_worker_time FLOAT ; 
 	DECLARE @grand_total_IO FLOAT ; 
 	DECLARE @evaldate NVARCHAR(20);
@@ -312,12 +605,49 @@ BEGIN TRY
 	select 
 	* 
 	INTO #dadatafor_exec_query_stats 
-	from master.sys.dm_exec_query_stats
+	from sys.dm_exec_query_stats
 	where (total_logical_writes + total_logical_reads) * execution_count >200
 END TRY
 BEGIN CATCH
-	PRINT 1
+  IF @Debug = 0
+		RAISERROR (N'Problem inserting data into #dadatafor_exec_query_stats',0,1) WITH NOWAIT; 
 END CATCH
+
+BEGIN TRY
+/*If this is an ancient version of SQL, add some missing columns*/
+IF NOT EXISTS(
+SELECT 1
+FROM tempdb.sys.columns 
+WHERE columns.Name = N'total_used_threads'
+AND Object_ID = Object_ID(N'tempdb..#dadatafor_exec_query_stats'))
+BEGIN
+	ALTER TABLE #dadatafor_exec_query_stats ADD total_used_threads INT
+END
+
+IF NOT EXISTS(
+SELECT 1 
+FROM tempdb.sys.columns 
+WHERE Name = N'total_grant_kb'
+AND Object_ID = Object_ID(N'tempdb..#dadatafor_exec_query_stats'))
+BEGIN
+	ALTER TABLE #dadatafor_exec_query_stats ADD total_grant_kb INT
+END
+IF NOT EXISTS(
+SELECT 1 
+FROM tempdb.sys.columns 
+WHERE Name = N'total_used_grant_kb'
+AND Object_ID = Object_ID(N'tempdb..#dadatafor_exec_query_stats'))
+BEGIN
+	ALTER TABLE #dadatafor_exec_query_stats ADD total_used_grant_kb INT
+END
+
+END TRY
+BEGIN CATCH
+  IF @Debug = 0
+		RAISERROR (N'Problem with adding columns to #dadatafor_exec_query_stats',0,1) WITH NOWAIT; 
+END CATCH
+
+
 
 
 
@@ -904,26 +1234,7 @@ DECLARE @TurnNumericRoundabortOn BIT
 	
 
 	
-			
-DECLARE @errMessage VARCHAR(MAX) 
-SET @errMessage = ERROR_MESSAGE()
-
-DECLARE @ThisServer NVARCHAR(500)
-DECLARE @CharToCheck NVARCHAR(5) 
-SET @CharToCheck = CHAR(92)
-BEGIN TRY
-  IF (select CHARINDEX(@CharToCheck,@@SERVERNAME)) > 0
-  /*Named instance will always use NetBIOS name*/
-    SELECT @ThisServer = @@SERVERNAME
-  IF (select CHARINDEX(@CharToCheck,@@SERVERNAME)) = 0
-  /*Not named, use the NetBIOS name instead of @@ServerName*/
-    SELECT @ThisServer = CAST( Serverproperty( 'ComputerNamePhysicalNetBIOS' ) AS NVARCHAR(500))
-END TRY
-BEGIN CATCH
-  SELECT @errMessage  = ERROR_MESSAGE()
-  IF @Debug = 0
-		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
-END CATCH
+	
 
 
 
@@ -981,12 +1292,12 @@ BEGIN TRY
         DECLARE @cpu_speed_ghz decimal(18,2);
 
 										
-		EXEC master.sys.xp_regread @rootkey = 'HKEY_LOCAL_MACHINE',
+		EXEC xp_regread @rootkey = 'HKEY_LOCAL_MACHINE',
 		@key = 'HARDWARE\DESCRIPTION\System\CentralProcessor\0',
 		@value_name = 'ProcessorNameString',
 		@value = @cpu_name OUTPUT;
 		
-		EXEC master.sys.xp_regread @rootkey = 'HKEY_LOCAL_MACHINE',
+		EXEC xp_regread @rootkey = 'HKEY_LOCAL_MACHINE',
         @key = 'HARDWARE\DESCRIPTION\System\CentralProcessor\0',
         @value_name = '~MHz',
         @value = @cpu_speed_mhz OUTPUT;
@@ -995,7 +1306,7 @@ BEGIN TRY
 		SELECT @cpu_ghz = @cpu_speed_ghz
 
 		
-		EXEC master..xp_regread 
+		EXEC xp_regread 
 		@rootkey = 'HKEY_LOCAL_MACHINE',
 		@key = 'SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes',
 		@value_name = 'ActivePowerScheme',
@@ -1464,7 +1775,7 @@ BEGIN TRY
 		BEGIN 
 
  
-		EXECUTE master.dbo.xp_instance_regread
+		EXECUTE xp_instance_regread
 		   @rootkey = N'HKEY_LOCAL_MACHINE',
 		   @key = N'SYSTEM\CurrentControlSet\Services\MSSQLServer',
 		   @value_name = N'ObjectName',
@@ -1482,7 +1793,7 @@ BEGIN TRY
 		
 		
 		
-		EXECUTE master.dbo.xp_instance_regread
+		EXECUTE xp_instance_regread
 		   @rootkey = N'HKEY_LOCAL_MACHINE',
 		   @key = N'SYSTEM\CurrentControlSet\Services\SQLSERVERAGENT',
 		   @value_name = N'ObjectName',
@@ -1728,7 +2039,7 @@ BEGIN
 
 
 		INSERT @syscountertable
-		EXEC master..xp_cmdshell @cmdpowershell
+		EXEC xp_cmdshell @cmdpowershell
 
 		/*While we are on the topic of xm_cmdshell, check the SPNs as well*/
 		DECLARE @spnCheckCmd NVARCHAR(4000)
@@ -2192,7 +2503,8 @@ DECLARE @Databases TABLE
 	BEGIN TRY
 
 	If @SQLVersion >= 11 BEGIN
-	IF EXISTS((SELECT 1 FROM master.sys.availability_groups )) /*You have active AGs*/
+
+	IF EXISTS(SELECT OBJECT_ID('master.sys.availability_groups', 'V')) /*You have active AGs*/
 	SET @dynamicSQL = @dynamicSQL + '
 	UNION ALL
 	SELECT 
@@ -2280,7 +2592,7 @@ DECLARE @Databases TABLE
 		SET @CachevsUpdate = 1
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 2,'CACHE - Cache Age As portion of Overall Uptime','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary,HoursToResolveWithTesting )
-	SELECT 2,'['+REPLICATE('|', @CachevsUpdate) + REPLICATE('''',100-@CachevsUpdate ) +']'
+	SELECT 2,'['+REPLICATE('|', @CachevsUpdate) + REPLICATE('.',100-@CachevsUpdate ) +']'
 	, 'Uptime:'
 	+ CONVERT(VARCHAR(20),@DaysUptime)
 	+ '; Oldest Cache:'
@@ -2338,7 +2650,7 @@ DECLARE @Databases TABLE
 	INSERT #output_man_script (SectionID, Section,Summary ,Details )
 
  
-	SELECT 3,'['+REPLICATE('|', CONVERT(MONEY,CONVERT(FLOAT,@UsedMemory)/CONVERT(FLOAT,@totalMemoryGB)) * 100) + REPLICATE('''',100-(CONVERT(MONEY,CONVERT(FLOAT,@UsedMemory)/CONVERT(FLOAT,@totalMemoryGB)) * 100) ) +']' 
+	SELECT 3,'['+REPLICATE('|', CONVERT(MONEY,CONVERT(FLOAT,@UsedMemory)/CONVERT(FLOAT,@totalMemoryGB)) * 100) + REPLICATE('.',100-(CONVERT(MONEY,CONVERT(FLOAT,@UsedMemory)/CONVERT(FLOAT,@totalMemoryGB)) * 100) ) +']' 
 	, 'Sockets:' +  ISNULL(replace(replace(replace(replace(CONVERT(NVARCHAR,CONVERT(VARCHAR(20),(@CPUsocketcount ) )), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' '),'')
 	+'; Virtual CPUs:' +  ISNULL(replace(replace(replace(replace(CONVERT(NVARCHAR,CONVERT(VARCHAR(20),@CPUcount   )), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ') ,'')
 	+'; VM Type:' +  ISNULL(replace(replace(replace(replace(CONVERT(NVARCHAR,ISNULL(@VMType,'')), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ') ,'')
@@ -2380,7 +2692,7 @@ DECLARE @Databases TABLE
 
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 4,'CPU - Average CPU usage of SQL process as % of total CPU usage','Speed; Avg CPU; CPU Idle; Other; From; To; Full Details','------'
 	INSERT #output_man_script (SectionID, Section,Summary, HoursToResolveWithTesting  )
-	SELECT 4, '['+REPLICATE('|', AVG(CONVERT(MONEY,SQLProcessUtilization))) + REPLICATE('''',100-(AVG(CONVERT(MONEY,SQLProcessUtilization)) )) +']'
+	SELECT 4, '['+REPLICATE('|', AVG(CONVERT(MONEY,SQLProcessUtilization))) + REPLICATE('.',100-(AVG(CONVERT(MONEY,SQLProcessUtilization)) )) +']'
 	,(@cpu_ghz
 	+';'+ CONVERT(VARCHAR(20),AVG(SQLProcessUtilization))
 	+'%;' + CONVERT(VARCHAR(20),AVG(SystemIdle))
@@ -2445,7 +2757,7 @@ SELECT
 		   ,[Date]
 		   ,[Log File Size (Byte)]
 		)
-		EXEC master.sys.xp_enumerrorlogs;
+		EXEC xp_enumerrorlogs;
  
 		 DECLARE  @SQLLogData TABLE
 		(
@@ -2994,7 +3306,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 
 	DECLARE @fixeddrives TABLE(drive NVARCHAR(5), FreeSpaceMB MONEY )
 	INSERT @fixeddrives
-	EXEC master..xp_fixeddrives 
+	EXEC xp_fixeddrives 
 
 	/* more useful info
 	SELECT * FROM sys.dm_os_sys_info 
@@ -3098,11 +3410,17 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			----------------------------------------*/
 
 
-
+	/*How about diggin in some sybase, yes, the spt_values table*/
 	SELECT @Kb = 1024.0;
-	SELECT @PageSize=v.low/@Kb 
-	FROM master..spt_values v 
-	WHERE v.number=1 AND v.type='E';
+	BEGIN TRY
+		SELECT @PageSize=v.low/@Kb 
+		FROM master..spt_values v 
+		WHERE v.number=1 AND v.type='E';
+	END TRY
+	BEGIN CATCH
+		RAISERROR (N'Server does not seem to have spt_values table ',0,1) WITH NOWAIT;
+		SET @PageSize = 8 /*as in 8 KB*/
+	END CATCH
 
 	INSERT @LogSpace 
 	EXEC sp_executesql N'DBCC sqlperf(logspace) WITH NO_INFOMSGS';
@@ -3115,6 +3433,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	, NULL
 	FROM @LogSpace 
 	OPTION (RECOMPILE)
+
 	DECLARE @SecondaryReadRole NVARCHAR(250)
 	DECLARE @AGBackupPref NVARCHAR(250)
 
@@ -3154,7 +3473,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	INSERT #output_man_script (SectionID, Section,Summary, Severity, Details)
 
 	SELECT 11,
-	REPLICATE('|',100-[FreeSpace %]) + REPLICATE('''',[FreeSpace %]) +' ('+ CONVERT(VARCHAR(20),CONVERT(INT,ROUND(100-[FreeSpace %],0))) + '% of ' + CONVERT(VARCHAR(20),CONVERT(MONEY,FileSize/1024)) + ')'
+	REPLICATE('|',100-[FreeSpace %]) + REPLICATE('.',[FreeSpace %]) +' ('+ CONVERT(VARCHAR(20),CONVERT(INT,ROUND(100-[FreeSpace %],0))) + '% of ' + CONVERT(VARCHAR(20),CONVERT(MONEY,FileSize/1024)) + ')'
 	, (
 	+ 'DB size:'
 	+ CONVERT(VARCHAR(20),CONVERT(MONEY,TotalSize/1024))
@@ -3213,7 +3532,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			----------------------------------------*/
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 12, 'CACHING PLANS - as % of total memory used by SQL','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary ,Details )
-	SELECT 12, REPLICATE('|',[1 use size]/[Size MB]*100) + REPLICATE('''',100- [1 use size]/[Size MB]*100) +' '+ CONVERT(VARCHAR(20),CONVERT(INT,[1 use size]/[Size MB]*100)) +'% of '
+	SELECT 12, REPLICATE('|',[1 use size]/[Size MB]*100) + REPLICATE('.',100- [1 use size]/[Size MB]*100) +' '+ CONVERT(VARCHAR(20),CONVERT(INT,[1 use size]/[Size MB]*100)) +'% of '
 	+CONVERT(VARCHAR(20),CONVERT(BIGINT,[Size MB])) +'MB is 1 use' 
 	, objtype 
 	+'; Plans:'+ CONVERT(VARCHAR(20),[Total Use])
@@ -3273,7 +3592,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	
 	INSERT #output_man_script (SectionID, Section,Summary ,Details )
 SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0) 
-	+ REPLICATE('''',100 - CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0) + '' + CONVERT(VARCHAR(20), CONVERT(INT,ROUND(CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0,0))) +'% IO '
+	+ REPLICATE('.',100 - CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0) + '' + CONVERT(VARCHAR(20), CONVERT(INT,ROUND(CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0,0))) +'% IO '
 	, T1.DatabaseName
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),CONVERT(INT,ROUND([CPU_Time(Ms)]/1000 * 1.0 /SUM([CPU_Time(Ms)]/1000) OVER()* 100.0,0))),'0') +'%'
 	+ '; ' +  ISNULL(CONVERT(VARCHAR(20),CONVERT(INT,ROUND(CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0 ,0))) ,'0')+'%'
@@ -4176,6 +4495,8 @@ LOOPING of databases ends here, add new sections above this portion
 
 
 
+
+BEGIN TRY
 	IF EXISTS (SELECT 1 FROM #MissingIndex ) 
 	BEGIN
 				SET @CustomErrorText = 'MISSING INDEXES - !Benefit > 1mm!'
@@ -4218,9 +4539,17 @@ LOOPING of databases ends here, add new sections above this portion
 			END CATCH
 
 	END
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with missing index details',0,1) WITH NOWAIT;
+	SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	IF @Debug = 0
 			RAISERROR (N'Completed missing index details',0,1) WITH NOWAIT;
 
+
+BEGIN TRY
 		IF EXISTS (SELECT 1 FROM #HeapTable ) 
 	BEGIN
 					SET @CustomErrorText = 'HEAP TABLES - Bad news'
@@ -4261,9 +4590,17 @@ LOOPING of databases ends here, add new sections above this portion
 				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 			END CATCH
 	END
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with finding heaps',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	IF @Debug = 0
 		RAISERROR (N'Found heap tables',0,1) WITH NOWAIT;
 
+
+BEGIN TRY
 		IF EXISTS (SELECT 1 FROM #NeverUsedIndex ) 
 	BEGIN
 		SET @CustomErrorText = 'STALE INDEXES - Consider removing them at some stage'
@@ -4334,12 +4671,19 @@ LOOPING of databases ends here, add new sections above this portion
 			 ORDER BY s.[ModPerc] DESC OPTION (RECOMPILE);/*They are like little time capsules.. just sitting there.. waiting*/
 
 	END
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with stale stats',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	IF @Debug = 0
 		RAISERROR (N'Listed state stats',0,1) WITH NOWAIT;
 
 		 /*----------------------------------------
 			--Most used database stored procedures
 			----------------------------------------*/
+BEGIN TRY
 		IF EXISTS( SELECT 1 FROM #db_sps)
 	BEGIN
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 22, 'STORED PROCEDURE WORKLOAD - TOP 10','------','------'
@@ -4356,12 +4700,18 @@ LOOPING of databases ends here, add new sections above this portion
 		ORDER BY execution_count DESC OPTION (RECOMPILE)
 
 	END
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with SP workload',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	IF @Debug = 0
 		RAISERROR (N'Database stored procedure details',0,1) WITH NOWAIT;
 			/*----------------------------------------
 			--General server settings and items of note
 			----------------------------------------*/
-
+BEGIN TRY
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 24, 'Server details','------','------'
 	INSERT #output_man_script (SectionID, Section, Summary  )
 	SELECT 24,  @ThisServer AS [Server Name]
@@ -4383,6 +4733,12 @@ LOOPING of databases ends here, add new sections above this portion
 	FROM sys.dm_os_performance_counters WITH (NOLOCK)
 	WHERE [object_name] LIKE N'%Memory Manager%' -- Handles named instances
 	AND counter_name = N'Memory Grants Pending' OPTION (RECOMPILE);
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with server details',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
 	IF @Debug = 0
 		RAISERROR (N'Listed general instance stats',0,1) WITH NOWAIT;
@@ -4492,7 +4848,7 @@ LOOPING of databases ends here, add new sections above this portion
 	INSERT  INTO #ConfigurationDefaults VALUES  ( 'Web Assistant Procedures', 0, 1064 )
 	INSERT  INTO #ConfigurationDefaults VALUES  ( 'xp_cmdshell', 0, 1065 );
 
-
+BEGIN TRY
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 25, 'Server details - Non default settings','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary,Details)
 	SELECT 25, [description] name
@@ -4507,13 +4863,19 @@ LOOPING of databases ends here, add new sections above this portion
 	LEFT OUTER JOIN #ConfigurationDefaults cdUsed ON cdUsed.name = cr.name AND cdUsed.DefaultValue = cr.value_in_use
 	WHERE cdUsed.name IS NULL
 	OPTION (RECOMPILE);
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with non default server settings',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	IF @Debug = 0
 		RAISERROR (N'Listed non-default settings',0,1) WITH NOWAIT;
 
 			/*----------------------------------------
 			--Current active logins on this instance
 			----------------------------------------*/
-
+BEGIN TRY
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 26,'CURRENT ACTIVE USERS - TOP 10','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary)
 	SELECT TOP 10 26, 'User: ' + login_name
@@ -4521,13 +4883,19 @@ LOOPING of databases ends here, add new sections above this portion
 	FROM sys.dm_exec_sessions WITH (NOLOCK)
 	GROUP BY login_name, [program_name]
 	ORDER BY COUNT(session_id) DESC OPTION (RECOMPILE);
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with current active users',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	IF @Debug = 0
 		RAISERROR (N'Connections listed',0,1) WITH NOWAIT;
 
 			/*----------------------------------------
 			--Insert trust issues into output table
 			----------------------------------------*/
+BEGIN TRY
 	IF EXISTS(SELECT 1 FROM #notrust )
 	BEGIN
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 27,'TRUST ISSUES','------','------'
@@ -4541,7 +4909,12 @@ LOOPING of databases ends here, add new sections above this portion
 	FROM #notrust 
 	OPTION (RECOMPILE)
 	END
-	
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with trust issues.. it happens',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH	
 	IF @Debug = 0
 		RAISERROR (N'Included Constraint trust issues',0,1) WITH NOWAIT;
 
@@ -4549,15 +4922,15 @@ LOOPING of databases ends here, add new sections above this portion
 			/*----------------------------------------
 			--Current active connections on each database
 			----------------------------------------*/
-			
+BEGIN TRY			
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 29,'DATABASE CONNECTED USERS','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary,Details)
 	SELECT  29, dtb.name
-	, 'Active: ' + CONVERT(VARCHAR(20),(select count(*) from master.dbo.sysprocesses p where dtb.database_id=p.dbid))
+	, 'Active: ' + CONVERT(VARCHAR(20),(select count(*) from sysprocesses p where dtb.database_id=p.dbid))
 	+ '; LastActivity:' +CONVERT(VARCHAR, ISNULL(lastactive.LastActivity,lastactive.create_date),120)
 	, 'Updatable: ' + ( case LOWER(convert( NVARCHAR(128), DATABASEPROPERTYEX(dtb.name, 'Updateability'))) when 'read_write'then 'Yes' else 'No' end)
 	+ '; ReplicationOptions:' + CONVERT(VARCHAR(20),(dtb.is_published*1+dtb.is_subscribed*2+dtb.is_merge_published*4))
-	FROM master.sys.databases AS dtb 
+	FROM sys.databases AS dtb 
 
 	INNER JOIN (
 			SELECT d.name
@@ -4587,7 +4960,12 @@ LOOPING of databases ends here, add new sections above this portion
 	
 	
 	OPTION (RECOMPILE);
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with connected users',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	IF @Debug = 0
 		RAISERROR (N'Database Connections counted',0,1) WITH NOWAIT;
 
@@ -4619,15 +4997,18 @@ from (
     union all 
         select xx = max(last_user_update) 
         where max(last_user_update) is not null) bb) ,@lastservericerestart),GETDATE())
-FROM master.dbo.sysdatabases d 
+FROM sysdatabases d 
 left outer join sys.dm_db_index_usage_stats s on d.dbid= s.database_id 
 WHERE database_id > 4
 group by d.name
 END TRY
 BEGIN CATCH
 	RAISERROR (N'Issue with @confidence',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
-		
+
+BEGIN TRY	
 IF @ShowMigrationRelatedOutputs = 1
 BEGIN
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 30, 'Database usage likelyhood','------','------'
@@ -4671,8 +5052,8 @@ BEGIN
 	LEFT OUTER JOIN (
 		SELECT name AS dbname
 		 ,COUNT(status) AS number_of_connections
-		FROM master.sys.databases sd
-		LEFT JOIN master.sys.sysprocesses sp ON sd.database_id = sp.dbid
+		FROM sys.databases sd
+		LEFT JOIN sys.sysprocesses sp ON sd.database_id = sp.dbid
 		WHERE database_id > 4
 		GROUP BY name
 	) con ON con.dbname = base.name
@@ -4714,12 +5095,18 @@ BEGIN
 
 	IF @Debug = 0
 		RAISERROR (N'Database usage likelyhood measured',0,1) WITH NOWAIT;
+			SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with database usage measures',0,1) WITH NOWAIT;
+END CATCH
 			/*----------------------------------------
 			--Create DMA commands
 			----------------------------------------*/
-	IF @ShowMigrationRelatedOutputs = 1
+BEGIN TRY
+IF @ShowMigrationRelatedOutputs = 1
 	BEGIN
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 31, 'Database Migration Assistant commands','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
@@ -4733,7 +5120,12 @@ END
 		IF @Debug = 0
 		RAISERROR (N'Create DMA commands',0,1) WITH NOWAIT;
 	END
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with creating DMA commands',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 	
 
 			/*----------------------------------------
@@ -4822,6 +5214,7 @@ INSERT INTO @TraceTypes VALUES (22868	,'Type')
 --The script below can be use to search for automatic Log File Growths, using the background profiler trace that SQL Server maintains.
 DECLARE @tracepath NVARCHAR(260)
 
+BEGIN TRY
 --Pick up the path of the background profiler trace for the instance
 SELECT 
  @tracepath = path 
@@ -4882,9 +5275,15 @@ GROUP BY name,T.Definition,DatabaseName, CASE
 		WHEN PATINDEX('%ONLY FROM%',TextData) > 0 THEN 'VERIFY'
 		END 
 
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with trace part 1 before autogrowth',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
 --Query the background trace files
+BEGIN TRY
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 33, 'Trace Data Autogrowth','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 33
@@ -4923,6 +5322,12 @@ and  te.name in ('Data File Auto Grow','Log File Auto Grow')
 GROUP BY DBName
 , FileType
 ORDER BY DBName
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Issue with Trace data insert',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
 	IF @Debug = 0
 		RAISERROR (N'Done with Trace data',0,1) WITH NOWAIT;
@@ -4931,6 +5336,7 @@ ORDER BY DBName
 			/*----------------------------------------
 			--Compression options
 			----------------------------------------*/
+BEGIN TRY
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 34, 'Good index compression candidates','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 34
@@ -4945,34 +5351,61 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 34, 'Good
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 34
 		, DB 
-		, '[CurrentCompression]:' + data_compression_desc + ',[Reserved Pages]:' + CONVERT(VARCHAR(10),reserved_page_count) +',[RowCount]:' + CONVERT(VARCHAR(10),row_count)
+		, '[CurrentCompression]:' + data_compression_desc 
+		+ ',[Reserved Pages]:' + CONVERT(VARCHAR(10),reserved_page_count) 
+		+',[RowCount]:' + CONVERT(VARCHAR(10),row_count)
 		, [Just compress] + ';' + [For LOB data]
 		FROM  #SqueezeMe  S
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with compression candidates',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
 			/*----------------------------------------
 			--Compression evaluation
 			----------------------------------------*/
 
-
+BEGIN TRY
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 35, 'Actual Index compression validation','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 35
-		, '[DB]:'+dbname +',[TableName]:'+TableName+',[partition_number]:'+CONVERT(VARCHAR(3),partition_number)+',[is_disabled]:'+CONVERT(VARCHAR(3),is_disabled)+',[is_hypothetical]:'+ CONVERT(VARCHAR(3),is_hypothetical)
-		, '[Compression]:'+ Compression+',[CompressionObject]:'+CompressionObject+',[IndexSizeKB]:' + CONVERT(VARCHAR(10),IndexSizeKB)+',[RowCount]:' + CONVERT(VARCHAR(10),RowCounts)
+		, '[DB]:'+dbname 
+		+',[TableName]:'+TableName
+		+',[partition_number]:'+CONVERT(VARCHAR(3),partition_number)
+		+',[is_disabled]:'+CONVERT(VARCHAR(3),is_disabled)
+		+',[is_hypothetical]:'+ CONVERT(VARCHAR(3),is_hypothetical)
+
+		, '[Compression]:'+ Compression
+		+',[CompressionObject]:'+ CompressionObject
+		+',[IndexSizeKB]:' + CONVERT(VARCHAR(10),IndexSizeKB)
+		+',[RowCount]:' + CONVERT(VARCHAR(10),RowCounts)
 		, [Just compress] + ';' + [For LOB data]
 		FROM  #compressionstates  S
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error compression validation',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 			/*----------------------------------------
 			-- TOP n Index usage patterns
 			----------------------------------------*/
-
+BEGIN TRY
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 36, 'Index Usage Statistics TOP 25','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 36
 		, '[DB]:'+dbname+',[TableName]:'+ISNULL(ObjectName,'')+',[IndexName]:'+ISNULL(IndexName,'')
-		, '[Reads]:' + CONVERT(VARCHAR(25),Reads)+',[Writes]:' + CONVERT(VARCHAR(25),Writes) +',[FillFactor]:'+ CONVERT(VARCHAR(25),[FillFactor]) +',[has_filter]:'+ CONVERT(VARCHAR(25),has_filter) 
-		, '[IndexType]:' + ISNULL(IndexType,'')+',[last_user_scan]:' + CONVERT(VARCHAR,ISNULL(IndexType,''),120) +',[last_user_lookup]:'+CONVERT(VARCHAR,ISNULL(IndexType,''),120) +',[last_user_seek]:'+ CONVERT(VARCHAR,ISNULL(IndexType,''),120)
+		, '[Reads]:' + CONVERT(VARCHAR(25),Reads)
+		+',[Writes]:' + CONVERT(VARCHAR(25),Writes) 
+		+',[FillFactor]:'+ CONVERT(VARCHAR(25),[FillFactor]) 
+		+',[has_filter]:'+ CONVERT(VARCHAR(25),has_filter) 
+
+		, '[IndexType]:' + ISNULL(IndexType,'')
+		+',[last_user_scan]:' + CONVERT(VARCHAR,ISNULL(IndexType,''),120) 
+		+',[last_user_lookup]:'+CONVERT(VARCHAR,ISNULL(IndexType,''),120) 
+		+',[last_user_seek]:'+ CONVERT(VARCHAR,ISNULL(IndexType,''),120)
 		FROM  
 		(
 			SELECT RANK() OVER(ORDER BY([Reads] + [Writes]) DESC) RankMe
@@ -4987,7 +5420,12 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 35, 'Actu
 		FROM #indexusage
 		)  S
 		WHERE RankMe < 25
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with index usage stats',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
 
 
@@ -4995,7 +5433,7 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 35, 'Actu
 			/*----------------------------------------
 			--Our INdex usage statistics evaluation
 			----------------------------------------*/
-
+BEGIN TRY
 
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 37, 'Our Index Usage Evaluation','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
@@ -5017,14 +5455,19 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 37, 'Our 
 		FROM #indexusage
 		)  S
 		WHERE UPPER(IndexName) LIKE '%LEXEL%' 
-		OR UPPER(IndexName) LIKE '%SQLDBA_ORG%'
+		OR UPPER(IndexName) LIKE '%SQLDBA%'
 		GROUP BY dbname
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with custom index evaluation',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
 			/*----------------------------------------
 			--Blocking tables
 			----------------------------------------*/
-
+BEGIN TRY
 
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 38, 'Currently blocking tables','------','------'
 		INSERT #output_man_script (SectionID, Section,Summary,Details)
@@ -5058,11 +5501,17 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 38, 'Curr
 
 		FROM  #blockinghistory  b
 		ORDER BY [page_io_latch_wait_in_ms] DESC
-
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with currently blocking tables',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
 			/*----------------------------------------
 			--Usage top xx queries
 			----------------------------------------*/
+BEGIN TRY
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 39, 'Top Queries - minus the plan','------','------'
 INSERT #output_man_script (SectionID, Section,Summary,Details)
 		SELECT 39
@@ -5099,7 +5548,7 @@ INSERT #output_man_script (SectionID, Section,Summary,Details)
 	+ '; [Avg CLR Time in MS]:'+CONVERT(VARCHAR(20),s.[Avg CLR Time in MS])
 	+ '; [Plan Handle]:'+CONVERT(VARCHAR(20),s.[Plan Handle])
 	+ '; [Last Execution Time]:'+CONVERT(VARCHAR,s.[Last Execution Time],120)
-	+ '; [Query]:'+st.text ,3800)
+	+ '; [Query]:'+ replace(replace(replace(replace(CONVERT(NVARCHAR(3600),st.text), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800)
 
 FROM
 (
@@ -5152,63 +5601,75 @@ OUTER APPLY
 	sys.dm_exec_sql_text(s.[Plan Handle]) AS st
 WHERE [RankIO] <= 35
 ORDER BY [RankIO]  ASC
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with selecting the top queries',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
 
-	/*----------------------------------------
-			--Maintenance Ola checks
+
+
+			/*----------------------------------------
+			--Disk Cluster Sizes
 			----------------------------------------*/
-			/*First check if Ola table exists in master.. sorry, too dumb to look anywhwere else*/
-INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 97, 'Check Ola','------','------'
-IF EXISTS (SELECT 1 FROM master.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'CommandLog')
+
+DECLARE @svrName VARCHAR(255)
+DECLARE @output TABLE (line VARCHAR(255))
+DECLARE @volumeinfo TABLE (Info NVARCHAR(500))
+SET @svrName = @@SERVERNAME 
+IF CHARINDEX ('\', @svrName) > 0
 BEGIN
-
-INSERT #output_man_script (SectionID, Section,Summary,Details)
-  SELECT 98
-  , [CommandType]
-  , CASE [CommandType]
-  WHEN 'ALTER_INDEX' THEN 'IndexMaintenanceSummary'
-  WHEN 'BACKUP_DATABASE' THEN 'Database Backup'
-  WHEN 'BACKUP_LOG' THEN 'Log Backup'
-  WHEN 'DBCC_CHECKDB' THEN 'Consistency Check'
-  WHEN 'RESTORE_VERIFYONLY' THEN 'Database Restore test'
-  WHEN 'xp_delete_file' THEN 'Old Backup file removed'
-  END [JobType]
-  , '[AvgJobs]:' + CONVERT(VARCHAR(20),AVG([Jobs]))
-  + '; [AvgPagesDone]:'+ ISNULL(CONVERT(VARCHAR(20),AVG([PagesDone]) ),'')
-  + '; [AvgIO]:'+ ISNULL(CONVERT(VARCHAR(20),AVG(CONVERT(MONEY,[PagesDone])*8/1024/1024) ),'')
-  + '; [AvgDurationInSeconds]:'+ ISNULL(CONVERT(VARCHAR(20),AVG([DurationInSeconds]) ),'')
-  FROM(
-
-	  SELECT [CommandType]
-	  , LEFT([StartTime],10) [Date]
-	  , COUNT(*) [Jobs]
-	  , SUM([pagecount]) [PagesDone]
-	  ,SUM([DurationInSeconds]) [DurationInSeconds]
-	  FROM (
-	  SELECT [ID],[DatabaseName],[SchemaName],[ObjectName]
-		  ,[ObjectType],[IndexName],[IndexType],[StatisticsName]
-		  ,[PartitionNumber],[ExtendedInfo],[Command]
-		  ,[CommandType],[StartTime],[EndTime]
-		  ,[ErrorNumber],[ErrorMessage]
-	  ,datediff(second,StartTime,EndTime)  [DurationInSeconds]
-	  ,ExtendedInfo.value('(/ExtendedInfo/PageCount)[1]','bigint') as [pagecount]
-	  ,ExtendedInfo.value('(/ExtendedInfo/Fragmentation)[1]','numeric(7,5)') as [Fragmentation]
-	  FROM [dbo].[CommandLog] 
-	  --WHERE IndexName IS NOT NULL
-	  ) OlaMaintenance
-	    GROUP BY [CommandType], LEFT([StartTime],10)
-  ) OlaMaintenanceSummary
-    GROUP BY [CommandType]
+       SET @svrName = SUBSTRING(@svrName, 1, CHARINDEX('\',@svrName)-1)
 END
+BEGIN TRY
+
+	SET @sql = 'powershell.exe -c "Get-WmiObject -ComputerName ' + QUOTENAME(@svrName,'''') + ' -Class Win32_Volume -Filter ''DriveType = 3'' | select Name, BlockSize | format-table"'
+	INSERT INTO @volumeinfo
+	EXEC xp_cmdshell @sql
+
+	DECLARE @volumes TABLE (Volume NVARCHAR(500), BlockSize INT)
+	INSERT INTO @volumes
+	SELECT [Measure], T2.Value
+	--, RANK ( ) OVER ( partition by T2.Measure ORDER BY Value ) RowID
+	FROM (
+	SELECT LEFT(Info, PATINDEX('%\%',Info)) [Measure]
+	, REPLACE(RIGHT(Info, LEN(Info)-PATINDEX('%\%',Info)),' ','') [Value]
+	FROM (
+	SELECT REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(Info,'  ',' '),'  ',' '),'  ',' '),'  ',' '),'  ',' '),'  ',' ') Info
+	FROM @volumeinfo
+	) T1
+	WHERE Info LIKE '[A-Z][:]\%' 
+	) T2
+
+
+	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 39, 'Disk Cluster size','------','------'
+	INSERT #output_man_script (SectionID, Section,Summary,Details)
+	SELECT 40
+		,'Disk Cluster size'
+		, Volume
+		, [BlockSize]
+	FROM @volumes V1
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with volume cluster size',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
+
+
 
 			/*----------------------------------------
 			--Maintenance Summary
 			----------------------------------------*/
 			/*First check if Ola table exists in master.. sorry, too dumb to look anywhwere else*/
+BEGIN TRY
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 98, 'Maintenance Summary','------','------'
 IF EXISTS (SELECT 1 FROM master.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'CommandLog')
 BEGIN
 
 INSERT #output_man_script (SectionID, Section,Summary,Details)
+
   SELECT 98
   , [CommandType]
   , CASE [CommandType]
@@ -5246,6 +5707,13 @@ INSERT #output_man_script (SectionID, Section,Summary,Details)
   ) OlaMaintenanceSummary
     GROUP BY [CommandType]
 END
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with reading or finding CommandLog table for Ola output',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
+
 
 
 /*ADD NEW sections before this line*/
@@ -5257,8 +5725,10 @@ END
 
 
 	BEGIN TRY
+	
 		IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_sql_handle_convert_table', 'U') IS NOT NULL
 		EXEC ('DROP TABLE #LEXEL_OES_stats_sql_handle_convert_table;')
+		/*
 		CREATE TABLE #LEXEL_OES_stats_sql_handle_convert_table (
 				 row_id INT identity 
 				, t_sql_handle varbinary(64)
@@ -5409,7 +5879,7 @@ END
 		WHERE s2.objectid IS NOT NULL AND db_name(s2.dbid) IS NOT NULL
 		AND (total_logical_writes + total_logical_reads) * execution_count > 1000
 		ORDER BY s1.sql_handle; 
-
+		
 		SELECT @grand_total_worker_time = SUM(t_total_worker_time)
 		, @grand_total_IO = SUM(t_total_logical_reads + t_total_logical_writes) 
 		from #LEXEL_OES_stats_sql_handle_convert_table; 
@@ -5472,6 +5942,7 @@ END
 
 		UPDATE #LEXEL_OES_stats_sql_handle_convert_table SET t_display_optionIO = 'show_total' 
 		WHERE t_SPRank IN (SELECT obj_rank FROM #LEXEL_OES_stats_objects WHERE (CONVERT(MONEY,total_logical_io))/@grand_total_IO < 0.005); 
+		*/
 
 
 	END TRY
@@ -5493,6 +5964,7 @@ END
 	SET @grand_total_worker_time = 0 ; 
 	SET @grand_total_IO = 0 ; 
 
+	/*
 	IF OBJECT_ID('tempdb..#sql_handle_convert_table') IS NOT NULL
 				DROP TABLE #sql_handle_convert_table;
 	CREATE TABLE #sql_handle_convert_table (
@@ -5584,7 +6056,7 @@ END
 	WHERE s2.objectid is null
 	AND (total_logical_writes + total_logical_reads) * execution_count > 1000
 	order by s1.sql_handle; 
-
+	/*
 	SELECT @grand_total_worker_time = SUM(t_total_worker_time) 
 	, @grand_total_IO = SUM(t_total_logical_reads + t_total_logical_writes) 
 	from #sql_handle_convert_table; 
@@ -5628,7 +6100,8 @@ END
 	UPDATE #sql_handle_convert_table SET t_display_optionIO = 'show_total' 
 	WHERE t_SPRank IN (SELECT obj_rank FROM #perf_report_objects WHERE (CONVERT(MONEY,total_io))/@grand_total_IO < 0.005); 
 
-
+	*/
+	*/
 	END TRY
 	BEGIN catch
 	SELECT -100 AS l1
@@ -5640,7 +6113,7 @@ END
 	, 1 AS t_total_logical_reads, 1 AS t_last_logical_reads, 1 AS t_min_logical_reads, 1 AS t_max_logical_reads, 1 AS t_avg_logical_writes, 1 AS t_total_logical_writes, 1 AS t_last_logical_writes, 1 AS t_min_logical_writes, 1 AS t_max_logical_writes, 1 AS t_avg_IO, 1 AS t_total_IO, 1 AS t_last_IO, 1 AS t_min_IO, 1 AS t_max_IO, 1 AS t_CPURank, 1 AS t_ReadRank, 1 AS t_WriteRank
 	END catch
 
-
+	/*
 
 	INSERT INTO #LEXEL_OES_stats_output
 	(evaldate, [Type], l1, l2, row_id, t_obj_name, t_obj_type, [schema_name], t_db_name, t_sql_handle, t_SPRank, t_SPRank2, t_SQLStatement
@@ -5745,11 +6218,17 @@ END
 	, ob.write_rank AS t_WriteRank 
 	FROM  #sql_handle_convert_table s join #perf_report_objects ob on (s.t_SPRank = ob.obj_rank)
 
+	*/
 
-	SELECT @TotalIODailyWorkload = SUM(CONVERT(MONEY,CONVERT(FLOAT,t_total_IO) * 8 /*KB*/ /1024/*MB*//1024)/@DaysOldestCachedQuery)  
+	--REWRITE FROM HERE
+
+	/* SELECT @TotalIODailyWorkload = SUM(CONVERT(MONEY,CONVERT(FLOAT,t_total_IO) * 8 /*KB*/ /1024/*MB*//1024)/@DaysOldestCachedQuery)  
 	FROM #LEXEL_OES_stats_output
+	*/
+ SELECT @TotalIODailyWorkload = CONVERT(MONEY,SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  * 8 /1024/1024 /@DaysOldestCachedQuery
+	FROM sys.dm_exec_query_stats qs
 
-	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 99, 'Workload details I/O','------','------'
+	/* INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 99, 'Workload details I/O','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary,Details)
 	SELECT  99 [SectionID]
 	, 'Oldest Cache: ' + CONVERT(VARCHAR(15), @DaysOldestCachedQuery) + '; Days Uptime: ' + CONVERT(VARCHAR(15),@DaysUptime) [Section]
@@ -5760,6 +6239,19 @@ END
 	, 'Total' [Details]
 	FROM #LEXEL_OES_stats_output
 	GROUP BY domain, SQLInstance
+	*/
+
+	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 99, 'Workload details I/O','------','------'
+	INSERT #output_man_script (SectionID, Section,Summary,Details)
+	SELECT 99 [SectionID]
+	, 'Oldest Cache: ' + CONVERT(VARCHAR(15), @DaysOldestCachedQuery) + '; Days Uptime: ' + CONVERT(VARCHAR(15),@DaysUptime) [Section]
+	, CONVERT(VARCHAR(50),CONVERT(MONEY,SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  * 8 /1024/1024)
+	+ 'GB/day; ' + CONVERT(VARCHAR(50),SUM(qs.execution_count)) +' executions/day; '
+	+ CONVERT(VARCHAR(50),CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)/1000) +' (avg) *[DailyGB; DailyExecutions; AverageTime(s)]'Summary
+	, 'Total' [Details]
+	FROM #dadatafor_exec_query_stats qs
+
+
 
 	INSERT #output_man_script (SectionID, Section)
 	SELECT  99, 'Total Disk I/O per day: '
@@ -5768,44 +6260,69 @@ END
 	FROM sys.dm_io_virtual_file_stats (NULL,NULL) AS [s]
 	
 	INSERT #output_man_script (SectionID, Section,Summary,Details)
+	
 	SELECT
-	 99 [SectionID]
-	, REPLICATE('|', CONVERT(INT,(CONVERT(MONEY,t_total_IO * 8 /*KB*/ /1024/*MB*//1024)/@DaysOldestCachedQuery )/@TotalIODailyWorkload *100)) + ' ' + CONVERT(VARCHAR(10),(CONVERT(MONEY,CONVERT(FLOAT,t_total_IO) * 8 /*KB*/ /1024/*MB*//1024)/@DaysOldestCachedQuery )/@TotalIODailyWorkload *100) + '%' [Section]
-	, CONVERT(VARCHAR(15),(CONVERT(MONEY,CONVERT(FLOAT,t_total_IO) * 8 /*KB*/ /1024/*MB*//1024)/@DaysOldestCachedQuery) )
-	+ 'GB/day; ' + CONVERT(VARCHAR(15),(CASE WHEN t_execution_count = 1 THEN 1 ELSE CONVERT(MONEY,t_execution_count)/@DaysOldestCachedQuery END) ) 
-	+ ' executions/day; ' +  CONVERT(VARCHAR(15),(CONVERT(MONEY,t_avg_worker_time_S)))
-	+ ' s(avg) *[DailyGB; DailyExecutions; AverageTime(s)]' [Summary]
-	, LEFT('/*' + [Type] + '; '+ ISNULL(t_obj_name,'') + ' [' + ISNULL(t_db_name,'') + '].[' + ISNULL(schema_name,'') + '] > */' + ISNULL(t_SQLStatement,''),3850) [Details]  
-	FROM (
-
-	SELECT TOP 10 ID
-		, @evaldate [evaldate]
-		, domain
-		, SQLInstance
-		, [Type]
-		, row_id
-		, t_obj_name
-		, t_obj_type
-		, [schema_name]
-		, t_db_name
-		, replace(replace(replace(replace(replace(CONVERT(NVARCHAR(MAX),t_SQLStatement), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' '),'  ', ' ') t_SQLStatement
-		, t_execution_count
-		, CASE WHEN t_execution_count = 1 THEN 1 ELSE CONVERT(MONEY,t_execution_count)/@DaysOldestCachedQuery END AS [t_execution_count_Daily]
-		, t_plan_generation_num
-		, CONVERT(MONEY,CONVERT(FLOAT,t_avg_worker_time)/1000) t_avg_worker_time_S
-		, CONVERT(MONEY,CONVERT(FLOAT,t_total_worker_time)/1000)  t_total_worker_time_S
-		, CONVERT(MONEY,t_avg_logical_reads) t_avg_logical_reads
-		, t_total_logical_reads
-		, CONVERT(MONEY,t_avg_logical_writes) t_avg_logical_writes
-		, t_total_logical_writes
-		,  CONVERT(MONEY,t_avg_IO) t_avg_IO
-		, t_total_IO
-		, CONVERT(MONEY,CONVERT(FLOAT,t_avg_IO) * 8 /*KB*/ /1024/*MB*//1024) [Average Workload GB]
-		, CONVERT(MONEY,CONVERT(FLOAT,t_total_IO) * 8 /*KB*/ /1024/*MB*//1024) [Total Workload GB]
-		, CONVERT(MONEY,CONVERT(FLOAT,t_total_IO) * 8 /*KB*/ /1024/*MB*//1024)/@DaysOldestCachedQuery [Daily Workload GB]
-	FROM #LEXEL_OES_stats_output
-	ORDER BY t_total_IO DESC
-	) T1
+		 99 [SectionID]
+		, REPLICATE('|', CONVERT(INT,(s.[I/O GB]/@DaysOldestCachedQuery )/@TotalIODailyWorkload *100)) + ' ' + CONVERT(VARCHAR(10),((s.[I/O GB]/@DaysOldestCachedQuery )/@TotalIODailyWorkload *100)) + '%' [Section]
+		, CONVERT(VARCHAR(15),(s.[I/O GB]/@DaysOldestCachedQuery) )
+		+ 'GB/day; ' + CONVERT(VARCHAR(15),(CASE WHEN s.[Total Execution Count] = 1 THEN 1 ELSE CONVERT(MONEY,s.[Total Execution Count])/@DaysOldestCachedQuery END) ) 
+		+ ' executions/day; ' +  CONVERT(VARCHAR(15),([Avg CPU Time in MS]/1000))
+		+ ' s(avg) *[DailyGB; DailyExecutions; AverageTime(s)]' [Summary]
+		, LEFT('/*' + ISNULL(O.type_desc COLLATE DATABASE_DEFAULT,'') + '; '+ ISNULL(o.name COLLATE DATABASE_DEFAULT,'') + ' [' + ISNULL(DBs.name COLLATE DATABASE_DEFAULT,'') + '].[' + ISNULL(SC.name COLLATE DATABASE_DEFAULT,'') + '] > */' + ISNULL(left(replace(replace(replace(replace(CONVERT(NVARCHAR(3600),st.text COLLATE DATABASE_DEFAULT), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800),''),3850) [Details]  
+	FROM
+	(
+		SELECT
+			CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)  [Total Elapsed Time in S]
+			, RANK() OVER(ORDER BY((SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))) DESC) [RankIO]
+			, RANK() OVER(ORDER BY(SUM(qs.execution_count)) DESC) [RankExec]
+			, RANK() OVER(ORDER BY(SUM(qs.total_worker_time)) DESC) [RankCompute]
+			, SUM(qs.execution_count)  [Total Execution Count]
+			, MAX(qs.plan_generation_num) [MAX plan generation Number]
+			, MAX(qs.last_execution_time) AS [Last Execution Time]
+			/*ALL I/O*/
+			,(SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  [Pages]
+			, CONVERT(MONEY,SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  * 8 /1024/1024 [I/O GB]
+			/*Compute*/
+			, CONVERT(MONEY,SUM(qs.total_worker_time) / 1000000.0 )  [Total CPU Time in S]
+			, CONVERT(MONEY,SUM(qs.total_worker_time) / SUM(qs.execution_count) / 1000.0 )  [Avg CPU Time in MS]
+			, CONVERT(MONEY,SUM(qs.min_worker_time) / 1000.0 ) AS [Min CPU Time in MS]
+			, CONVERT(MONEY,SUM(qs.max_worker_time) / 1000.0 ) AS [Max CPU Time in MS]
+			, CONVERT(MONEY,SUM(qs.last_worker_time) / 1000.0 ) AS [Last CPU Time in MS]
+			, AVG(qs.total_used_threads) [AVG used_threads]
+			/*Storage Physical*/
+			, SUM(qs.total_physical_reads) AS [Total physical Reads]
+			, CONVERT(MONEY,SUM(qs.total_physical_reads) / SUM(qs.execution_count) )  [Avg physical Reads]
+			/*Storage Memory*/
+			, SUM(qs.total_logical_reads) AS [Total Logical Reads]
+			, CAST(CAST(SUM(qs.total_logical_reads) AS FLOAT) / CAST(SUM(qs.execution_count) AS FLOAT) AS DECIMAL(20, 2))  [Avg Logical Reads]
+			, SUM(qs.total_logical_writes) AS [Total Logical Writes]
+			, CAST(CAST(SUM(qs.total_logical_writes) AS FLOAT) / CAST(SUM(qs.execution_count) AS FLOAT) AS DECIMAL(20, 2))  [Avg Logical Writes]
+			, SUM(qs.min_logical_reads)  [Min Logical Reads]
+			, SUM(qs.max_logical_reads)  [Max Logical Reads]
+			, SUM(qs.min_logical_writes)  [Min Logical Writes]
+			, SUM(qs.max_logical_writes)  [Max Logical Writes]
+			/*Memory grants*/
+			, CONVERT(MONEY,SUM(qs.total_grant_kb))/SUM(qs.execution_count) [total_grant_kb]
+			, CONVERT(MONEY,SUM(qs.total_used_grant_kb))/SUM(qs.execution_count) [total_used_grant_kb]
+			, SUM(qs.total_clr_time) AS [Total CLR Time]
+			, CAST(SUM(qs.total_clr_time) / SUM(qs.execution_count) / 1000.0 AS DECIMAL(20, 2))  [Avg CLR Time in MS]
+			, qs.plan_handle AS [Plan Handle]
+		
+		FROM
+			#dadatafor_exec_query_stats qs
+		GROUP BY qs.plan_handle 
+		--HAVING CONVERT(MONEY,(SUM(qs.total_elapsed_time) / 1000000.0)) > 1
+		) s
+	OUTER APPLY
+		sys.dm_exec_query_plan(s.[Plan Handle]) AS qp
+	LEFT OUTER JOIN
+		sys.databases DBs ON qp.dbid = DBs.database_id
+	OUTER APPLY
+		sys.dm_exec_sql_text(s.[Plan Handle]) AS st
+	LEFT OUTER JOIN sys.objects O On O.object_id = qp.objectid
+	LEFT OUTER JOIN sys.schemas SC ON SC.schema_id = O.schema_id
+	WHERE [RankIO] <= 35
+	ORDER BY [RankIO]  ASC
 	OPTION (RECOMPILE);
 
 	IF @Debug = 0
@@ -5853,6 +6370,49 @@ BEGIN
 
 END
 
+/*----------------------------------------
+--Add Latest Security Checklist output
+----------------------------------------*/
+/*
+
+*/
+IF OBJECT_ID('master.dbo.sqldba_stpSecurity_Checklist_Table') IS NULL
+/*If no Blitz table, run Blitz*/
+BEGIN
+	IF @Debug = 0
+		RAISERROR (N'Skipping sqldba_stpSecurity_Checklist results, cannot find output table',0,1) WITH NOWAIT;
+	
+END
+IF OBJECT_ID('master.dbo.sqldba_stpSecurity_Checklist_Table') IS NOT NULL
+BEGIN
+	IF @Debug = 0
+		RAISERROR (N'Found sqldba_stpSecurity_Checklist results, only recent results will be evaluated',0,1) WITH NOWAIT;
+	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 1001, 'sqldba_stpSecurity_Checklist from here','------','------'
+	INSERT INTO #output_man_script ( 
+	domain
+	,SQLInstance
+	,evaldate
+	,SectionID
+	,Section
+	,Summary
+	, Details )
+	EXEC ('SELECT  [Domain]
+	,[SQLInstance]
+	, [evaldate]
+	,[code]+1000
+	, ''stpSecurity:'' + [Category] + '';'' +[Title]
+	, ISNULL([Result],'''') + '';'' +[How this can be an Issue] + '';''+[Technical explanation]
+	, [How to Fix] 
+	FROM master.dbo.sqldba_stpSecurity_Checklist_Table 
+	WHERE [evaldate] = (SELECT max([evaldate]) 
+	FROM master.dbo.sqldba_stpSecurity_Checklist_Table HAVING DATEADD(DAY,-2,GETDATE()) < max([evaldate]) )
+	ORDER BY [code] ASC'
+	)
+
+END
+
+
+
 			/*----------------------------------------
 			--select output
 			----------------------------------------*/
@@ -5893,6 +6453,10 @@ BEGIN
 		RAISERROR (N'Export to table. Creating table.',0,1) WITH NOWAIT;
 	IF OBJECT_ID(@ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName) IS NULL
 	BEGIN
+	/*
+	If the table does not exist, then create it. These are the core columns used in the output table.
+	No indexes have been added, I don't believe there's a need for it, and I've only been using this for 10 years on 5000+ servers ~ Adrian
+	*/
 		SET @dynamicSQL = 'CREATE TABLE ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
 	( 
 	ID INT
@@ -5913,23 +6477,51 @@ BEGIN
 	BEGIN
 		SET @dynamicSQL = 'DELETE FROM ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
 		WHERE	evaldate < DATEADD(DAY, - ' + CONVERT(VARCHAR(5),@ExportCleanupDays) + ', GETDATE())'
-		EXEC sp_executesql @dynamicSQL;	
-	END
+		BEGIN TRY
+			EXEC sp_executesql @dynamicSQL;	
+		END TRY
+		BEGIN CATCH
+			RAISERROR (N'Error creating table',0,1) WITH NOWAIT;
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+			RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+		END CATCH
 
+	END
+	/*
+	Okay, time to be clever. Let's assume the table was built in a previous version, let's compare columns and see what needs to be added.
+	Look at columns in the table and evaluate columsn still to be added.
+	*/
 	SET @dynamicSQL = '
-  DECLARE @ColumnsToAdd TABLE (ID INT IDENTITY(1,1), ColumnName NVARCHAR(500), [order] INT, [length] INT)
+  DECLARE @ColumnsToAdd TABLE 
+  (
+	ID INT IDENTITY(1,1)
+	, ColumnName NVARCHAR(500)
+	, [order] INT
+	, [length] INT
+  )
   INSERT INTO @ColumnsToAdd
-  SELECT targetcolumns.name, targetcolumns.column_id, targetcolumns.max_length
+  SELECT 
+  targetcolumns.name
+  , targetcolumns.column_id
+  , targetcolumns.max_length
   FROM (
-  SELECT c.name, column_id, max_length
-  FROM tempdb.sys.columns c
-  INNER JOIN tempdb.sys.tables  t ON t.object_id = c.object_id
-  WHERE t.name  like ''%output_man_script%'') targetcolumns
-  LEFT OUTER JOIN(
-  SELECT c.name, column_id, max_length
-  FROM master.sys.columns c
-  INNER JOIN master.sys.tables  t ON t.object_id = c.object_id
-  WHERE t.name = ''' + @ExportTableName + ''') currentcolumns ON targetcolumns.name = currentcolumns.name
+	  SELECT 
+	  c.name
+	  , column_id
+	  , max_length
+	  FROM tempdb.sys.columns c
+	  INNER JOIN tempdb.sys.tables  t ON t.object_id = c.object_id
+	  WHERE t.name like ''%output_man_script%''
+	  ) targetcolumns
+  LEFT OUTER JOIN (
+	  SELECT 
+	  c.name
+	  , column_id
+	  , max_length
+	  FROM '+@ExportDBName +'.sys.columns c
+  INNER JOIN  '+@ExportDBName +'.sys.tables  t ON t.object_id = c.object_id
+  WHERE t.name = ''' + @ExportTableName + '''
+  ) currentcolumns ON targetcolumns.name = currentcolumns.name
   WHERE currentcolumns.name IS NULL
 
   DECLARE @MaxcolumnsToAdd INT 
@@ -5949,30 +6541,37 @@ BEGIN
 			FROM @ColumnsToAdd WHERE ID = @ColumnCountLoop
 
 			IF @ColumnToAdd = ''evaldate''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD evaldate NVARCHAR(20)
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD evaldate NVARCHAR(20)
 			IF @ColumnToAdd = ''domain''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD domain NVARCHAR(505) DEFAULT DEFAULT_DOMAIN()
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD domain NVARCHAR(505) DEFAULT DEFAULT_DOMAIN()
 			IF @ColumnToAdd = ''SQLInstance''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD SQLInstance NVARCHAR(505) DEFAULT @@SERVERNAME
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD SQLInstance NVARCHAR(505) DEFAULT @@SERVERNAME
 			IF @ColumnToAdd = ''SectionID''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD SectionID int NULL
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD SectionID int NULL
 			IF @ColumnToAdd = ''Section''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD Section NVARCHAR(4000)
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD Section NVARCHAR(4000)
 			IF @ColumnToAdd = ''Summary''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD Summary NVARCHAR(4000)
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD Summary NVARCHAR(4000)
 			IF @ColumnToAdd = ''Severity''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD Severity NVARCHAR(5)
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD Severity NVARCHAR(5)
 			IF @ColumnToAdd = ''Details''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD Details NVARCHAR(4000)
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD Details NVARCHAR(4000)
 			IF @ColumnToAdd = ''QueryPlan''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD QueryPlan XML NULL
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD QueryPlan XML NULL
 			IF @ColumnToAdd = ''HoursToResolveWithTesting''
-				ALTER TABLE ['+  @ExportDBName +'].[' + @ExportSchema + '].[' + @ExportTableName + '] ADD HoursToResolveWithTesting MONEY  NULL
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD HoursToResolveWithTesting MONEY  NULL
 			SET @ColumnCountLoop = @ColumnCountLoop + 1;
 		END
 	END
 	';
-	EXEC sp_executesql @dynamicSQL;	
+		BEGIN TRY
+			EXEC sp_executesql @dynamicSQL;
+		END TRY
+		BEGIN CATCH
+			RAISERROR (N'Error with modifying output table',0,1) WITH NOWAIT;
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+			RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+		END CATCH
 	IF @Debug = 0
 		RAISERROR (N'Populating table',0,1) WITH NOWAIT;
 	SET @dynamicSQL = 'INSERT INTO ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
@@ -5989,13 +6588,13 @@ BEGIN
 			, QueryPlan)
 	SELECT T1.ID
 	,  evaldate
-	, T1.domain
-	,'''+ @ThisServer  +'''
-	, T1.SectionID
-	, T1.Section
-	, T1.Summary
+	, REPLACE(T1.domain, ''~'','':'') domain
+	,  REPLACE('''+ @ThisServer  +''', ''~'','':'') [Server]
+	, REPLACE(replace(replace(replace(replace( ISNULL(T1.SectionID,''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' ''), ''~'','':'') SectionID
+	, REPLACE(replace(replace(replace(replace( ISNULL(T1.Section,''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' ''), ''~'','':'') Section
+	, REPLACE(replace(replace(replace(replace( ISNULL(T1.Summary,''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' ''), ''~'','':'') Summary
 	, T1.Severity
-	, replace(replace(replace(replace( ISNULL(T1.Details,''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' '') [Details]
+	, REPLACE(replace(replace(replace(replace( ISNULL(T1.Details,''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' ''), ''~'','':'') [Details]
 	, T1.HoursToResolveWithTesting
 	, CASE WHEN  ' + CONVERT(VARCHAR(5),@ShowQueryPlan) + ' = 1 THEN ISNULL(replace(replace(replace(replace(ISNULL(CONVERT(NVARCHAR(MAX),QueryPlan),''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' ''),'''')   ELSE NULL END QueryPlan
 	FROM #output_man_script T1
@@ -6010,13 +6609,13 @@ BEGIN
 		/*And after all that hard work, how about we select to the screen as well*/
 		SELECT T1.ID
 		,  evaldate
-		, T1.domain
-		, @ThisServer
+		, REPLACE(T1.domain, '~',':') domain
+		, REPLACE(@ThisServer, '~',':') [Server]
 		, T1.SectionID
-		, T1.Section
-		, T1.Summary
-		, T1.Severity
-		, T1.Details
+		, REPLACE(T1.Section, '~',':') Section
+		, REPLACE(T1.Summary, '~',':') Summary
+		, REPLACE(T1.Severity, '~',':') Severity
+		,  REPLACE(replace(replace(replace(replace( ISNULL(T1.Details,''), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' '), '~',':') [Details]
 		, T1.HoursToResolveWithTesting
 		, CASE WHEN  @ShowQueryPlan = 1 THEN ISNULL(replace(replace(replace(replace(ISNULL(CONVERT(NVARCHAR(MAX),QueryPlan),''), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' '),'')   ELSE NULL END QueryPlan
 		FROM #output_man_script T1
