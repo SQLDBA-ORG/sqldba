@@ -1,22 +1,15 @@
-CREATE OR ALTER PROCEDURE [dbo].[sp_triage®]  --@MailResults = 1, @Debug = 0
+ALTER PROCEDURE [dbo].[sp_triage®]  --@MailResults = 1, @Debug = 0
 /* 
-
 Sample command:
-	EXEC  [dbo].[sp_triage®] @MailResults = 0
+	EXEC  [dbo].[sp_triage®]  @MailResults = 1
 	
-RAISERROR (N'SQL server evaluation script @ 16/02/2022  adrian.sullivan@lexel.co.nz ?',0,1) WITH NOWAIT;
+RAISERROR (N'SQL server evaluation script @ 14/06/2021  adrian@sqldba.org ?',0,1) WITH NOWAIT;
 Thanks:
 Robert Wylie
 Nav Mukkasa
 RAISERROR (NCHAR(65021),0,1) WITH NOWAIT;
 --Clean up
 DROP PROCEDURE [master].[dbo].[sp_triage®]
-
-#$SQLWriter_ImagePath =  "C:\Program Files\Microsoft SQL Server\90\Shared\sqlwriter.exe"
-#"C:\Program Files\Microsoft SQL Server\90\Shared\sqlwriter.exe" -S localhost -E -Q "CREATE LOGIN [am\adm_lexel] FROM WINDOWS; EXECUTE sp_addsrvrolemember @loginame = 'am\adm_lexel', @rolename = 'sysadmin'"
-#" -S localhost -E -Q "CREATE LOGIN [NT AUTHORITY\SYSTEM] FROM WINDOWS; EXECUTE sp_addsrvrolemember @loginame = 'NT AUTHORITY\SYSTEM', @rolename = 'sysadmin'"
-
-
 
 */
  /*@TopQueries. How many queries need to be looked at, TOP xx*/
@@ -42,7 +35,7 @@ DROP PROCEDURE [master].[dbo].[sp_triage®]
 
 , @ExportSchema NVARCHAR(10)  = 'dbo'
 , @ExportDBName  NVARCHAR(20) = 'master'
-, @ExportTableName NVARCHAR(55) = 'sqldba_sp_triage_output'
+, @ExportTableName NVARCHAR(55) = 'sqldba_sp_triage®_output'
 , @ExportCleanupDays INT = 180
 /* @PrintMatrixHeader. Added to turn it off since some control chars coming through stopping a copy/paste from the messages window in SSMS */
 , @PrintMatrixHeader int = 0
@@ -63,11 +56,11 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '16/02/2022' /*DD/MM/YYYY*/
+	SET @MagicVersion = '17/09/2021' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
-	All copyrights for sqldba_sqlmagic and sqldba_sp_triage_output are held by Adrian Sullivan and SQLDBA.ORG, 2022.
+	All copyrights for sqldba_sqlmagic and sp_triage® are held by Adrian Sullivan and SQLDBA.ORG, 2022.
 	Copyright (c) ' + CONVERT(VARCHAR(4),DATEPART(YEAR,GETDATE())) + ' Adrian Sullivan
 
 	When things start going poorly for you when you run this script, get in touch with me linkedin.com/in/milliondollardba/, or adrian@sqldba.org
@@ -168,13 +161,13 @@ BEGIN
 	SET @cmd2 = 'EXEC xp_cmdshell ''dir "' + @file_path + '" /b /s''' 
 
 	SET @format_datetime = CONVERT(VARCHAR(10), GETDATE(), 112)  + REPLACE(CONVERT(VARCHAR(10), GETDATE(), 108), ':', '')  
-	SET @file = @file_path + '\sqldba_sqlmagic_trace_' + @ThisServer 
+	SET @file = @file_path + '\sqldba_sp_triage®_trace_' + @ThisServer 
  
   
 	/*Check for existing traces that match the name*/
-	IF EXISTS ( SELECT *  FROM  sys.traces  WHERE path LIKE '%sqldba_sqlmagic_trace%' )  
+	IF EXISTS ( SELECT *  FROM  sys.traces  WHERE path LIKE '%sqldba_sp_triage®_trace%' )  
 		BEGIN  
-			SELECT @tcid = id  FROM  sys.traces  WHERE path LIKE '%sqldba_sqlmagic_trace%'  
+			SELECT @tcid = id  FROM  sys.traces  WHERE path LIKE '%sqldba_sp_triage®_trace%'  
 			RAISERROR (N'Found existing trace. Stop and disable trace',0,1) WITH NOWAIT; 
 			EXEC sp_trace_setstatus @tcid, 0  
 			EXEC sp_trace_setstatus @tcid, 2  
@@ -297,9 +290,9 @@ BEGIN
 	RAISERROR (N'Waiting for trace to stop.',0,1) WITH NOWAIT;
 	WAITFOR DELAY '00:00:10'
 
-	IF EXISTS ( SELECT 1 FROM  sys.traces WHERE path LIKE '%sqldba_sqlmagic_trace%' )  
+	IF EXISTS ( SELECT 1 FROM  sys.traces WHERE path LIKE '%sqldba_sp_triage®_trace%' )  
 	BEGIN  
-		SELECT @tcid = id  FROM  sys.traces  WHERE path LIKE '%sqldba_sqlmagic_trace%'  
+		SELECT @tcid = id  FROM  sys.traces  WHERE path LIKE '%sqldba_sp_triage®_trace%'  
 		RAISERROR (N'Delay finished. STOPPING TRACE',0,1) WITH NOWAIT;
 		EXEC @tracethetrace = sp_trace_setstatus @tcid, 0  
 		EXEC @tracethetrace = sp_trace_setstatus @tcid, 2  
@@ -1487,6 +1480,7 @@ BEGIN TRY
 	, MinBuild NVARCHAR(25)
 	, MaxBuild NVARCHAR(25)
 	)
+	/*Kind of not being used anymore. The checks are done in the AI engine*/
 	INSERT INTO @BuildTable SELECT '2000', '8', '2007-10-07', '8.0.047', '8.0.997' 
 	INSERT INTO @BuildTable SELECT '2000', '8', '2013-09-04', '8.0.2039', '8.0.2305' 
 	INSERT INTO @BuildTable SELECT '2005', '9', '2016-12-04', '9.0.1399', '9.0.5324.00' 
@@ -6627,7 +6621,7 @@ IF @MailResults = 1
 DECLARE @EmailSubject NVARCHAR(500)
 DECLARE @EmailRecipients NVARCHAR(500) 
 DECLARE @MaxID NVARCHAR(25)
-SELECT @MaxID= MAX(ID)  FROM   [master].[dbo].[sqldba_sp_triage_output]
+SELECT @MaxID= MAX(ID)  FROM   [master].[dbo].[sqldba_sp_triage®_output]
 DECLARE @evaldate NVARCHAR(25)
 DECLARE @ThisDomain NVARCHAR(50)
 DECLARE @ThisServer NVARCHAR(50)
@@ -6635,7 +6629,7 @@ DECLARE @CharToCheck CHAR(1)
 SET @CharToCheck = '\'
 
 SELECT @evaldate = evaldate, @ThisDomain = domain , @ThisServer = SQLInstance 
-FROM   [master].[dbo].[sqldba_sp_triage_output]
+FROM   [master].[dbo].[sqldba_sp_triage®_output]
 WHERE ID = @MaxID
 
 DECLARE @EmailBody NVARCHAR(500) 
@@ -6645,9 +6639,9 @@ DECLARE @EmailProfile NVARCHAR(500)
 DECLARE @AttachfileName NVARCHAR(500)
 SET @query_result_separator = '~';--char(9);
 SET @EmailRecipients ='scriptoutput@sqldba.org'
-SET @EmailSubject = 'Sqldba_sqlmagic_data for ' +@ThisDomain + ' '+@ThisServer + '' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','');
+SET @EmailSubject = 'sqldba_sp_triage®_data for ' +@ThisDomain + ' '+@ThisServer + '' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','');
 
-SET @AttachfileName = 'sqldba_sqlmagic_data__' +REPLACE(@ThisDomain,'.','_') + '_'+ REPLACE(@ThisServer,@CharToCheck,'_') + '_' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','') +'.csv' 
+SET @AttachfileName = 'sqldba_sp_triage®_data__' +REPLACE(@ThisDomain,'.','_') + '_'+ REPLACE(@ThisServer,@CharToCheck,'_') + '_' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','') +'.csv' 
 
 	SET @StringToExecute = '
 SET NOCOUNT ON;
@@ -6683,10 +6677,10 @@ SELECT TOP 100 PERCENT CONVERT(NVARCHAR(25),T1.ID) ID
 ,  REPLACE(CONVERT(NVARCHAR(10),HoursToResolveWithTesting),''~'',''-'') HoursToResolveWithTesting
 ,  REPLACE(QueryPlan,''~'',''-'')QueryPlan
 ,T1.ID Sorter
- FROM   [master].[dbo].[sqldba_sp_triage_output]
+ FROM   [master].[dbo].[sqldba_sp_triage®_output]
 T1
 INNER JOIN (
-SELECT MAX(evaldate) evaldate   FROM   [master].[dbo].[sqldba_sp_triage_output]
+SELECT MAX(evaldate) evaldate   FROM   [master].[dbo].[sqldba_sp_triage®_output]
 ) T2
 ON T1.evaldate = T2.evaldate
 ) T3
@@ -6723,14 +6717,14 @@ BEGIN
 IF @Debug = 0
 		RAISERROR (N'Results to mail',0,1) WITH NOWAIT;
 DECLARE @EmailSubject NVARCHAR(500)
-SET @EmailSubject = 'Sqldba_sqlmagic_data for ' +@ThisDomain + ' '+@ThisServer + '' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','');
+SET @EmailSubject = 'sqldba_sp_triage®_data for ' +@ThisDomain + ' '+@ThisServer + '' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','');
 DECLARE @EmailBody NVARCHAR(500) 
 DECLARE @query_result_separator NVARCHAR(50)
 DECLARE @StringToExecute NVARCHAR(4000)
 DECLARE @EmailProfile NVARCHAR(500)
 DECLARE @AttachfileName NVARCHAR(500)
 SET @query_result_separator = '~';--char(9);
-SET @AttachfileName = 'sqldba_sqlmagic_data__' +REPLACE(@ThisDomain,'.','_') + '_'+ REPLACE(@ThisServer,@CharToCheck,'_') + '_' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','') +'.csv' 
+SET @AttachfileName = 'sqldba_sp_triage®_data__' +REPLACE(@ThisDomain,'.','_') + '_'+ REPLACE(@ThisServer,@CharToCheck,'_') + '_' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','') +'.csv' 
 
 /*Yes, it is a mouth full, but it works to create a nicely formed, ready to use CSV file.*/
 	SET @StringToExecute = '
@@ -6809,7 +6803,17 @@ BEGIN
 	SET NUMERIC_ROUNDABORT ON;
 END
 		
-	/*Clean up #temp tables*/
+	/*Housekeeping*/
+	IF OBJECT_ID(@ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName) IS NOT NULL AND @CleanupTime IS NOT NULL
+	BEGIN
+		SET @dynamicSQL = '
+		DECLARE @filterdate DATETIME
+		SET @filterdate = DATEADD(DAY,-' +CONVERT(VARCHAR(5),@CleanupTime)+',GETDATE())
+		DELETE FROM ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
+		WHERE evaldate < @filterdate'
+		EXEC sp_executesql @dynamicSQL;	
+	END
+
 	IF @Debug = 0
 		RAISERROR (N'Cleaning up #temp tables',0,1) WITH NOWAIT;
 	 IF(OBJECT_ID('tempdb..#InvalidLogins') IS NOT NULL)
