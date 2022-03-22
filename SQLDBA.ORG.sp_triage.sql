@@ -1,9 +1,12 @@
-ALTER PROCEDURE [dbo].[sp_triage®]  --@MailResults = 1, @Debug = 0
+ALTER PROCEDURE [dbo].[sp_triage®]  --@Debug = 0
 /* 
+WANT [sp_triage®]?
+https://github.com/SQLDBA-ORG/sqldba/
+
 Sample command:
 	EXEC  [dbo].[sp_triage®]  @MailResults = 1
 	
-RAISERROR (N'SQL server evaluation script @ 14/06/2021  adrian@sqldba.org ?',0,1) WITH NOWAIT;
+RAISERROR (N'SQL server evaluation script  adrian@sqldba.org ?',0,1) WITH NOWAIT;
 Thanks:
 Robert Wylie
 Nav Mukkasa
@@ -13,34 +16,35 @@ DROP PROCEDURE [master].[dbo].[sp_triage®]
 
 */
  /*@TopQueries. How many queries need to be looked at, TOP xx*/
-  @TopQueries int  = 500 
+  @TopQueries [INT]  = 500 
 /*@FTECost. Average price in $$$ that you pay someone at your company every year.*/
 , @FTECost MONEY   = 70000
 /*@MinExecutionCount. This can go to 0 for more details, but first attEND to often used queries. Run this with 0 before making any big decisions*/
-, @MinExecutionCount int  = 1 
+, @MinExecutionCount [INT]  = 1 
 /*@ShowQueryPlan. Set to 1 to include the Query plan in the output*/
-, @ShowQueryPlan int  = 0
+, @ShowQueryPlan [INT]  = 0
 /*@PrepForExport. When the intent of this script is to use this for some type of hocus-pocus magic metrics, set this to 1*/
-, @PrepForExport int  = 1 
+, @PrepForExport [INT]  = 1 
 /*@ShowMigrationRelatedOutputs. When you need to show migration stuff, like possible breaking connections and DMA script outputs, set to 1 to show information*/
-, @ShowMigrationRelatedOutputs int = 1 
-, @SkipHeaps INT = 1 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
+, @ShowMigrationRelatedOutputs [INT] = 1 
+, @SkipHeaps [INT] = 1 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
 
 /*Email results*/
 , @MailResults BIT = 0
 , @EmailRecipients NVARCHAR(500) ='scriptoutput@sqldba.org'
  /*Screen / Table*/
 , @Export NVARCHAR(10) = 'TABLE'
-, @ShowOnScreenWhenResultsToTable int = 1 
+, @ShowOnScreenWhenResultsToTable [INT] = 1 
 
 , @ExportSchema NVARCHAR(10)  = 'dbo'
 , @ExportDBName  NVARCHAR(20) = 'master'
 , @ExportTableName NVARCHAR(55) = 'sqldba_sp_triage®_output'
-, @ExportCleanupDays INT = 180
+, @ExportCleanupDays [INT] = 180
 /* @PrintMatrixHeader. Added to turn it off since some control chars coming through stopping a copy/paste from the messages window in SSMS */
-, @PrintMatrixHeader int = 0
+, @PrintMatrixHeader [INT] = 0
 , @Debug BIT = 0 /*0 is off, 1 is on, no internal raiserror will be shown*/
-, @CleanupTime INT = 180 /*If output goes to a table then clean up records older than this many days*/
+
+, @CleanupTime [INT] = 180 /*If output goes to a table then clean up records older than this many days*/
 WITH RECOMPILE, ENCRYPTION
 AS
 BEGIN
@@ -56,7 +60,7 @@ BEGIN
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
 
 	DECLARE @MagicVersion NVARCHAR(25)
-	SET @MagicVersion = '17/09/2021' /*DD/MM/YYYY*/
+	SET @MagicVersion = '20/02/2022' /*DD/MM/YYYY*/
 	DECLARE @License NVARCHAR(4000)
 	SET @License = '----------------
 	MIT License
@@ -86,7 +90,7 @@ BEGIN
 	6. All comments in / * * / not --
 	7. All descriptive comments above DECLAREs
 		Comments can also be in SET @comment = ''
-	8. All Switches are 0=off and 1=on and int type
+	8. All Switches are 0=off and 1=on and [INT] type
 	9. SELECT -option- <first column>
 	, <column>
 	FROM.. where more than 1 column is returned, or whatever reads better
@@ -114,10 +118,11 @@ END
 
 /*Before anything, start a trace and get some information.*/
 
-		
+DECLARE @DebugTime DATETIME
+DECLARE @DebugTimeMSG VARCHAR(500)	
 DECLARE @errMessage VARCHAR(MAX) 
 SET @errMessage = ERROR_MESSAGE()
-
+SET @DebugTime = GETDATE()
 DECLARE @ThisServer NVARCHAR(500)
 DECLARE @CharToCheck NVARCHAR(5) 
 SET @CharToCheck = CHAR(92)
@@ -132,13 +137,18 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+  BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 
 IF 'DoTrace' = '1' 
 BEGIN
-	DECLARE @tcid INT  
+	DECLARE @tcid [INT]  
 	DECLARE @format_datetime VARCHAR(50)  
 	DECLARE @file NVARCHAR(500)  
 	DECLARE @file2 NVARCHAR(500)  
@@ -200,9 +210,9 @@ BEGIN
 
 	BEGIN
 		/*Create the next trace*/
-		DECLARE @rc int  
-		DECLARE @TraceID int  
-		DECLARE @maxfilesize bigint  
+		DECLARE @rc [INT]  
+		DECLARE @TraceID [INT]  
+		DECLARE @maxfilesize [BIGINT]  
 		DECLARE @tracefile nvarchar(255) 
 
 		SET @tracefile=@file 
@@ -272,7 +282,7 @@ BEGIN
 		EXEC sp_trace_setevent @TraceID, 41, 66, @on
 
 
-		DECLARE @tracethetrace INT
+		DECLARE @tracethetrace [INT] 
 		EXEC sp_trace_setfilter @TraceID, 1, 0, 7, N'exec sp_reset_connection'
 		EXEC sp_trace_setfilter @TraceID, 10, 0, 7, N'SQL Server Profiler %'
 		RAISERROR (N'Events and filters set. STARTING TRACE.',0,1) WITH NOWAIT;
@@ -373,7 +383,7 @@ BEGIN
 		  ,[SqlHandle]
 		  ,[SessionLoginName]
 		  ,[PlanHandle]
-		  ,[GroupID]
+		--Not in SQL 2005 mate  ,[GroupID]
 	   -- INTO dbo.SQLDBA_Audit 
 		FROM  FN_TRACE_GETTABLE('' + @file + '.trc', DEFAULT) 
 		RAISERROR (N'Cleaning up.Renaming trace file.',0,1) WITH NOWAIT; 
@@ -410,9 +420,9 @@ BEGIN
 	
     IF (@PrintMatrixHeader <> 0)
     BEGIN
-        DECLARE @matrixthis BIGINT ;
+        DECLARE @matrixthis [BIGINT] ;
         SET @matrixthis = 0;
-        DECLARE @matrixthisline INT ;
+        DECLARE @matrixthisline [INT] ;
         SET @matrixthisline= 0;
         DECLARE @sliverofawesome NVARCHAR(200);
         DECLARE @thischar NVARCHAR(1);
@@ -444,23 +454,28 @@ BEGIN
     END
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@License,0,1) WITH NOWAIT; ;
+	END
 	--PRINT 'Let''s do this!';
 	
 	/*@ShowWarnings = 0 > Only show warnings */
-	DECLARE @ShowWarnings int ;
+	DECLARE @ShowWarnings [INT] ;
 	SET @ShowWarnings = 0;
 
 	/*Script wide variables*/
 	DECLARE @DaysUptime NUMERIC(23,2);
 	DECLARE @dynamicSQL NVARCHAR(4000) ;
 	SET @dynamicSQL = N'';
-	DECLARE @MinWorkerTime BIGINT ;
+	DECLARE @MinWorkerTime [BIGINT] ;
 	SET @MinWorkerTime = 0.01 * 1000000;
 	DECLARE @MinChangePercentage MONEY ;
 	DECLARE @DoStatistics MONEY ;
 	SET @MinChangePercentage = 5; /*Assume 5% on */
-	DECLARE @LeftText INT ;
+	DECLARE @LeftText [INT] ;
 	SET @LeftText = 1000; /*The length that you want to trim text*/
 	DECLARE @oldestcachequery DATETIME ;
 	DECLARE @minutesSinceRestart BIGINT;
@@ -525,6 +540,10 @@ DECLARE @SP_ISCLUSTERED NVARCHAR(50)
 
 
 /*Populate some SQL Server Properties first*/
+DECLARE @ThisDomain NVARCHAR(100)
+EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE', 'SYSTEM\CurrentControlSet\services\Tcpip\Parameters', N'Domain',@ThisDomain OUTPUT
+SET @ThisDomain = ISNULL(@ThisDomain, DEFAULT_DOMAIN())
+
 SELECT 
 @SP_MachineName = CONVERT(NVARCHAR(50),SERVERPROPERTY('MACHINENAME') )
 , @SP_INSTANCENAME = ISNULL(CONVERT(NVARCHAR(50),SERVERPROPERTY('INSTANCENAME') ),'')
@@ -550,7 +569,7 @@ END
 	(  
 		DatabaseName sysname 
 		, [FileName] NVARCHAR(4000) NULL
-		, FileSize BIGINT NULL
+		, FileSize [BIGINT] NULL
 		, FileGroupName NVARCHAR(4000)NULL
 		, LogicalName NVARCHAR(4000) NULL
 		, maxsize MONEY  NULL
@@ -559,9 +578,9 @@ END
 	DECLARE @FileStats TABLE 
 	(  
 		FileID INT
-		, FileGroup INT  NULL
-		, TotalExtents INT  NULL
-		, UsedExtents INT  NULL
+		, FileGroup [INT]  NULL
+		, TotalExtents [INT]  NULL
+		, UsedExtents [INT]  NULL
 		, LogicalName NVARCHAR(4000)  NULL
 		, FileName NVARCHAR(4000)  NULL
 	);
@@ -599,7 +618,12 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
   IF @Debug = 0
+  BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Problem inserting data into #dadatafor_exec_query_stats',0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 BEGIN TRY
@@ -633,7 +657,12 @@ END
 END TRY
 BEGIN CATCH
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Problem with adding columns to #dadatafor_exec_query_stats',0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 
@@ -670,13 +699,13 @@ END CATCH
 				, LogSize FLOAT NULL
 				, SpaceUsedPercent FLOAT NULL
 				, Status bit NULL
-				, VLFCount INT NULL
+				, VLFCount [INT] NULL
 			);
 	IF OBJECT_ID('tempdb..#Action_Statistics') IS NOT NULL
 				DROP TABLE #Action_Statistics;
 			CREATE TABLE #Action_Statistics 
 			(
-				Id INT IDENTITY(1,1)
+				Id [INT] IDENTITY(1,1)
 				, DBname NVARCHAR(100)
 				, TableName NVARCHAR(100)
 				, StatsID INT
@@ -723,9 +752,9 @@ END CATCH
 				, IndexName NVARCHAR(250)
 				, index_id TINYINT
 				, partition_number TINYINT
+				, TableName NVARCHAR(250)
 				, is_disabled TINYINT
 				, is_hypothetical TINYINT
-				, TableName NVARCHAR(250)
 				, IndexSizeKB BIGINT
 				, RowCounts BIGINT
 				, Compression NVARCHAR(25)
@@ -761,14 +790,14 @@ END CATCH
 				evaldate NVARCHAR(50)
 				, domain NVARCHAR(505) DEFAULT DEFAULT_DOMAIN()
 				, SQLInstance NVARCHAR(505) NULL --DEFAULT @@SERVERNAME
-				, SectionID int NULL
+				, SectionID [INT] NULL
 				, Section NVARCHAR(4000)
 				, Summary NVARCHAR(4000)
 				, Severity NVARCHAR(5)
 				, Details NVARCHAR(4000)
 				, QueryPlan XML NULL
 				, HoursToResolveWithTesting MONEY  NULL
-				, ID INT IDENTITY(1,1)
+				, ID [INT] IDENTITY(1,1)
 			)
 	IF OBJECT_ID('tempdb..#ConfigurationDefaults') IS NOT NULL
 				DROP TABLE #ConfigurationDefaults;
@@ -796,7 +825,7 @@ END CATCH
 				DROP TABLE #querystats
 	CREATE TABLE #querystats
 				(
-					 Id INT IDENTITY(1,1)
+					 Id [INT] IDENTITY(1,1)
 					,RankIOTime INT
 					, [execution_count] [bigint] NOT NULL
 					, [total_logical_reads] [bigint] NOT NULL
@@ -834,13 +863,13 @@ END CATCH
 				DROP TABLE #dbccloginfo
 	CREATE TABLE #dbccloginfo  
 			(
-				id INT IDENTITY(1,1) 
+				id [INT] IDENTITY(1,1) 
 			)
 	IF OBJECT_ID('tempdb..#SQLVersionsDump') IS NOT NULL
 				DROP TABLE #SQLVersionsDump		
 	CREATE TABLE #SQLVersionsDump 
 			(
-				  ID INT IDENTITY(0,1)
+				  ID [INT] IDENTITY(0,1)
 				, Output NVARCHAR(250)
 			)
 	
@@ -901,14 +930,19 @@ END CATCH
 		IF OBJECT_ID('tempdb..#DatabaseScopedConfigurationDefaults') IS NOT NULL
 			DROP TABLE #DatabaseScopedConfigurationDefaults;
 		CREATE TABLE #DatabaseScopedConfigurationDefaults
-			(ID INT IDENTITY(1,1), configuration_id INT, [name] NVARCHAR(60), default_value sql_variant, default_value_for_secondary sql_variant, CheckID INT, );
+			(ID [INT] IDENTITY(1,1)
+			, configuration_id INT
+			, [name] NVARCHAR(60)
+			, default_value sql_variant
+			, default_value_for_secondary sql_variant
+			, CheckID INT
+			);
 
 		IF OBJECT_ID('tempdb..#DBCCs') IS NOT NULL
 			DROP TABLE #DBCCs;
 		CREATE TABLE #DBCCs
 			(
-			  ID INT IDENTITY(1, 1)
-					 PRIMARY KEY ,
+			  ID [INT] IDENTITY(1, 1) PRIMARY KEY ,
 			  ParentObject VARCHAR(255) ,
 			  Object VARCHAR(255) ,
 			  Field VARCHAR(255) ,
@@ -920,11 +954,11 @@ END CATCH
 			DROP TABLE #LogInfo2012;
 		CREATE TABLE #LogInfo2012
 			(
-			  recoveryunitid INT ,
+			  recoveryunitid [INT] ,
 			  FileID SMALLINT ,
-			  FileSize BIGINT ,
-			  StartOffset BIGINT ,
-			  FSeqNo BIGINT ,
+			  FileSize [BIGINT] ,
+			  StartOffset [BIGINT] ,
+			  FSeqNo [BIGINT] ,
 			  [Status] TINYINT ,
 			  Parity TINYINT ,
 			  CreateLSN NUMERIC(38)
@@ -935,9 +969,9 @@ END CATCH
 		CREATE TABLE #LogInfo
 			(
 			  FileID SMALLINT ,
-			  FileSize BIGINT ,
-			  StartOffset BIGINT ,
-			  FSeqNo BIGINT ,
+			  FileSize [BIGINT] ,
+			  StartOffset [BIGINT] ,
+			  FSeqNo [BIGINT] ,
 			  [Status] TINYINT ,
 			  Parity TINYINT ,
 			  CreateLSN NUMERIC(38)
@@ -1039,15 +1073,25 @@ END CATCH
 			, forwarded_fetch_count BIGINT
 			, lob_fetch_in_bytes BIGINT
 			, lob_orphan_create_count BIGINT
-			, lob_orphan_insert_count BIGINT 
-			, leaf_ghost_count BIGINT 
-			, insert_count BIGINT 
+			, lob_orphan_insert_count [BIGINT] 
+			, leaf_ghost_count [BIGINT] 
+			, insert_count [BIGINT] 
 			, delete_count BIGINT
 			, update_count BIGINT
 			, allocation_count BIGINT
 			, page_merge_count BIGINT
 			)
 		
+
+		IF OBJECT_ID('tempdb..#FKNOIndex') IS NOT NULL
+			DROP TABLE #FKNOIndex;	
+		CREATE TABLE #FKNOIndex
+			(
+			DatabaseName NVARCHAR(2000)
+			, TableName NVARCHAR(2000)
+			, ConstraintName NVARCHAR(2000)
+			)
+
 
 		IF OBJECT_ID('tempdb..#lockinghistory') IS NOT NULL
 			DROP TABLE #lockinghistory;	
@@ -1076,11 +1120,11 @@ END CATCH
 			(
 			  TextData NVARCHAR(4000) ,
 			  DatabaseName NVARCHAR(256) ,
-			  EventClass INT ,
-			  Severity INT ,
+			  EventClass [INT] ,
+			  Severity [INT] ,
 			  StartTime DATETIME ,
 			  EndTime DATETIME ,
-			  Duration BIGINT ,
+			  Duration [BIGINT] ,
 			  NTUserName NVARCHAR(256) ,
 			  NTDomainName NVARCHAR(256) ,
 			  HostName NVARCHAR(256) ,
@@ -1195,7 +1239,7 @@ END CATCH
 	ALTER TABLE #dbccloginfo 
 		Add file_size BIGINT
 	ALTER TABLE #dbccloginfo 
-		Add start_offset BIGINT  
+		Add start_offset [BIGINT]  
 	ALTER TABLE #dbccloginfo 
 		Add fseqno int
 	ALTER TABLE #dbccloginfo 
@@ -1226,11 +1270,14 @@ DECLARE @TurnNumericRoundabortOn BIT
 	
 
 
-
-
 SELECT @errMessage  = 'Checking xp_msver table'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
   	DECLARE @msversion TABLE([Index] INT, Name NVARCHAR(50), [Internal_Value] NVARCHAR(50), [Character_Value] NVARCHAR(250))
 	INSERT @msversion
@@ -1239,7 +1286,12 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 
@@ -1257,6 +1309,12 @@ END CATCH
 
 SELECT @errMessage  = 'Checking power plan'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+	END
+
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
 BEGIN TRY
 	DECLARE @value NVARCHAR(64);
@@ -1306,7 +1364,12 @@ BEGIN TRY
 		IF @value <> '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 		SET @PowerPlan =  '!Not Optimal! Check Power Options' 
 		IF @Debug = 0
+			BEGIN
+				SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+				SET @DebugTime = GETDATE()
+				RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Power Options checked',0,1) WITH NOWAIT;
+		END
 		/*PRINT @PowerPlan*/
 	END
 
@@ -1314,7 +1377,12 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 
@@ -1323,7 +1391,12 @@ END CATCH
 
 SELECT @errMessage  = 'Checking server properties'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
 
 	SET @rebuildonline = 'OFF';				/* Assume this is not Enterprise, we will test in the next line and if it is , woohoo. */
@@ -1438,16 +1511,87 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
+
+DECLARE @HostName NVARCHAR(100), @Address NVARCHAR(100), @Customer NVARCHAR(50)
+DECLARE @MachineKey1 VARBINARY(100)  ,@MachineKey NVARCHAR(100)
+
+DECLARE @HashMe NVARCHAR(250)
+SET @CharToCheck = CHAR(92)
+
+
+SELECT @ThisServer = @@SERVERNAME
+  IF (select CHARINDEX(@CharToCheck,@@SERVERNAME)) = 0
+  /*Not named, use the NetBIOS name instead of @@ServerName*/
+SELECT @ThisServer = CAST( Serverproperty( 'ComputerNamePhysicalNetBIOS' ) AS NVARCHAR(500))
+
+SELECT  @HashMe = ISNULL(@ThisDomain,'') + 'SQLDBA.ORG' + ISNULL(hostname,'') + ISNULL(@ThisServer,'') + ISNULL(net_address ,'')
+, @HostName = REPLACE(hostname,' ','')
+, @Address = net_address
+from master.dbo.sysprocesses
+where 1=1--spid = @@SPID
+AND program_name = 'SQLAgent - Generic Refresher'
+
+SET @MachineKey1 = HASHBYTES('SHA1',@HashMe)
+SET @MachineKey = UPPER(master.dbo.fn_varbintohexsubstring(0,@MachineKey1, 1, 0))
+
+
+
+--select @ThisDomain [Domain], @HostName [HostName],@ThisServer [SQLInstance] ,@Address [Address]
+--, HASHBYTES('SHA1 ',@HashMe) [MachineKey]
+--from master.dbo.sysprocesses
+--where spid = @@SPID
+
+DECLARE @serverdisplayname NVARCHAR(250);
+SET @serverdisplayname = 'SQL Notifications'
+
++ '|'+RIGHT(CONVERT(NVARCHAR(250),@MachineKey,1),7)
++ CONVERT(NVARCHAR(8),@MachineKey,1)
++ 'x'+SUBSTRING(CONVERT(NVARCHAR(100),@MachineKey,1),7,6)
+
+
+BEGIN TRY
+		INSERT #output_man_script (
+		SectionID
+		, Section
+		, Summary
+		)
+		SELECT 
+		0
+		, 'MackKey'
+		, RIGHT(CONVERT(NVARCHAR(250),@MachineKey,1),7)
+		+ CONVERT(NVARCHAR(8),@MachineKey,1)
+		+ 'x'+SUBSTRING(CONVERT(NVARCHAR(100),@MachineKey,1),7,6)
+END TRY
+BEGIN CATCH
+  SELECT @errMessage  = ERROR_MESSAGE()
+  IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
+END CATCH
 /*----------------------------------------
 			--Check for current supported build of SQL server
 -------------------------------------*/
 
 SELECT @errMessage  = 'Checking server build versions'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END
 BEGIN TRY
 	DECLARE @CurrentBuild NVARCHAR(50)
 	SELECT @CurrentBuild = [Character_Value] 
@@ -1526,7 +1670,12 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 
@@ -1535,8 +1684,13 @@ END CATCH
 
 
 
-	IF @Debug = 0
+  IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'CPU NUMA node details',0,1) WITH NOWAIT;
+END
 BEGIN TRY
 	IF @CPUHyperthreadratio <> @CPUcount
 	INSERT #output_man_script (SectionID,Section,Summary, Severity)
@@ -1571,7 +1725,12 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 
@@ -1579,7 +1738,12 @@ END CATCH
 
 SELECT @errMessage  = 'Checking tempDB file count'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
 
 	BEGIN
@@ -1632,13 +1796,23 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 
 SELECT @errMessage  = 'Checking errorlog'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+END
 BEGIN TRY
 	DECLARE @xp_errorlog TABLE(LogDate DATETIME,  ProcessInfo NVARCHAR(250), Text NVARCHAR(4000))
 
@@ -1691,7 +1865,12 @@ END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 			/*----------------------------------------
@@ -1700,7 +1879,12 @@ END CATCH
 
 SELECT @errMessage  = 'Checking service account details'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
 		DECLARE @SQLsn NVARCHAR(128);
 /*
@@ -1803,15 +1987,25 @@ BEGIN TRY
 
 	END TRY
 	BEGIN CATCH
-		IF @Debug = 0
+  IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Trouble with SQL Services',0,1) WITH NOWAIT;
+		END
 	END CATCH
 
 END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 	
 			/*----------------------------------------
@@ -1819,7 +2013,12 @@ END CATCH
 			----------------------------------------*/
 SELECT @errMessage  = 'Checking for high worker thread usage'
   IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
 
 	DECLARE @workerthreadspercentage FLOAT;
@@ -1861,14 +2060,24 @@ BEGIN TRY
 		ELSE @Result_Good 
 		END
 		FROM sys.dm_os_sys_info
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Looked at worker thread usage',0,1) WITH NOWAIT;
+	END
 
 END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
-  IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH	
 			 /*----------------------------------------
 			--Performance counters
@@ -1978,15 +2187,25 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
     SELECT @errMessage  = ERROR_MESSAGE()
-    IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
        
 END CATCH
 
 
 SELECT @errMessage  = 'Working those perfom counters'
-  IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
 
 BEGIN
@@ -1996,12 +2215,12 @@ BEGIN
 	WHERE [is_captured_ind] = 1 FOR XML PATH('')), 1, 2, '')+'''' 
 
 	DECLARE @syscountertable TABLE (
-	id INT IDENTITY(1,1)
+	id [INT] IDENTITY(1,1)
 	, [output] VARCHAR(500)
 	)
 	
 	DECLARE @syscountervaluestable TABLE (
-	id INT IDENTITY(1,1)
+	id [INT] IDENTITY(1,1)
 	, [value] VARCHAR(500)
 	)
 	
@@ -2035,8 +2254,13 @@ BEGIN
 		DECLARE @spnCheckCmd NVARCHAR(4000)
 		SET @spnCheckCmd = 'setspn -L ' + @DBEngineLogin
 		PRINT @spnCheckCmd
-		IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Checking SPNs',0,1) WITH NOWAIT; 
+		END
 		INSERT #spnCheck 
 		EXEC xp_cmdshell @spnCheckCmd
 		
@@ -2087,8 +2311,13 @@ BEGIN
 
 	END TRY
 	BEGIN CATCH
-		IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'xp_cmdshell DISABLED',0,1) WITH NOWAIT; 
+		END
 	END CATCH
 
 	DECLARE @sqlnamedinstance sysname
@@ -2130,15 +2359,25 @@ END
 END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
-  IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
 /*Generate DTU calculations*/
 
 SELECT @errMessage  = 'Checking Azure calculations'
-  IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
 
 
@@ -2237,20 +2476,35 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
-  IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Finished rough IOPS calculation',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
 			--Check for any pages marked suspect for corruption
 			----------------------------------------*/
 SELECT @errMessage  = 'Checking for suspiciouns pages'
-  IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 BEGIN TRY
 
 	DECLARE @syspectpagescount FLOAT
@@ -2269,14 +2523,24 @@ BEGIN TRY
 	FROM msdb.dbo.suspect_pages
 	OPTION (RECOMPILE)
 
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Included Suspect Pages, if any',0,1) WITH NOWAIT;
+	END
 
 END TRY
 BEGIN CATCH
   SELECT @errMessage  = ERROR_MESSAGE()
-  IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	END
 END CATCH
 			/*----------------------------------------
 			--Before anything else, look for things that might point to breaking behaviour. Look for out of support SQL bits floating around
@@ -2340,8 +2604,13 @@ END CATCH
 		ORDER BY Section, [Summary];
 
 	END
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done checking for possible breaking SQL 2000 things',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Before anything else, look for things that might point to breaking behaviour. Like database with bad default settings
@@ -2386,14 +2655,19 @@ END CATCH
 
 	END
 
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done checking compatability levels and sets for database things',0,1) WITH NOWAIT;
+	END
 			/*----------------------------------------
 			--Benchmark, not for anything else besides getting a number
 			----------------------------------------*/
 
 	SET @StartTest = GETDATE();
-	DECLARE @testloop INT 
+	DECLARE @testloop [INT] 
 	SET @testloop = 0
 	WHILE @secondsperoperator IS NULL AND @testloop < 10
 	BEGIN
@@ -2435,8 +2709,13 @@ END CATCH
 		SET @secondsperoperator = 0.00413907
 
 	--PRINT N'Your cost (in seconds) per operator roughly equates to around '+ CONVERT(VARCHAR(20),ISNULL(@secondsperoperator,0)) + ' seconds' ;
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Benchmarking done',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Build database table to use throughout this script
@@ -2444,7 +2723,7 @@ END CATCH
 
 DECLARE @Databases TABLE
 	(
-		id INT IDENTITY(1,1)
+		id [INT] IDENTITY(1,1)
 		, database_id INT
 		, databasename NVARCHAR(250)
 		, [compatibility_level] BIGINT
@@ -2552,8 +2831,13 @@ DECLARE @Databases TABLE
 	END
 	END TRY
 	BEGIN CATCH
-		IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Trouble with Availability Group database list',0,1) WITH NOWAIT;
+		END
 	END CATCH
 	SET @dynamicSQL = @dynamicSQL + ' OPTION (RECOMPILE);'
 	INSERT INTO @Databases 
@@ -2592,8 +2876,13 @@ DECLARE @Databases TABLE
 	, CASE WHEN @CachevsUpdate > 50 AND @DaysUptime > 1 THEN 0.5 ELSE 2 END 
 
 
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Server uptime and cache age established',0,1) WITH NOWAIT;
+	END
 
 
 
@@ -2612,7 +2901,7 @@ DECLARE @Databases TABLE
 	
 	IF @SQLVersion > 10
 	BEGIN
-		EXEC sp_executesql N'set @_MaxRamServer= (select physical_memory_kb/1024 from sys.dm_os_sys_info);', N'@_MaxRamServer INT OUTPUT', @_MaxRamServer = @MaxRamServer OUTPUT
+		EXEC sp_executesql N'set @_MaxRamServer= (select physical_memory_kb/1024 from sys.dm_os_sys_info);', N'@_MaxRamServer [INT] OUTPUT', @_MaxRamServer = @MaxRamServer OUTPUT
 		
 		EXEC sp_executesql N'SELECT @_UsedMemory = CONVERT(MONEY,physical_memory_in_use_kb)/1024 /1000 FROM sys.dm_os_process_memory WITH (NOLOCK) OPTION (RECOMPILE)', N'@_UsedMemory MONEY  OUTPUT', @_UsedMemory = @UsedMemory OUTPUT
 		EXEC sp_executesql N'SELECT @_totalMemoryGB = CONVERT(MONEY,total_physical_memory_kb)/1024/1000 FROM sys.dm_os_sys_memory WITH (NOLOCK) OPTION (RECOMPILE)', N'@_totalMemoryGB MONEY  OUTPUT', @_totalMemoryGB = @totalMemoryGB OUTPUT
@@ -2627,7 +2916,7 @@ DECLARE @Databases TABLE
 	IF @SQLVersion in (10,9)
 	BEGIN
 
-		EXEC sp_executesql N'set @_MaxRamServer= (select physical_memory_in_bytes/1024/1000 from sys.dm_os_sys_info) ;', N'@_MaxRamServer INT OUTPUT', @_MaxRamServer = @MaxRamServer OUTPUT
+		EXEC sp_executesql N'set @_MaxRamServer= (select physical_memory_in_bytes/1024/1000 from sys.dm_os_sys_info) ;', N'@_MaxRamServer [INT] OUTPUT', @_MaxRamServer = @MaxRamServer OUTPUT
 		
 		EXEC sp_executesql N'SELECT @_UsedMemory = CONVERT(MONEY,physical_memory_in_bytes)/1024/1024/1000 FROM sys.dm_os_sys_info WITH (NOLOCK) OPTION (RECOMPILE)', N'@_UsedMemory MONEY  OUTPUT', @_UsedMemory = @UsedMemory OUTPUT
 		EXEC sp_executesql N'SELECT @_totalMemoryGB = CONVERT(MONEY,physical_memory_in_bytes)/1024/1024/1000 FROM sys.dm_os_sys_info WITH (NOLOCK) OPTION (RECOMPILE)', N'@_totalMemoryGB MONEY  OUTPUT', @_totalMemoryGB = @totalMemoryGB OUTPUT
@@ -2719,8 +3008,13 @@ SELECT
 	HAVING AVG(T1.SQLProcessUtilization) >= (CASE WHEN @ShowWarnings = 1 THEN 20 ELSE 0 END)
 	OPTION (RECOMPILE)
 
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked CPU usage for the last 5 hours',0,1) WITH NOWAIT;
+	END
 	
 
 
@@ -2728,15 +3022,21 @@ SELECT
 			/*----------------------------------------
 			--Error Log issues on the server
 			----------------------------------------*/
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Reading Error Log..',0,1) WITH NOWAIT;
-	DECLARE @LoginLog TABLE( LogDate DATETIME, ProcessInfo NVARCHAR(200), [Text] NVARCHAR(MAX))
+	END
+	DECLARE @LoginLog TABLE( LogDate DATETIME, ProcessInfo NVARCHAR(2000), [Text] NVARCHAR(MAX))
 	IF  @ShowWarnings = 0 
 	BEGIN
 
 		DECLARE @ErrorLogFiles TABLE
 		(
-			 [Archive #]	INT
+			 [Id] INT IDENTITY(1,1)
+			, [Archive #]	INT
 			,[Date]	NVARCHAR(259)
 			,[Log File Size (Byte)]	INT
 		)
@@ -2752,7 +3052,7 @@ SELECT
 		 DECLARE  @SQLLogData TABLE
 		(
 			 LogDate  DATETIME
-			,ProcessInfo NVARCHAR(12)
+			,ProcessInfo NVARCHAR(1200)
 			,LogText NVARCHAR(3999)
 		)
 
@@ -2761,18 +3061,21 @@ SELECT
 		DECLARE @logCount INT;
 		SELECT @logCount = COUNT(*) FROM @ErrorLogFiles;
 		DECLARE @sql NVARCHAR(MAX);
-		DECLARE @i INT 
+		DECLARE @i [INT] 
 		SET @i = 0;
 		DECLARE @tableName NVARCHAR(128);
 		DECLARE @datecheck DATETIME
 		DECLARE curReadSQLErrorLogs CURSOR FAST_FORWARD READ_ONLY FOR 
-			   SELECT [Archive #] FROM @ErrorLogFiles
+			   SELECT [Archive #] 
+			   FROM @ErrorLogFiles
+			   WHERE (Date > DATEADD(WEEK, -2,GETDATE()))
+			   OR Id < 4
 		OPEN curReadSQLErrorLogs
 		FETCH NEXT FROM curReadSQLErrorLogs INTO @i
 		WHILE @@FETCH_STATUS = 0
 		BEGIN
-			SELECT @datecheck = Date FROM @ErrorLogFiles WHERE [Archive #] = @i
-			IF @datecheck > DATEADD(MONTH,-1,GETDATE())
+			--SELECT @datecheck = Date FROM @ErrorLogFiles WHERE [Archive #] = @i
+			/*IF @datecheck > DATEADD(MONTH,-1,GETDATE())*/
 			/*Only use log files that were created in the last 3 months*/
 			BEGIN
 			   SELECT @sql = 'EXEC sp_readerrorlog ' + CAST(@i AS NVARCHAR(8)) + ',1, ''RESOLVING'';'
@@ -2811,13 +3114,19 @@ SELECT
 			,@Result_Warning , 0.25
 
 			FROM @SQLLogData
+			WHERE LogDate > DATEADD(MONTH,-1,GETDATE())
 			--FROM @LoginLog 
 			ORDER BY LogDate DESC
 			OPTION (RECOMPILE)
 		END
 	END
-	IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Server logins have been checked from the log',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Agent log for errors
@@ -2830,11 +3139,14 @@ SELECT
 		IF DATEADD(MINUTE,5,@lastservericerestart) <  (SELECT MIN(Login_time) FROM master.dbo.sysprocesses WHERE LEFT(program_name, 8) = 'SQLAgent')
 		BEGIN
 
-			IF @Debug = 0
+IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Agent started much later than Service. Might point to Agent never being restarted before. If you see the following error, just restart the agent and run this script again >>',0,1) WITH NOWAIT;
-			IF @Debug = 0
-		RAISERROR (N'Msg 0, Level 11, State 0, Line 2032
-			A severe error occurred on the current command.  The results, if any, should be discarded.',0,1) WITH NOWAIT;
+		RAISERROR (N'Msg 0, Level 11, State 0, Line 2032 A severe error occurred on the current command.  The results, if any, should be discarded.',0,1) WITH NOWAIT;
+		END
 		END
 
 		IF EXISTS (SELECT 1,* FROM master.dbo.sysprocesses WHERE LEFT(program_name, 8) = 'SQLAgent')
@@ -2862,10 +3174,20 @@ SELECT
 	END TRY
 	BEGIN CATCH
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Error reading agent log',0,1) WITH NOWAIT;
+	END
 	END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Agent log parsed for errors',0,1) WITH NOWAIT;
+		END
 
 			/*----------------------------------------
 			--Look for failed agent jobs
@@ -2944,12 +3266,17 @@ SELECT
 		   AND Job.step_id = SysJobSteps.step_id)
 	OPTION (RECOMPILE);
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked for failed agent jobs',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Look for failed backups
 			----------------------------------------*/
-DECLARE @backupset TABLE( id BIGINT IDENTITY(1,1)
+DECLARE @backupset TABLE( id [BIGINT] IDENTITY(1,1)
 ,[database_name] NVARCHAR(800)
 ,[recovery_model] NVARCHAR(50)
 ,[backup_start_date] DATETIME,[backup_finish_date] DATETIME,[type] NVARCHAR(20)
@@ -3011,7 +3338,12 @@ FROM  msdb.[dbo].[backupset]
 	OR backup_finish_date IS NULL)
 	OPTION (RECOMPILE); 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked for failed backups',0,1) WITH NOWAIT;
+	END
 
 
 
@@ -3024,7 +3356,7 @@ IF OBJECT_ID('tempdb..#db_size') IS NOT NULL DROP TABLE #db_size
 
 DECLARE @DatabasesForLOG TABLE
 	(
-		id INT 
+		id [INT] 
 		, database_id INT
 		, databasename NVARCHAR(250)
 		, [compatibility_level] BIGINT
@@ -3049,7 +3381,7 @@ SELECT * FROM @Databases
 --variables to hold each 'iteration'  
 DECLARE @query NVARCHAR(1000)  
 DECLARE @dbname sysname  
-DECLARE @vlfs int  
+DECLARE @vlfs [INT]  
  
   
 --table variable to hold results  
@@ -3216,7 +3548,12 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done with Log and VLF Checks',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
@@ -3288,7 +3625,12 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	ORDER BY [Last Full] ASC
 	OPTION (RECOMPILE);
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Recovery Model information matched with backups',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Check for disk space and latency on the server
@@ -3393,7 +3735,12 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	ORDER BY [f].[database_id], [f].[file_id],LEFT ([f].[physical_name], 2)
 	
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked for disk latency and space',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Check for disk space on the server
@@ -3514,7 +3861,12 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	ORDER BY TotalSize DESC, DatabaseName ASC, FileSize DESC
 	OPTION (RECOMPILE)
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked free space',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
@@ -3546,7 +3898,12 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	OPTION (RECOMPILE)
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Got cached plan statistics',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Get the top 10 query plan bloaters for single use queries
@@ -3569,13 +3926,23 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	ORDER BY cp.size_in_bytes DESC OPTION (RECOMPILE);
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Got cached plan statistics - Biggest single use plans',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Find cpu load, io and memory per DB
 			----------------------------------------*/
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Reading buffer pages takes longer on higher memory servers',0,1) WITH NOWAIT;
+	END
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 14, 'Database: CPU IO Memory DISK DiskIO Latency','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary ,Details )
 	SELECT 14,'Breakdown', 'DBName; CPU; IO; Buffer; DiskUsage(GB); Disk IO daily (GB); Latency (ms)', 'CPU time(s); Total IO; Buffer Pages; Buffer MB'
@@ -3647,7 +4014,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	OPTION (RECOMPILE) ;
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked CPU, IO  and memory usage',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Get to wait types, the TOP 10 would be good for now
@@ -3683,10 +4055,20 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	OPTION (RECOMPILE)
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Filtered wait stats have been prepared',0,1) WITH NOWAIT;
+	END
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Looking at query stats.. this might take a wee while',0,1) WITH NOWAIT;
+	END
 			/*----------------------------------------
 			--Look at Plan Cache and DMV to find missing index impacts
 			----------------------------------------*/
@@ -3844,7 +4226,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	END TRY
 	BEGIN CATCH
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR	  (N'ERROR Section 16 looking for missing indexes in Query plan',0,1) WITH NOWAIT;
+		END
 	END CATCH
 
 
@@ -3911,20 +4298,35 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	END TRY
 	BEGIN CATCH
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR	  (N'ERROR Section 17 Find most intensive query',0,1) WITH NOWAIT;
+		END
 	END CATCH
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR	  (N'Evaluated execution plans for missing indexes',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
 			--Get missing index information for each database
 			----------------------------------------*/
 
-				SET @CustomErrorText = '['+@DatabaseName+'] Looking for missing indexes in DMVs'
+		SET @CustomErrorText = '['+@DatabaseName+'] Looking for missing indexes in DMVs'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 			SET @dynamicSQL = '
 			USE [master]
@@ -3991,7 +4393,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		OPTION (RECOMPILE)
 		SET @ErrorMessage = 'Looping Database ' + CONVERT(VARCHAR(4),@Databasei_Count) +' of ' + CONVERT(VARCHAR(4),@Databasei_Max ) + ': [' + @DatabaseName + '] ';
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (@ErrorMessage,0,1) WITH NOWAIT;
+		END
 
 		--IF (ISNULL(@SecondaryReadRole,'YES') <> 'NO' AND ISNULL(@AGBackupPref,'') <> 'primary') AND EXISTS( SELECT @DatabaseName)
 		BEGIN  
@@ -4008,7 +4415,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			/*---------------------------------------Shows Indexes that have never been used---------------------------------------*/
 				SET @CustomErrorText = '['+@DatabaseName+'] Looking at unused indexes'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 			SET ANSI_WARNINGS OFF
 			
 			SET @dynamicSQL = '
@@ -4052,7 +4464,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 
 				SET @CustomErrorText = '['+@DatabaseName+'] Looking for heap tables'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 			SET @dynamicSQL = '
 			USE ['+@DatabaseName +']
@@ -4091,7 +4508,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			
 			SET @CustomErrorText = '['+@DatabaseName+'] Looking for stale statistics'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 			USE ['+@DatabaseName+'];
 			SELECT 
@@ -4175,7 +4597,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			
 			SET @CustomErrorText = '['+@DatabaseName+'] Skipping bad NC Indexes tables'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 		   SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 			USE ['+@DatabaseName+'];
@@ -4214,7 +4641,12 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			/* Constraints behaving badly*/
 			SET @CustomErrorText = '['+@DatabaseName+'] Looking for bad constraints'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 				USE ['+@DatabaseName+'];
@@ -4276,11 +4708,22 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 
 			SET @CustomErrorText = '['+@DatabaseName+'] Looking for indexes with possible compression benefit'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 			SET @dynamicSQL = '
 			USE ['+@DatabaseName+']
-			SELECT TOP 50 '''+@DatabaseName+'''
-			, ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''['+@DatabaseName+']'' + ''.'' + ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' REBUILD WITH (DATA_COMPRESSION=PAGE);'' [Just compress]
+			SELECT TOP 10 '''+@DatabaseName+'''
+			, CASE WHEN i.index_id >0 
+			THEN
+			''ALTER INDEX ''+ ''['' + i.[name] + '']''  + '' ON '' 
+			ELSE
+			''ALTER TABLE '' 
+			END  + ''['+@DatabaseName+']'' + ''.'' + ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' REBUILD WITH (DATA_COMPRESSION=PAGE);''
+			[Just compress]
 			, CASE WHEN ps.lob_used_page_count > 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''['+@DatabaseName+']'' + ''.'' +  ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
 			ELSE '''' END [For LOB data]
 			, ps.[reserved_page_count]
@@ -4325,10 +4768,15 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 
 		SET @CustomErrorText = '['+@DatabaseName+'] Intelligent compression evaluation'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
-			SET @dynamicSQL='USE ['+@DatabaseName+']
-			SELECT '''+@DatabaseName+'''
+			SET @dynamicSQL=' 
+			SELECT TOP 10'''+@DatabaseName+'''
 			, i.[name] AS IndexName
 			,i.index_id,p.partition_number
 			,t.[name] AS TableName
@@ -4339,24 +4787,32 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			,p.data_compression_desc Compression
 			
 			, CASE WHEN i.index_id in (0, 1) then ''Table'' else ''Index'' end CompressionObject
-			, ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''[?]'' + ''.'' + ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' REBUILD WITH (DATA_COMPRESSION=ROW);'' [Just compress]
-			, CASE WHEN SUM(s.lob_used_page_count )> 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''[?]'' + ''.'' +  ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
+			, CASE WHEN i.index_id >0 
+			THEN
+			''ALTER INDEX ''+ ''['' + i.[name] + '']''  + '' ON '' 
+			ELSE
+			''ALTER TABLE '' 
+			END  + ''['+@DatabaseName+']'' + ''.'' + ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' REBUILD WITH (DATA_COMPRESSION=PAGE);''
+			[Just compress]
+			, CASE WHEN SUM(s.lob_used_page_count )> 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''['+@DatabaseName+']'' + ''.'' +  ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
 						ELSE '''' END [For LOB data]
-			FROM sys.dm_db_partition_stats AS s
-			INNER JOIN sys.indexes AS i 
+			FROM ['+@DatabaseName+'].sys.dm_db_partition_stats AS s
+			INNER JOIN ['+@DatabaseName+'].sys.indexes AS i 
 				ON s.[object_id] = i.[object_id] AND s.[index_id] = i.[index_id]
-			INNER JOIN sys.tables t 
+			INNER JOIN ['+@DatabaseName+'].sys.tables t 
 				ON t.OBJECT_ID = i.object_id
-			INNER JOIN sys.partitions p 
+			INNER JOIN ['+@DatabaseName+'].sys.partitions p 
 				ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
-			INNER JOIN sys.objects AS o WITH (NOLOCK)	ON o.[object_id] = i.[object_id]
-			INNER JOIN sys.schemas sc WITH (NOLOCK)	ON o.[schema_id] = sc.[schema_id]
+			INNER JOIN ['+@DatabaseName+'].sys.objects AS o WITH (NOLOCK)	ON o.[object_id] = i.[object_id]
+			INNER JOIN ['+@DatabaseName+'].sys.schemas sc WITH (NOLOCK)	ON o.[schema_id] = sc.[schema_id]
+			WHERE p.data_compression_desc NOT IN (''ROW'',''PAGE'')
 			GROUP BY i.[name],sc.[name], t.[name],o.[name] ,i.index_id,i.is_disabled
-			, i.is_hypotheticalp.data_compression_desc,p.partition_number
+			, i.is_hypothetical, p.data_compression_desc,p.partition_number
 			HAVING SUM(s.[used_page_count]) * 8 > 512
-			ORDER BY  t.[name],i.[name]
+			ORDER BY  SUM(s.[used_page_count]) DESC, t.[name],i.[name]
 			' 
 			BEGIN TRY
+			--PRINT @dynamicSQL
 			INSERT #compressionstates 
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
@@ -4368,10 +4824,15 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	
 			SET @CustomErrorText = '['+@DatabaseName+'] Index usage checks'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 			SELECT @dynamicSQL = ' USE ['+@DatabaseName+']
-			SELECT '''+@DatabaseName+'''
+			SELECT TOP 10 '''+@DatabaseName+'''
 			, OBJECT_NAME(s.[object_id]) AS [ObjectName], i.name AS [IndexName], i.index_id,
 			user_seeks + user_scans + user_lookups AS [Reads], s.user_updates AS [Writes],  
 			i.type_desc AS [IndexType], i.fill_factor AS [FillFactor], i.has_filter, i.filter_definition, 
@@ -4396,10 +4857,15 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 
 			SET @CustomErrorText = '['+@DatabaseName+'] Blocking tables'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 			SELECT @dynamicSQL = ' USE ['+@DatabaseName+']
-			SELECT '''+@DatabaseName+''' DatabaseName
+			SELECT TOP 5 '''+@DatabaseName+''' DatabaseName
 			, object_name(object_id) as ObjectName
 			, row_lock_count + page_lock_count as LocksCount
 			, row_lock_wait_count + page_lock_wait_count as BlocksCount
@@ -4408,7 +4874,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			, page_io_latch_wait_count + tree_page_io_latch_wait_count [page_io_latch_wait_count]
 			, page_io_latch_wait_in_ms + tree_page_io_latch_wait_in_ms [page_io_latch_wait_in_ms]
 			, page_compression_success_count
-			, page_io_latch_wait_in_ms
+			/*, page_io_latch_wait_in_ms*/
 			, range_scan_count
 			, singleton_lookup_count
 			, forwarded_fetch_count
@@ -4425,8 +4891,11 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			where db_name(database_id) = DB_NAME()
 			AND row_lock_count + page_lock_count > 0
 			AND object_name(object_id) NOT LIKE ''sys%''
+			ORDER BY row_lock_count + page_lock_count DESC
 			' 
 			BEGIN TRY
+			--PRINT 'blocking'
+			--PRINT @dynamicSQL
 			INSERT #blockinghistory 
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
@@ -4434,6 +4903,55 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 			END CATCH
+
+
+
+		SET @CustomErrorText = '['+@DatabaseName+'] FKs without Indexes'
+		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
+
+			SELECT @dynamicSQL = ' USE ['+@DatabaseName+']
+
+			SELECT '''+@DatabaseName+''' DatabaseName
+			, QUOTENAME(fk.parent_table_name) TableName
+			, QUOTENAME(fk.parent_schema_name)+ ''.'' + QUOTENAME(fk.parent_table_name) + ''.'' + QUOTENAME(fk.constraint_name) AS ConstraintName 
+			FROM (  
+			SELECT t.name AS [parent_schema_name], OBJECT_NAME(FKC.parent_object_id) [parent_table_name], OBJECT_NAME(constraint_object_id) AS [constraint_name]
+			, SUBSTRING(( SELECT '','' + RTRIM(COL_NAME(k.parent_object_id,parent_column_id)) AS [data()] 
+			FROM sys.foreign_key_columns k (NOLOCK) 
+			INNER JOIN sys.foreign_keys (NOLOCK) ON k.constraint_object_id = [object_id] AND k.constraint_object_id = FKC.constraint_object_id 
+			ORDER BY constraint_column_id FOR XML PATH('''')), 2, 8000) AS [parent_columns] 
+			FROM sys.foreign_key_columns FKC (NOLOCK) 
+			INNER JOIN sys.objects o (NOLOCK) ON FKC.parent_object_id = o.[object_id] INNER JOIN sys.tables mst (NOLOCK) ON mst.[object_id] = o.[object_id] 
+			INNER JOIN sys.schemas t (NOLOCK) ON t.[schema_id] = mst.[schema_id] INNER JOIN sys.objects so (NOLOCK) ON FKC.referenced_object_id = so.[object_id] 
+			WHERE o.type = ''U'' AND so.type = ''U'' AND o.is_ms_shipped = 0 GROUP BY o.[schema_id],so.[schema_id],FKC.parent_object_id,constraint_object_id,referenced_object_id,t.name ) fk 
+			WHERE NOT EXISTS ( SELECT 1 FROM (  SELECT t.name AS schemaName, OBJECT_NAME(mst.[object_id]) AS objectName
+			, SUBSTRING((  SELECT '','' + RTRIM(ac.name) FROM sys.tables AS st INNER JOIN sys.indexes AS mi ON st.[object_id] = mi.[object_id] 
+			INNER JOIN sys.index_columns AS ic ON mi.[object_id] = ic.[object_id] AND mi.[index_id] = ic.[index_id] 
+			INNER JOIN sys.all_columns AS ac ON st.[object_id] = ac.[object_id] AND ic.[column_id] = ac.[column_id] 
+			WHERE i.[object_id] = mi.[object_id] AND i.index_id = mi.index_id AND ic.is_included_column = 0 ORDER BY ac.column_id FOR XML PATH('''')), 2, 8000) AS KeyCols FROM sys.indexes AS i 
+			INNER JOIN sys.tables AS mst ON mst.[object_id] = i.[object_id] INNER JOIN sys.schemas AS t ON t.[schema_id] = mst.[schema_id] WHERE i.[type] IN (1,2,5,6) AND i.is_unique_constraint = 0 AND mst.is_ms_shipped = 0 ) ict 
+			WHERE fk.parent_schema_name = ict.schemaName AND fk.parent_table_name = ict.objectName AND REPLACE(fk.parent_columns,'' ,'','','') = ict.KeyCols);
+			' 
+			BEGIN TRY
+			--PRINT 'blocking'
+			--PRINT @dynamicSQL
+			INSERT #FKNOIndex 
+			EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+				RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			END CATCH
+
+
+			
+
 
 /*
 LOOPING of databases ends here, add new sections above this portion
@@ -4445,14 +4963,24 @@ LOOPING of databases ends here, add new sections above this portion
 		SET @Databasei_Count = @Databasei_Count + 1; 
 	END
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Evaluated all databases',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Output results from all databases into results table
 			----------------------------------------*/
 			SET @CustomErrorText = '['+@DatabaseName+'] Looking for Stored Procudure Workload'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 			BEGIN TRY
 				INSERT #db_sps
@@ -4491,6 +5019,11 @@ BEGIN TRY
 	BEGIN
 				SET @CustomErrorText = 'MISSING INDEXES - !Benefit > 1mm!'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+	END
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 
 				BEGIN TRY
@@ -4536,7 +5069,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Completed missing index details',0,1) WITH NOWAIT;
+		END
 
 
 BEGIN TRY
@@ -4544,7 +5082,12 @@ BEGIN TRY
 	BEGIN
 					SET @CustomErrorText = 'HEAP TABLES - Bad news'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 				BEGIN TRY
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 19, 'HEAP TABLES - Bad news','------','------'
@@ -4587,7 +5130,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Found heap tables',0,1) WITH NOWAIT;
+	END
 
 
 BEGIN TRY
@@ -4595,7 +5143,12 @@ BEGIN TRY
 	BEGIN
 		SET @CustomErrorText = 'STALE INDEXES - Consider removing them at some stage'
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
+			END
 
 				BEGIN TRY
 		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 20, 'STALE INDEXES - Consider removing them at some stage','------','------'
@@ -4668,7 +5221,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Listed state stats',0,1) WITH NOWAIT;
+	END
 
 		 /*----------------------------------------
 			--Most used database stored procedures
@@ -4697,7 +5255,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Database stored procedure details',0,1) WITH NOWAIT;
+	END
 			/*----------------------------------------
 			--General server settings and items of note
 			----------------------------------------*/
@@ -4731,7 +5294,12 @@ BEGIN CATCH
 END CATCH
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Listed general instance stats',0,1) WITH NOWAIT;
+	END
 
 
 	/* The default settings have been copied from sp_Blitz from http://FirstResponderKit.org
@@ -4860,8 +5428,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Listed non-default settings',0,1) WITH NOWAIT;
-
+	END
 			/*----------------------------------------
 			--Current active logins on this instance
 			----------------------------------------*/
@@ -4880,7 +5452,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Connections listed',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Insert trust issues into output table
@@ -4906,7 +5483,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH	
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Included Constraint trust issues',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
@@ -4957,7 +5539,12 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Database Connections counted',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
@@ -5084,9 +5671,15 @@ BEGIN
 	ORDER BY base.name
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Database usage likelyhood measured',0,1) WITH NOWAIT;
-			SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
-	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+		RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+	END
+			
 END
 END TRY
 BEGIN CATCH
@@ -5108,7 +5701,12 @@ IF @ShowMigrationRelatedOutputs = 1
 			WHERE database_id > 4
 
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Create DMA commands',0,1) WITH NOWAIT;
+	END
 	END
 END TRY
 BEGIN CATCH
@@ -5320,7 +5918,12 @@ BEGIN CATCH
 END CATCH
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done with Trace data',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
@@ -5352,7 +5955,13 @@ BEGIN CATCH
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
-
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done reading compression options',0,1) WITH NOWAIT;
+	END
 			/*----------------------------------------
 			--Compression evaluation
 			----------------------------------------*/
@@ -5371,7 +5980,7 @@ INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 35, 'Actu
 		+',[CompressionObject]:'+ CompressionObject
 		+',[IndexSizeKB]:' + CONVERT(VARCHAR(10),IndexSizeKB)
 		+',[RowCount]:' + CONVERT(VARCHAR(10),RowCounts)
-		, [Just compress] + ';' + [For LOB data]
+		, [Just compress] /*+ ';' + [For LOB data]*/
 		FROM  #compressionstates  S
 END TRY
 BEGIN CATCH
@@ -5379,6 +5988,13 @@ BEGIN CATCH
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done with compression evaluation',0,1) WITH NOWAIT;
+	END
 			/*----------------------------------------
 			-- TOP n Index usage patterns
 			----------------------------------------*/
@@ -5417,7 +6033,13 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 
-
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done with index usage patterns',0,1) WITH NOWAIT;
+	END
 
 
 			/*----------------------------------------
@@ -5453,7 +6075,13 @@ BEGIN CATCH
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
-
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done with index evaluation',0,1) WITH NOWAIT;
+	END
 			/*----------------------------------------
 			--Blocking tables
 			----------------------------------------*/
@@ -5497,6 +6125,40 @@ BEGIN CATCH
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done looking at blocking queries',0,1) WITH NOWAIT;
+	END
+
+			/*----------------------------------------
+			--Foreign Keys with no indexes
+			----------------------------------------*/
+BEGIN TRY
+
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 103, 'FKs with no indexes','------','------'
+		INSERT #output_man_script (SectionID, Section,Summary,Details)
+		SELECT 103
+		, 'DatabaseName:'+DatabaseName
+		, TableName
+		, ConstraintName
+		FROM  #FKNOIndex  b
+		
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with FKs with no indexes',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done looking at FKs with no indexes',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Usage top xx queries
@@ -5598,7 +6260,13 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 
-
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Usage top xx queries completed',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Disk Cluster Sizes
@@ -5647,7 +6315,13 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 
-
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done with disk cluster sizes',0,1) WITH NOWAIT;
+	END
 
 			/*----------------------------------------
 			--Maintenance Summary
@@ -5704,6 +6378,137 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done reading  CommandLog table for Ola output0',0,1) WITH NOWAIT;
+	END
+
+
+
+			/*----------------------------------------
+			--Check those passwords
+			----------------------------------------*/
+			/* Thanks Eitan, MadeiraData/MadeiraToolbox	https://github.com/EitanBlumin*/
+
+			/*Just to make sure someone is not leaving the key in the front door*/
+DECLARE @OutputPasswords BIT
+SET @OutputPasswords = 0
+BEGIN TRY
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 101, 'Leaving the door open','------','------'
+
+IF EXISTS (SELECT 1 FROM master.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'CommandLog')
+BEGIN
+
+INSERT #output_man_script (SectionID, Section,Summary,Details,Severity)
+
+  SELECT 101
+  , Deviation [Section]
+  , LoginName [Summary]
+  , LoginName + ' has ' +ServerRoles + ' permissions' Details
+  , @Result_YourServerIsDead
+
+  FROM(
+		SELECT 
+		Deviation = dev.Deviation + CASE WHEN @OutputPasswords = 1 THEN N' (' + Pwd + N')' ELSE N'' END
+		, dev.[sid]
+		, dev.principal_id
+		, [LoginName]
+		, ServerRoles =
+		STUFF((
+			SELECT N', ' + roles.name
+			FROM sys.server_role_members AS srm
+			INNER JOIN sys.server_principals AS roles ON srm.role_principal_id = roles.principal_id
+			WHERE srm.member_principal_id = dev.principal_id
+			FOR XML PATH('')
+			), 1, 2, N'')
+		FROM
+		(
+		SELECT 'Empty Password' AS Deviation, s.sid, s.principal_id, RTRIM(name) AS [LoginName], '' AS Pwd
+		FROM sys.sql_logins AS s
+		WHERE is_disabled = 0
+		AND ([password_hash] IS NULL OR PWDCOMPARE('', [password_hash]) = 1)
+		AND name NOT IN ('MSCRMSqlClrLogin')
+		AND name NOT LIKE '##MS[_]%##'
+
+		UNION ALL
+
+		SELECT DISTINCT 'Login name is the same as password' AS Deviation, s.sid, s.principal_id, RTRIM(s.name) AS [Name] , u.usrname
+		FROM sys.sql_logins s
+		CROSS APPLY
+		( 
+		SELECT
+		RTRIM(RTRIM(s.name)) usrname
+		UNION ALL
+		SELECT
+		REVERSE(RTRIM(RTRIM(s.name))) 
+		) AS u(usrname)
+		WHERE s.is_disabled = 0
+		AND PWDCOMPARE(u.usrname, s.[password_hash]) = 1
+		) dev
+	) T1
+
+	OPTION (RECOMPILE); -- avoid saving this in plan cache
+
+
+END
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error checking password issues',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
+
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done checking password issues',0,1) WITH NOWAIT;
+	END
+
+
+
+
+			/*----------------------------------------
+			--Deprecated Features
+			----------------------------------------*/
+
+			/*Explicitly check for Deprecated Features*/
+
+BEGIN TRY
+INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 102, 'Deprecated Features','------','------'
+BEGIN
+
+INSERT #output_man_script (SectionID, Section,Summary,Details)
+
+  SELECT 102
+  , 'Deprecated' [Section]
+  , [instance_name] [Summary]
+  , cntr_value Details
+FROM [sys].[dm_os_performance_counters] WHERE ([object_name] LIKE '%Deprecated Features%') AND ([cntr_value] > 0);
+
+
+
+END
+END TRY
+BEGIN CATCH
+	RAISERROR (N'Error with reading or finding CommandLog table for Ola output',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
+
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'Done looking for Deprecated Features',0,1) WITH NOWAIT;
+	END
+
+
 
 
 /*ADD NEW sections before this line*/
@@ -5720,7 +6525,7 @@ END CATCH
 		EXEC ('DROP TABLE #LEXEL_OES_stats_sql_handle_convert_table;')
 		/*
 		CREATE TABLE #LEXEL_OES_stats_sql_handle_convert_table (
-				 row_id INT identity 
+				 row_id [INT] identity 
 				, t_sql_handle varbinary(64)
 				, t_display_option NVARCHAR(140) collate database_default
 				, t_display_optionIO NVARCHAR(140) collate database_default
@@ -5751,7 +6556,7 @@ END CATCH
 				, t_total_logical_IO BIGINT
 				, t_last_logical_IO BIGINT
 				, t_min_logical_IO BIGINT
-				, t_max_logical_IO BIGINT 
+				, t_max_logical_IO [BIGINT] 
 				);
 		IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_objects', 'U') IS NOT NULL
 		 EXEC ('DROP TABLE #LEXEL_OES_stats_objects;')
@@ -5785,48 +6590,48 @@ END CATCH
 		IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_output', 'U') IS NOT NULL
 		 EXEC ('DROP TABLE #LEXEL_OES_stats_output;')
 		CREATE TABLE #LEXEL_OES_stats_output(
-			ID INT IDENTITY(1,1)
+			ID [INT] IDENTITY(1,1)
 			, evaldate NVARCHAR(20)
 			, domain NVARCHAR(50) DEFAULT DEFAULT_DOMAIN()
 			, SQLInstance NVARCHAR(50) NULL --DEFAULT @@SERVERNAME
 			, [Type] NVARCHAR(25) NOT NULL
-			, l1 INT NULL
-			, l2 BIGINT NULL
-			, row_id INT NOT NULL
+			, l1 [INT] NULL
+			, l2 [BIGINT] NULL
+			, row_id [INT] NOT NULL
 			, t_obj_name NVARCHAR(250)  NULL
 			, t_obj_type NVARCHAR(250)  NULL
 			, [schema_name] NVARCHAR(250)  NULL
 			, t_db_name NVARCHAR(250) NULL
 			, t_sql_handle varbinary(64) NULL
-			, t_SPRank INT NULL
-			, t_SPRank2 INT NULL
+			, t_SPRank [INT] NULL
+			, t_SPRank2 [INT] NULL
 			, t_SQLStatement NVARCHAR(max) NULL
-			, t_execution_count INT NULL
-			, t_plan_generation_num INT NULL
+			, t_execution_count [INT] NULL
+			, t_plan_generation_num [INT] NULL
 			, t_last_execution_time datetime NULL
 			, t_avg_worker_time float NULL
-			, t_total_worker_time BIGINT NULL
-			, t_last_worker_time BIGINT NULL
-			, t_min_worker_time BIGINT NULL
-			, t_max_worker_time BIGINT NULL
+			, t_total_worker_time [BIGINT] NULL
+			, t_last_worker_time [BIGINT] NULL
+			, t_min_worker_time [BIGINT] NULL
+			, t_max_worker_time [BIGINT] NULL
 			, t_avg_logical_reads float NULL
-			, t_total_logical_reads BIGINT NULL
-			, t_last_logical_reads BIGINT NULL
-			, t_min_logical_reads BIGINT NULL
-			, t_max_logical_reads BIGINT NULL
+			, t_total_logical_reads [BIGINT] NULL
+			, t_last_logical_reads [BIGINT] NULL
+			, t_min_logical_reads [BIGINT] NULL
+			, t_max_logical_reads [BIGINT] NULL
 			, t_avg_logical_writes float NULL
-			, t_total_logical_writes BIGINT NULL
-			, t_last_logical_writes BIGINT NULL
-			, t_min_logical_writes BIGINT NULL
-			, t_max_logical_writes BIGINT NULL
+			, t_total_logical_writes [BIGINT] NULL
+			, t_last_logical_writes [BIGINT] NULL
+			, t_min_logical_writes [BIGINT] NULL
+			, t_max_logical_writes [BIGINT] NULL
 			, t_avg_IO float NULL
-			, t_total_IO BIGINT NULL
-			, t_last_IO BIGINT NULL
-			, t_min_IO BIGINT NULL
-			, t_max_IO BIGINT NULL
-			, t_CPURank INT NULL
-			, t_ReadRank INT NULL
-			, t_WriteRank INT NULL
+			, t_total_IO [BIGINT] NULL
+			, t_last_IO [BIGINT] NULL
+			, t_min_IO [BIGINT] NULL
+			, t_max_IO [BIGINT] NULL
+			, t_CPURank [INT] NULL
+			, t_ReadRank [INT] NULL
+			, t_WriteRank [INT] NULL
 		) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
 
 
@@ -5958,7 +6763,7 @@ END CATCH
 	IF OBJECT_ID('tempdb..#sql_handle_convert_table') IS NOT NULL
 				DROP TABLE #sql_handle_convert_table;
 	CREATE TABLE #sql_handle_convert_table (
-	 row_id INT identity 
+	 row_id [INT] identity 
 	, t_sql_handle varbinary(64)
 	, t_display_option NVARCHAR(140) collate database_default
 	, t_display_optionIO NVARCHAR(140) collate database_default
@@ -5966,18 +6771,18 @@ END CATCH
 	, t_SPRank INT
 	, t_SPRank2 INT
 	, t_SQLStatement NVARCHAR(max) collate database_default
-	, t_execution_count INT 
+	, t_execution_count [INT] 
 	, t_plan_generation_num INT
 	, t_last_execution_time datetime
 	, t_avg_worker_time FLOAT
 	, t_total_worker_time BIGINT
 	, t_last_worker_time BIGINT
 	, t_min_worker_time BIGINT
-	, t_max_worker_time BIGINT 
+	, t_max_worker_time [BIGINT] 
 	, t_avg_logical_reads FLOAT
 	, t_total_logical_reads BIGINT
 	, t_last_logical_reads BIGINT
-	, t_min_logical_reads BIGINT 
+	, t_min_logical_reads [BIGINT] 
 	, t_max_logical_reads BIGINT
 	, t_avg_logical_writes FLOAT
 	, t_total_logical_writes BIGINT
@@ -5995,11 +6800,11 @@ END CATCH
 				DROP TABLE #perf_report_objects;
 	CREATE TABLE #perf_report_objects (
 	 obj_rank INT
-	, total_cpu BIGINT 
+	, total_cpu [BIGINT] 
 	, total_reads BIGINT
 	, total_writes BIGINT
 	, total_io BIGINT
-	, avg_cpu BIGINT 
+	, avg_cpu [BIGINT] 
 	, avg_reads BIGINT
 	, avg_writes BIGINT
 	, avg_io BIGINT
@@ -6258,7 +7063,7 @@ END CATCH
 		+ 'GB/day; ' + CONVERT(VARCHAR(15),(CASE WHEN s.[Total Execution Count] = 1 THEN 1 ELSE CONVERT(MONEY,s.[Total Execution Count])/@DaysOldestCachedQuery END) ) 
 		+ ' executions/day; ' +  CONVERT(VARCHAR(15),([Avg CPU Time in MS]/1000))
 		+ ' s(avg) *[DailyGB; DailyExecutions; AverageTime(s)]' [Summary]
-		, LEFT('/*' + ISNULL(O.type_desc COLLATE DATABASE_DEFAULT,'') + '; '+ ISNULL(o.name COLLATE DATABASE_DEFAULT,'') + ' [' + ISNULL(DBs.name COLLATE DATABASE_DEFAULT,'') + '].[' + ISNULL(SC.name COLLATE DATABASE_DEFAULT,'') + '] > */' + ISNULL(left(replace(replace(replace(replace(CONVERT(NVARCHAR(3600),st.text COLLATE DATABASE_DEFAULT), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800),''),3850) [Details]  
+		, LEFT('/*' + ISNULL(O.type_desc COLLATE DATABASE_DEFAULT,'') + '; '+ ISNULL(O.name COLLATE DATABASE_DEFAULT,'') + ' [' + ISNULL(DBs.name COLLATE DATABASE_DEFAULT,'') + '].[' + ISNULL(SC.name COLLATE DATABASE_DEFAULT,'') + '] > */' + ISNULL(left(replace(replace(replace(replace(CONVERT(NVARCHAR(3600),st.text COLLATE DATABASE_DEFAULT), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800),''),3850) [Details]  
 	FROM
 	(
 		SELECT
@@ -6316,7 +7121,12 @@ END CATCH
 	OPTION (RECOMPILE);
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Daily workload calculated',0,1) WITH NOWAIT;
+	END
 
 /*----------------------------------------
 --Add Latest Blitz output
@@ -6407,10 +7217,12 @@ END
 			--select output
 			----------------------------------------*/
 IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Cleaning up output table',0,1) WITH NOWAIT;
-DECLARE @ThisDomain NVARCHAR(100)
-EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE', 'SYSTEM\CurrentControlSet\services\Tcpip\Parameters', N'Domain',@ThisDomain OUTPUT
-SET @ThisDomain = ISNULL(@ThisDomain, DEFAULT_DOMAIN())
+	END
 
 UPDATE  #output_man_script
 SET evaldate = @evaldate
@@ -6440,7 +7252,12 @@ END
 IF UPPER(LEFT(@Export,1)) = 'T'
 BEGIN
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Export to table. Creating table.',0,1) WITH NOWAIT;
+	END
 	IF OBJECT_ID(@ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName) IS NULL
 	BEGIN
 	/*
@@ -6484,7 +7301,7 @@ BEGIN
 	SET @dynamicSQL = '
   DECLARE @ColumnsToAdd TABLE 
   (
-	ID INT IDENTITY(1,1)
+	ID [INT] IDENTITY(1,1)
 	, ColumnName NVARCHAR(500)
 	, [order] INT
 	, [length] INT
@@ -6514,7 +7331,7 @@ BEGIN
   ) currentcolumns ON targetcolumns.name = currentcolumns.name
   WHERE currentcolumns.name IS NULL
 
-  DECLARE @MaxcolumnsToAdd INT 
+  DECLARE @MaxcolumnsToAdd [INT] 
   SET @MaxcolumnsToAdd = 0;
   DECLARE @ColumnCountLoop INT
   SET @ColumnCountLoop = 1; 
@@ -6537,7 +7354,7 @@ BEGIN
 			IF @ColumnToAdd = ''SQLInstance''
 				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD SQLInstance NVARCHAR(505) DEFAULT @@SERVERNAME
 			IF @ColumnToAdd = ''SectionID''
-				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD SectionID int NULL
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD SectionID [INT] NULL
 			IF @ColumnToAdd = ''Section''
 				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD Section NVARCHAR(4000)
 			IF @ColumnToAdd = ''Summary''
@@ -6563,7 +7380,12 @@ BEGIN
 			RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 		END CATCH
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Populating table',0,1) WITH NOWAIT;
+	END
 	SET @dynamicSQL = 'INSERT INTO ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
 			(ID
 			, evaldate
@@ -6595,10 +7417,15 @@ BEGIN
 	IF @ShowOnScreenWhenResultsToTable = 1 
 	BEGIN
 		IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Results to screen',0,1) WITH NOWAIT;
+		END
 		/*And after all that hard work, how about we select to the screen as well*/
 		SELECT T1.ID
-		,  evaldate
+		,  @evaldate evaldate
 		, REPLACE(T1.domain, '~',':') domain
 		, REPLACE(@ThisServer, '~',':') [Server]
 		, T1.SectionID
@@ -6805,17 +7632,27 @@ END
 		
 	/*Housekeeping*/
 	IF OBJECT_ID(@ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName) IS NOT NULL AND @CleanupTime IS NOT NULL
-	BEGIN
+	BEGIN TRY
+		RAISERROR (N'Cleaning output table',0,1) WITH NOWAIT;
 		SET @dynamicSQL = '
 		DECLARE @filterdate DATETIME
 		SET @filterdate = DATEADD(DAY,-' +CONVERT(VARCHAR(5),@CleanupTime)+',GETDATE())
 		DELETE FROM ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
-		WHERE evaldate < @filterdate'
+		WHERE evaldate < CONVERT(VARCHAR,@filterdate,120)'
+		--PRINT @dynamicSQL
 		EXEC sp_executesql @dynamicSQL;	
-	END
+	END TRY
+	BEGIN CATCH
+		RAISERROR (N'Failed to clean old records in output table',0,1) WITH NOWAIT;
+	END CATCH
 
 	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Cleaning up #temp tables',0,1) WITH NOWAIT;
+	END
 	 IF(OBJECT_ID('tempdb..#InvalidLogins') IS NOT NULL)
         BEGIN
             EXEC sp_executesql N'DROP TABLE #InvalidLogins;';
@@ -6929,6 +7766,9 @@ END
 		IF OBJECT_ID('tempdb..#blockinghistory') IS NOT NULL
 			DROP TABLE #blockinghistory;
 
+		IF OBJECT_ID('tempdb..#FKNOIndex') IS NOT NULL
+			DROP TABLE #FKNOIndex;	
+
 		IF OBJECT_ID('tempdb..#SqueezeMe') IS NOT NULL
 			DROP TABLE #SqueezeMe;
 	
@@ -6940,7 +7780,13 @@ END
 --the blitz
 
 
-
+	IF @Debug = 0
+	BEGIN
+		SET @DebugTimeMSG = CONVERT(VARCHAR,GETDATE(),120) +' previous step took: ' + CONVERT(VARCHAR(5),DATEDIFF(SECOND,@DebugTime,GETDATE() )) + ' seconds'
+		SET @DebugTime = GETDATE()
+		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+		RAISERROR (N'All done',0,1) WITH NOWAIT;
+	END
     SET NOCOUNT OFF;
 	
 END
