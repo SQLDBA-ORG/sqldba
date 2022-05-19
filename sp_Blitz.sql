@@ -3060,6 +3060,7 @@ AS
                                          SELECT @AOFCI = CAST(SERVERPROPERTY('IsClustered') AS INT)
 
                                          IF (SELECT COUNT(DISTINCT join_state_desc) FROM sys.dm_hadr_availability_replica_cluster_states) = 2 
+										/* BREAKS ON SQL 2008*/
                                          BEGIN --if count is 2 both JOINED_STANDALONE and JOINED_FCI is configured
                                                        SET @AOFCI = 1
                                          END
