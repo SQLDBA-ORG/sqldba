@@ -27,7 +27,7 @@ DROP PROCEDURE [master].[dbo].[sp_triage®]
 , @PrepForExport [INT]  = 1 
 /*@ShowMigrationRelatedOutputs. When you need to show migration stuff, like possible breaking connections and DMA script outputs, set to 1 to show information*/
 , @ShowMigrationRelatedOutputs [INT] = 1 
-, @SkipHeaps [INT] = 1 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
+, @SkipHeaps [INT] = 0 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
 
 /*Email results*/
 , @MailResults BIT = 0
@@ -144,6 +144,26 @@ BEGIN CATCH
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
 	END
 END CATCH
+
+
+/*Check and Set xp_cmdshell*/
+	
+DECLARE @StateOfXP_CMDSHELL INT
+SELECT @StateOfXP_CMDSHELL = CONVERT(INT, ISNULL(value, value_in_use)) 
+FROM  sys.configurations
+WHERE  name = 'xp_cmdshell' ;
+
+IF @StateOfXP_CMDSHELL = 0 
+BEGIN
+	-- To allow advanced options to be changed.
+	EXEC sp_configure 'show advanced options', 1
+	-- To update the currently configured value for advanced options.
+	RECONFIGURE
+	-- To enable the feature.
+	EXEC sp_configure 'xp_cmdshell', 1
+	-- To update the currently configured value for this feature.
+	RECONFIGURE
+END
 
 
 IF 'DoTrace' = '1' 
@@ -484,6 +504,7 @@ BEGIN
 	DECLARE @CPUHyperthreadratio MONEY ;
 	DECLARE @TempDBFileCount INT;
 	DECLARE @lastservericerestart DATETIME;
+	DECLARE @serverinstalldate DATETIME;
 	DECLARE @DaysOldestCachedQuery MONEY ;
 	DECLARE @CachevsUpdate MONEY ;
 	DECLARE @Databasei_Count INT;
@@ -1448,6 +1469,7 @@ BEGIN TRY
 		+ ';'+@SP_EDITION 
 		+ ';'+@SP_ISCLUSTERED 
 
+
 		UNION ALL
 		SELECT DISTINCT
 		0
@@ -1471,7 +1493,7 @@ BEGIN TRY
 		SELECT
 		0
 		,'Server Install Date'
-		, CONVERT(VARCHAR,create_date,120) as 'SQL Server Installation Date' 
+		, CONVERT(NVARCHAR(25),CONVERT(VARCHAR,create_date,120)) as 'SQL Server Installation Date' 
 		FROM sys.server_principals  
 		WHERE name='NT AUTHORITY\SYSTEM'
 	INSERT #output_man_script (
@@ -2227,24 +2249,7 @@ BEGIN
 	DECLARE @cmdpowershell NVARCHAR(4000)
 	SET @cmdpowershell = 'C:\WINDOWS\system32\WindowsPowerShell\v1.0\powershell.exe "& get-counter -counter '+ @syscounters +' -SampleInterval 5 -MaxSamples 2 | Select-Object -ExpandProperty Readings"'
 	BEGIN TRY
-	/*Check and Set xp_cmdshell*/
 	
-		DECLARE @StateOfXP_CMDSHELL INT
-		SELECT @StateOfXP_CMDSHELL = CONVERT(INT, ISNULL(value, value_in_use)) 
-		FROM  sys.configurations
-		WHERE  name = 'xp_cmdshell' ;
-
-		IF @StateOfXP_CMDSHELL = 0 
-		BEGIN
-			-- To allow advanced options to be changed.
-			EXEC sp_configure 'show advanced options', 1
-			-- To update the currently configured value for advanced options.
-			RECONFIGURE
-			-- To enable the feature.
-			EXEC sp_configure 'xp_cmdshell', 1
-			-- To update the currently configured value for this feature.
-			RECONFIGURE
-		END
 
 
 		INSERT @syscountertable
@@ -2296,18 +2301,7 @@ IF @Debug = 0
 		, 'No SPNs registered'
 		END
 
-		/*Set back xp_cmdshell*/
-		IF @StateOfXP_CMDSHELL = 0 
-		BEGIN
-			-- To allow advanced options to be changed.
-			EXEC sp_configure 'show advanced options', 1
-			-- To update the currently configured value for advanced options.
-			RECONFIGURE
-			-- To enable the feature.
-			EXEC sp_configure 'xp_cmdshell', 0
-			-- To update the currently configured value for this feature.
-			RECONFIGURE
-		END
+
 
 	END TRY
 	BEGIN CATCH
@@ -2825,7 +2819,7 @@ DECLARE @Databases TABLE
 	ORDER BY AG.name ASC, dbcs.database_name
 	
 	) t1 on t1.DatabaseName = db.name 
-	WHERE db.database_id > 4 AND db.user_access = 0 AND db.State = 0 
+	WHERE /*db.database_id > 4 AND*/ db.user_access = 0 AND db.State = 0 
 	AND t1.LocalReplicaRole IS NOT NULL
 	'
 	END
@@ -2850,6 +2844,7 @@ IF @Debug = 0
 
 	SET @oldestcachequery = (SELECT ISNULL(  MIN(creation_time),0.1) FROM  #dadatafor_exec_query_stats WITH (NOLOCK));
 	SET @lastservericerestart = (SELECT create_date FROM sys.databases WHERE name = 'tempdb');
+	SET @serverinstalldate = (SELECT create_date FROM sys.databases WHERE name = 'master');
 	SET @minutesSinceRestart = (SELECT DATEDIFF(MINUTE,@lastservericerestart,GETDATE()));
 	
 	SELECT @DaysUptime = CAST(DATEDIFF(hh,@lastservericerestart,GETDATE())/24. AS NUMERIC (23,2)) OPTION (RECOMPILE);
@@ -3068,8 +3063,8 @@ IF @Debug = 0
 		DECLARE curReadSQLErrorLogs CURSOR FAST_FORWARD READ_ONLY FOR 
 			   SELECT [Archive #] 
 			   FROM @ErrorLogFiles
-			   WHERE (Date > DATEADD(WEEK, -2,GETDATE()))
-			   OR Id < 4
+			   WHERE 1=1 --(Date > DATEADD(WEEK, -2,GETDATE()))
+			   AND Id <= 5
 		OPEN curReadSQLErrorLogs
 		FETCH NEXT FROM curReadSQLErrorLogs INTO @i
 		WHILE @@FETCH_STATUS = 0
@@ -3793,9 +3788,9 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 			
 			INSERT @FileSize 
 			EXEC sp_executesql @dynamicSQL;
+
 			SET @dynamicSQL = 'USE [' + @DatabaseName + '];
 			DBCC loginfo WITH NO_INFOMSGS;'
-
 			INSERT #dbccloginfo
 			EXEC sp_executesql @dynamicSQL;
 
@@ -3950,7 +3945,7 @@ join @avg_max_log_size ls on v.dbname=ls.dbname
 	INSERT #output_man_script (SectionID, Section,Summary ,Details )
 SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0) 
 	+ REPLICATE('.',100 - CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0) + '' + CONVERT(VARCHAR(20), CONVERT(INT,ROUND(CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0,0))) +'% IO '
-	, T1.DatabaseName
+	, T2.DatabaseName
 	+ '; ' + ISNULL(CONVERT(VARCHAR(20),CONVERT(INT,ROUND([CPU_Time(Ms)]/1000 * 1.0 /SUM([CPU_Time(Ms)]/1000) OVER()* 100.0,0))),'0') +'%'
 	+ '; ' +  ISNULL(CONVERT(VARCHAR(20),CONVERT(INT,ROUND(CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0 ,0))) ,'0')+'%'
 	+ '; ' +  ISNULL(CONVERT(VARCHAR(20),CONVERT(INT,ROUND(CONVERT(MONEY,src.db_buffer_pages )/ SUM(src.db_buffer_pages ) OVER()* 100.0 ,0))),'0')+'%'
@@ -3963,6 +3958,17 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 	+ '; '+ CONVERT(VARCHAR(20),src.db_buffer_pages / 128) 
 
 	FROM(
+	SELECT
+		Name AS 'DatabaseName'
+		, d.database_id
+		, SUM(num_of_reads) AS'Number of Reads'
+		, SUM(num_of_writes) AS'Number of Writes'
+		, SUM(num_of_writes) +  SUM(num_of_reads) [TotalIO]
+		FROM sys.dm_io_virtual_file_stats(NULL,NULL) I
+		INNER JOIN sys.databases d ON I.database_id = d.database_id
+		GROUP BY Name, d.database_id
+	) T2
+	LEFT OUTER JOIN (
 		SELECT TOP 100 PERCENT
 		DatabaseID
 		,DB_Name(DatabaseID)AS [DatabaseName]
@@ -3976,25 +3982,16 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		)AS epa
 		GROUP BY DatabaseID
 		ORDER BY SUM(total_worker_time) DESC
-	) T1
-	LEFT OUTER JOIN (
-	SELECT
-		Name AS 'DatabaseName'
-		, SUM(num_of_reads) AS'Number of Reads'
-		, SUM(num_of_writes) AS'Number of Writes'
-		, SUM(num_of_writes) +  SUM(num_of_reads) [TotalIO]
-		FROM sys.dm_io_virtual_file_stats(NULL,NULL) I
-		INNER JOIN sys.databases d ON I.database_id = d.database_id
-		GROUP BY Name
-	) T2 ON T1.DatabaseName = T2.DatabaseName
+	) T1 ON T1.DatabaseName = T2.DatabaseName
 	LEFT OUTER JOIN 
 	(
 		SELECT database_id,
 		db_buffer_pages =COUNT_BIG(*)
 		FROM sys.dm_os_buffer_descriptors
 		GROUP BY database_id
-	) src ON src.database_id = T1.DatabaseID
-	LEFT OUTER JOIN  (SELECT DatabaseName, SUM(CAST(FileSize*@PageSize/@Kb as decimal(15,2))) TotalSize FROM @FileSize F1 GROUP BY DatabaseName) fs2 ON  fs2.DatabaseName COLLATE DATABASE_DEFAULT =  T2.DatabaseName COLLATE DATABASE_DEFAULT
+	) src ON src.database_id = T2.database_id
+	LEFT OUTER JOIN  (SELECT DatabaseName, SUM(CAST(FileSize*@PageSize/@Kb as decimal(15,2))) TotalSize FROM @FileSize F1 GROUP BY DatabaseName) 
+	fs2 ON  fs2.DatabaseName COLLATE DATABASE_DEFAULT =  T2.DatabaseName COLLATE DATABASE_DEFAULT
 	
 	LEFT OUTER JOIN (
 	SELECT  DB_NAME ([s].[database_id]) [DBName] 
@@ -4008,8 +4005,8 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 		JOIN sys.master_files AS [f] ON [s].[database_id] = [f].[database_id] AND [s].[file_id] = [f].[file_id]
 		GROUP BY DB_NAME ([s].[database_id]) 
 
-	) DBlatency ON DBlatency.DBName =  T1.DatabaseName
-	WHERE T1.DatabaseName IS NOT NULL
+	) DBlatency ON DBlatency.DBName =  T2.DatabaseName
+	WHERE T2.DatabaseName IS NOT NULL
 	ORDER BY [TotalIO] DESC,[CPU_Time(Ms)] DESC
 	OPTION (RECOMPILE) ;
 
@@ -4333,7 +4330,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			SELECT LEFT([statement],(PATINDEX(''%.%'',[statement]))-1) [Database]
 			,  (( user_seeks + user_scans ) * avg_total_user_cost * avg_user_impact)/' + CONVERT(NVARCHAR,@DaysOldestCachedQuery) + ' daily_magic_benefit_number
 			, [Table] = [statement]
-			, [CreateIndexStatement] = ''CREATE NONCLUSTERED INDEX IX_LEXEL_'' + REPLACE(REPLACE(REVERSE(LEFT(REVERSE([statement]),(PATINDEX(''%.%'',REVERSE([statement])))-1)),'']'',''''),''['','''')
+			, [CreateIndexStatement] = ''CREATE NONCLUSTERED INDEX SQLDBA'' + REPLACE(REPLACE(REVERSE(LEFT(REVERSE([statement]),(PATINDEX(''%.%'',REVERSE([statement])))-1)),'']'',''''),''['','''')
 			+ REPLACE(REPLACE(REPLACE(LEFT(ISNULL(mid.equality_columns,'''')+ISNULL(mid.inequality_columns,''''),15), ''['', ''''), '']'',''''), '', '',''_'') + ''_''+ REPLACE(CONVERT(VARCHAR(20),GETDATE(),102),''.'',''_'') + ''T''  + REPLACE(CONVERT(VARCHAR(20),GETDATE(),108),'':'',''_'') + '' ON '' + [statement] 
 			+  '' ( '' 
 			+ ''< be clever here > ''
@@ -4484,7 +4481,7 @@ SELECT 14,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()*
 			,last_user_lookup
 			/*, forwarded_record_count, record_count, page_count*/
 
-			FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, ''DETAILED'') IDXPS 
+			FROM sys.dm_db_index_physical_stats(DB_ID(), NULL, NULL, NULL, ''SIMPLE'') IDXPS 
 			INNER JOIN sys.dm_db_index_usage_stats ius ON IDXPS.object_id = ius.object_id AND IDXPS.index_id = ius.index_id AND IDXPS.database_id = ius.database_id
 			INNER JOIN sys.indexes IDX  ON IDX.object_id = IDXPS.object_id 
 			AND IDX.index_id = IDXPS.index_id 
@@ -5027,7 +5024,15 @@ BEGIN TRY
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 
 				BEGIN TRY
-		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 18, 'MISSING INDEXES - !Benefit > 1mm!','------','SELECT ''All your index are belong to us'' '
+		INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 18, 'MISSING INDEXES - !Benefit > 1mm!','------','SELECT ''All your index are belong to us, SET STATISTICS PROFILE ON;
+SELECT session_id,sp.cmd,sp.hostname,db.name,sp.last_batch,node_id,physical_operator_name,SUM(row_count) row_count,SUM(estimate_row_count) AS estimate_row_count,
+CAST(SUM(row_count)*100 AS float)/SUM(estimate_row_count) as EST_COMPLETE_PERCENT
+FROM sys.dm_exec_query_profiles eqp
+join sys.sysprocesses sp on sp.spid=eqp.session_id
+join sys.databases db on db.database_id=sp.dbid
+WHERE session_id in (select spid from sys.sysprocesses sp where sp.cmd like ''%INDEX%'')
+GROUP BY session_id, node_id, physical_operator_name, sp.cmd, sp.hostname, db.name, sp.last_batch
+ORDER BY session_id, node_id desc;'' '
 		INSERT #output_man_script (SectionID, Section,Summary ,Severity, Details,HoursToResolveWithTesting )
 			SELECT 18
 			, REPLICATE('|',ROUND(LOG(T1.magic_benefit_number),0)) + ' ' + CONVERT(VARCHAR(20),LOG(T1.magic_benefit_number)) + '' 
@@ -5115,7 +5120,7 @@ BEGIN TRY
 			AND ps.index_id = i.index_id
 		WHERE forwarded_record_count > 0*/
 			FROM #HeapTable T1  
-			WHERE T1.rows > 500
+			--WHERE T1.rows > 500
 			ORDER BY (ISNULL(user_scans,0)+ ISNULL(user_seeks,0) + ISNULL(user_lookups,0) + ISNULL(user_updates,0)) DESC,  DB OPTION (RECOMPILE);
 			END TRY
 			BEGIN CATCH
@@ -5602,11 +5607,11 @@ BEGIN
 	+ '; Pages(MB) in memory: ' + CONVERT(VARCHAR(10), ISNULL(pages.[TotalPages in MB],0)) 
 	 [Summary]
  
-	,  'DB Created: ' + CONVERT(VARCHAR,base.DBcreatedate,120)
-	+ '; Last seek: ' + CONVERT(VARCHAR,base.[last_user_seek],120)
-	+ '; Last scan:' + CONVERT(VARCHAR,base.[last_user_scan],120)
-	+ '; Last lookup: ' + CONVERT(VARCHAR,base.[last_user_lookup],120)
-	+ '; Last update: ' + CONVERT(VARCHAR,base.[last_user_update],120) [Details]
+	,  'DB Created: '   + ISNULL(CONVERT(VARCHAR,base.DBcreatedate,120),'')
+	+ '; Last seek: '   + ISNULL(CONVERT(VARCHAR,base.[last_user_seek],120),'')
+	+ '; Last scan:'    + ISNULL(CONVERT(VARCHAR,base.[last_user_scan],120),'')
+	+ '; Last lookup: ' + ISNULL(CONVERT(VARCHAR,base.[last_user_lookup],120),'')
+	+ '; Last update: ' + ISNULL(CONVERT(VARCHAR,base.[last_user_update],120),'') [Details]
 
 	FROM (
 	SELECT db.name, db.database_id
@@ -6399,7 +6404,7 @@ SET @OutputPasswords = 0
 BEGIN TRY
 INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 101, 'Leaving the door open','------','------'
 
-IF EXISTS (SELECT 1 FROM master.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'CommandLog')
+--IF EXISTS (SELECT 1 FROM master.INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = N'CommandLog')
 BEGIN
 
 INSERT #output_man_script (SectionID, Section,Summary,Details,Severity)
@@ -7039,13 +7044,12 @@ END CATCH
 	INSERT #output_man_script (SectionID, Section,Summary, Details) SELECT 99, 'Workload details I/O','------','------'
 	INSERT #output_man_script (SectionID, Section,Summary,Details)
 	SELECT 99 [SectionID]
-	, 'Oldest Cache: ' + CONVERT(VARCHAR(15), @DaysOldestCachedQuery) + '; Days Uptime: ' + CONVERT(VARCHAR(15),@DaysUptime) [Section]
-	, CONVERT(VARCHAR(50),CONVERT(MONEY,SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  * 8 /1024/1024)
+	, LEFT('Oldest Cache: ' + CONVERT(VARCHAR(15), @DaysOldestCachedQuery) + '; Days Uptime: ' + CONVERT(VARCHAR(15),@DaysUptime),3500) [Section]
+	, LEFT(CONVERT(VARCHAR(50),CONVERT(MONEY,SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  * 8 /1024/1024)
 	+ 'GB/day; ' + CONVERT(VARCHAR(50),SUM(qs.execution_count)) +' executions/day; '
-	+ CONVERT(VARCHAR(50),CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)/1000) +' (avg) *[DailyGB; DailyExecutions; AverageTime(s)]'Summary
+	+ CONVERT(VARCHAR(50),CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)/1000) +' (avg) *[DailyGB; DailyExecutions; AverageTime(s)]', 3500) Summary
 	, 'Total' [Details]
 	FROM #dadatafor_exec_query_stats qs
-
 
 
 	INSERT #output_man_script (SectionID, Section)
@@ -7645,6 +7649,20 @@ END
 	BEGIN CATCH
 		RAISERROR (N'Failed to clean old records in output table',0,1) WITH NOWAIT;
 	END CATCH
+
+
+IF @StateOfXP_CMDSHELL = 0 /*It was originally disabled, then disable it*/
+BEGIN
+	-- To allow advanced options to be changed.
+	EXEC sp_configure 'show advanced options', 1
+	-- To update the currently configured value for advanced options.
+	RECONFIGURE
+	-- To enable the feature.
+	EXEC sp_configure 'xp_cmdshell', 0
+	-- To update the currently configured value for this feature.
+	RECONFIGURE
+END
+
 
 	IF @Debug = 0
 	BEGIN
