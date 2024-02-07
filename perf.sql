@@ -1,3 +1,5 @@
+DECLARE @showall INT 
+SET @showall=1
 select 'worst IO'
  SET ARITHABORT off
 ;WITH TMP AS
