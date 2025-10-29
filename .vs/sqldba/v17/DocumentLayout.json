@@ -14,15 +14,11 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 2,
+          "SelectedChildIndex": 1,
           "Children": [
             {
               "$type": "Bookmark",
               "Name": "ST:128:0:{75188d03-9892-4ae2-abf1-207126247ce5}"
-            },
-            {
-              "$type": "Bookmark",
-              "Name": "ST:0:0:{1c4feeaa-4718-4aa9-859d-94ce25d182ba}"
             },
             {
               "$type": "Document",
@@ -32,7 +28,7 @@
               "RelativeDocumentMoniker": "sp_triage\u00AE.ps1",
               "ToolTip": "C:\\Users\\afsul\\OneDrive\\Documents\\GitHub\\sqldba\\sp_triage\u00AE.ps1",
               "RelativeToolTip": "sp_triage\u00AE.ps1",
-              "ViewState": "AgIAADwAAAAAAAAAAAAAABkAAABsAAAAAAAAAA==",
+              "ViewState": "AgIAAFoAAAAAAAAAAAAAAGgAAAACAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
               "WhenOpened": "2025-10-29T21:00:18.852Z",
               "EditorCaption": ""
