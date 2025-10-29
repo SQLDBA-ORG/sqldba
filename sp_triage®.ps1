@@ -623,51 +623,51 @@ foreach($RunningInstance in $SQLServers)
 	Write-Progress -id $currentProgress -ParentId 1 -Activity "SQLDBA: Updating SPs on $SQLInstance (Server $looper of $SQLInstancesCount)" -Status "3% Complete:" -PercentComplete 3 
 
 ###########################################
-	    ##Try{ #BLITZ
-		##	Write-Progress -id $currentProgress -ParentId 1 -Activity "SQLDBA: Updating SPs on $SQLInstance (Server $looper of $SQLInstancesCount)" -Status "4% Complete:" -PercentComplete 4
-		##	#Load Blitz SP
-		##	#Seed stored procedure if not exist
-		##	$SqlConnectionB = New-Object System.Data.SqlClient.SqlConnection 
-		##	$SqlConnectionB.ConnectionString = $sqlConString
-		##	$SqlCmdB1 = New-Object System.Data.SqlClient.SqlCommand  
-		##	$SqlCmdB1.CommandText = $SeedBlitz  
-		##	$SqlCmdB1.Connection = $SqlConnectionB
-		##	$SqlConnectionB.Open() | Out-null 
-		##	$SqlCmdB1.ExecuteNonQuery() | Out-null 
-		##	#$SqlConnectionB.Close()
-		##	LogWrite "Success - Creating sqldba_sp_Blitz on $SQLInstance"
-		##	
-		##	#Do Blitz
-		##	$tB=""
-		##	if($TestThisInstance.IndexOf('9.') -eq 0) #test for SQL 2005
-		##	{$dataB = [System.Convert]::FromBase64String($xcontentBlitz2005)}
-		##	elseif ($TestThisInstance.IndexOf('10.') -eq 0) #test for SQL 2008
-		##	{$dataB = [System.Convert]::FromBase64String($xcontentBlitz2008)}
-		##	else
-		##	{$dataB = [System.Convert]::FromBase64String($xcontentBlitz)}
-        ##
-		##	$msB = New-Object System.IO.MemoryStream
-		##	$msB.Write($dataB, 0, $dataB.Length)
-		##	$msB.Seek(0,0) | Out-Null
-		##	$csB = New-Object System.IO.Compression.GZipStream($msB, [System.IO.Compression.CompressionMode]::Decompress)
-		##	$srB = New-Object System.IO.StreamReader($csB)
-		##	$tB = $srB.readtoend()
-		##	#SQL Query for Stored Procedures 
-		##	$SqlQueryB = $tB 
-		##	$SqlCmdB2 = New-Object System.Data.SqlClient.SqlCommand  
-		##	$SqlCmdB2.CommandText = $SqlQueryB 
-		##	$SqlCmdB2.Connection = $SqlConnectionB 
-		##	#$SqlConnection.Open()
-		##	$SqlCmdB2.ExecuteNonQuery()	| Out-null 
-		##	$SqlConnectionB.Close()
-		##	LogWrite "Success - Updated sqldba_sp_Blitz on $SQLInstance"
-        ##
-		##}
-		##catch
-		##{
-		##	Write-Host "Error encountered trying to load Blitz SP"
-		##	LogWrite $Error[0]
-		##}
+	    Try{ #BLITZ
+			Write-Progress -id $currentProgress -ParentId 1 -Activity "SQLDBA: Updating SPs on $SQLInstance (Server $looper of $SQLInstancesCount)" -Status "4% Complete:" -PercentComplete 4
+			#Load Blitz SP
+			#Seed stored procedure if not exist
+			$SqlConnectionB = New-Object System.Data.SqlClient.SqlConnection 
+			$SqlConnectionB.ConnectionString = $sqlConString
+			$SqlCmdB1 = New-Object System.Data.SqlClient.SqlCommand  
+			$SqlCmdB1.CommandText = $SeedBlitz  
+			$SqlCmdB1.Connection = $SqlConnectionB
+			$SqlConnectionB.Open() | Out-null 
+			$SqlCmdB1.ExecuteNonQuery() | Out-null 
+			#$SqlConnectionB.Close()
+			LogWrite "Success - Creating sqldba_sp_Blitz on $SQLInstance"
+			
+			#Do Blitz
+			$tB=""
+			if($TestThisInstance.IndexOf('9.') -eq 0) #test for SQL 2005
+			{$dataB = [System.Convert]::FromBase64String($xcontentBlitz2005)}
+			elseif ($TestThisInstance.IndexOf('10.') -eq 0) #test for SQL 2008
+			{$dataB = [System.Convert]::FromBase64String($xcontentBlitz2008)}
+			else
+			{$dataB = [System.Convert]::FromBase64String($xcontentBlitz)}
+        
+			$msB = New-Object System.IO.MemoryStream
+			$msB.Write($dataB, 0, $dataB.Length)
+			$msB.Seek(0,0) | Out-Null
+			$csB = New-Object System.IO.Compression.GZipStream($msB, [System.IO.Compression.CompressionMode]::Decompress)
+			$srB = New-Object System.IO.StreamReader($csB)
+			$tB = $srB.readtoend()
+			#SQL Query for Stored Procedures 
+			$SqlQueryB = $tB 
+			$SqlCmdB2 = New-Object System.Data.SqlClient.SqlCommand  
+			$SqlCmdB2.CommandText = $SqlQueryB 
+			$SqlCmdB2.Connection = $SqlConnectionB 
+			#$SqlConnection.Open()
+			$SqlCmdB2.ExecuteNonQuery()	| Out-null 
+			$SqlConnectionB.Close()
+			LogWrite "Success - Updated sqldba_sp_Blitz on $SQLInstance"
+        
+		}
+		catch
+		{
+			Write-Host "Error encountered trying to load Blitz SP"
+			LogWrite $Error[0]
+		}
 
 		Try{
 			#All blitz scripts
