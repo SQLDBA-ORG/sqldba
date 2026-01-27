@@ -1,28 +1,56 @@
-DECLARE @showall INT 
-SET @showall=1
-select 'worst IO'
+
  SET ARITHABORT off
-;WITH TMP AS
-(
-	SELECT TOP 10
-		CAST(SUM(s.total_elapsed_time) / 1000000.0 AS DECIMAL(10, 2)) AS [Total Elapsed Time in S],
+
+
+SELECT
+	TMP.Category
+	, DB_NAME(st.dbid) [DB]
+	,TMP.[Total Elapsed Time in S]
+,TMP.[Total Execution Count]
+,TMP.[Total CPU Time in S]
+,TMP.[Avg CPU Time in MS]
+,TMP.[Total Logical Reads]
+,TMP.[Avg Logical Reads]
+,TMP.[Total Logical Writes]
+,TMP.[Avg Logical Writes]
+,TMP.[Total CLR Time]
+,TMP.[Avg CLR Time in MS]
+,TMP.[Min CPU Time in MS]
+,TMP.[Max CPU Time in MS]
+,TMP.[Min Logical Reads]
+,TMP.[Max Logical Reads]
+,TMP.[Min Logical Writes]
+,TMP.[Max Logical Writes]
+,TMP.[Min CLR Time in MS]
+,TMP.[Max CLR Time in MS]
+,TMP.[Number of Statements]
+,TMP.[Last Execution Time]
+,TMP.[Plan Handle]
+,st.text AS [Query]
+,qp.query_plan AS [Plan]
+	
+FROM
+	(
+SELECT * FROM (
+SELECT TOP 10 'worst I/O' [Category],
+		CAST(SUM(s.total_elapsed_time) / 1000000.0 AS DECIMAL(20, 2)) AS [Total Elapsed Time in S],
 		SUM(s.execution_count) AS [Total Execution Count],
-		CAST(SUM(s.total_worker_time) / 1000000.0 AS DECIMAL(10, 2)) AS [Total CPU Time in S],
-		CAST(SUM(s.total_worker_time) / SUM(s.execution_count) / 1000.0 AS DECIMAL(10, 2)) AS [Avg CPU Time in MS],
+		CAST(SUM(s.total_worker_time) / 1000000.0 AS DECIMAL(20, 2)) AS [Total CPU Time in S],
+		CAST(SUM(s.total_worker_time) / SUM(s.execution_count) / 1000.0 AS DECIMAL(20, 2)) AS [Avg CPU Time in MS],
 		SUM(s.total_logical_reads) AS [Total Logical Reads],
 		CAST(CAST(SUM(s.total_logical_reads) AS FLOAT) / CAST(SUM(s.execution_count) AS FLOAT) AS DECIMAL(20, 2)) AS [Avg Logical Reads],
 		SUM(s.total_logical_writes) AS [Total Logical Writes],
-	CAST(CAST(SUM(s.total_logical_writes) AS FLOAT) / CAST(SUM(s.execution_count) AS FLOAT) AS DECIMAL(20, 2)) AS [Avg Logical Writes],
+		CAST(CAST(SUM(s.total_logical_writes) AS FLOAT) / CAST(SUM(s.execution_count) AS FLOAT) AS DECIMAL(20, 2)) AS [Avg Logical Writes],
 		SUM(s.total_clr_time) AS [Total CLR Time],
 		CAST(SUM(s.total_clr_time) / SUM(s.execution_count) / 1000.0 AS DECIMAL(20, 2)) AS [Avg CLR Time in MS],
-	--	CAST(SUM(s.min_worker_time) / 1000.0 AS DECIMAL(10, 2)) AS [Min CPU Time in MS],
-	--	CAST(SUM(s.max_worker_time) / 1000.0 AS DECIMAL(10, 2)) AS [Max CPU Time in MS],
+		CAST(SUM(s.min_worker_time) / 1000.0 AS DECIMAL(20, 2)) AS [Min CPU Time in MS],
+		CAST(SUM(s.max_worker_time) / 1000.0 AS DECIMAL(20, 2)) AS [Max CPU Time in MS],
 		SUM(s.min_logical_reads) AS [Min Logical Reads],
 		SUM(s.max_logical_reads) AS [Max Logical Reads],
 		SUM(s.min_logical_writes) AS [Min Logical Writes],
 		SUM(s.max_logical_writes) AS [Max Logical Writes],
-	--	CAST(SUM(s.min_clr_time) / 1000.0 AS DECIMAL(10, 2)) AS [Min CLR Time in MS],
-	---	CAST(SUM(s.max_clr_time) / 1000.0 AS DECIMAL(10, 2)) AS [Max CLR Time in MS],
+		CAST(SUM(s.min_clr_time) / 1000.0 AS DECIMAL(20, 2)) AS [Min CLR Time in MS],
+		CAST(SUM(s.max_clr_time) / 1000.0 AS DECIMAL(20, 2)) AS [Max CLR Time in MS],
 		COUNT(1) AS [Number of Statements],
 		MAX(s.last_execution_time) AS [Last Execution Time],
 		s.plan_handle AS [Plan Handle]
@@ -34,31 +62,15 @@ select 'worst IO'
 		
 	-- Most read+write IO consuming
 	GROUP BY s.plan_handle ORDER BY SUM(s.total_logical_reads + s.total_logical_writes) DESC
-		
+	)TT	
 	-- Most write IO consuming
 	--GROUP BY s.plan_handle ORDER BY SUM(s.total_logical_writes) DESC
 		
 	-- Most CLR consuming
 	--WHERE s.total_clr_time > 0 GROUP BY s.plan_handle ORDER BY SUM(s.total_clr_time) DESC
-)
-SELECT
-	TMP.*,
-	st.text AS [Query],
-	qp.query_plan AS [Plan],qp.dbid
-FROM
-	TMP
-OUTER APPLY
-	sys.dm_exec_query_plan(TMP.[Plan Handle]) AS qp
-OUTER APPLY
-	sys.dm_exec_sql_text(TMP.[Plan Handle]) AS st
-
-
-	
- select 'worst CPU'
- 
-;WITH TMP AS
-(
-	SELECT TOP 10
+UNION ALL
+ SELECT * FROM (
+	SELECT TOP 10 'worst CPU' [Category],
 		CAST(SUM(s.total_elapsed_time) / 1000000.0 AS DECIMAL(20, 2)) AS [Total Elapsed Time in S],
 		SUM(s.execution_count) AS [Total Execution Count],
 		CAST(SUM(s.total_worker_time) / 1000000.0 AS DECIMAL(20, 2)) AS [Total CPU Time in S],
@@ -85,7 +97,7 @@ OUTER APPLY
 		
 	-- Most CPU consuming
 	GROUP BY s.plan_handle ORDER BY SUM(s.total_worker_time) DESC
-		
+	) T	
 	-- Most read+write IO consuming
 	--GROUP BY s.plan_handle ORDER BY SUM(s.total_logical_reads + s.total_logical_writes) DESC
 		
@@ -94,18 +106,13 @@ OUTER APPLY
 		
 	-- Most CLR consuming
 	--WHERE s.total_clr_time > 0 GROUP BY s.plan_handle ORDER BY SUM(s.total_clr_time) DESC
-)
-SELECT
-	TMP.*,
-	st.text AS [Query],
-	qp.query_plan AS [Plan],qp.dbid
-FROM
+	)
 	TMP
 OUTER APPLY
 	sys.dm_exec_query_plan(TMP.[Plan Handle]) AS qp
 OUTER APPLY
 	sys.dm_exec_sql_text(TMP.[Plan Handle]) AS st
-
+ORDER BY Category, [Total Logical Reads] DESC
 	--blocked tasks
 
 	select 'current blocks'
