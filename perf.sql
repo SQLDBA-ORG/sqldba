@@ -163,7 +163,7 @@ where db_name(database_id) = DB_NAME()
 insert into @blockinghistory
 EXEC sp_MSforeachdb @command 
 
-if exists(select 1 from @blockinghistory where BlocksCount>10) or @showall=1
+if exists(select 1 from @blockinghistory where BlocksCount>10) 
 begin
 	select 'Blocking History'
 

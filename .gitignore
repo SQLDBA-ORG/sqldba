@@ -6,3 +6,5 @@
 .vs/sqldba/FileContentIndex/d5e5061a-dd70-4bde-b3ed-4bcbd62123ce.vsidx
 .vs/sqldba/FileContentIndex/038015a4-2748-4daf-a78d-85ea2cdd7e80.vsidx
 .vs/slnx.sqlite
+.vs/slnx.sqlite
+*.sqlite
