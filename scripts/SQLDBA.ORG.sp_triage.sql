@@ -1,6 +1,8 @@
 /* بسم الله الرحمن الرحيم  */
 /* In the name of God, the Merciful, the Compassionate */
-
+IF OBJECT_ID('dbo.[sp_triage®]') IS NULL
+  EXEC ('CREATE PROCEDURE dbo.[sp_triage®] AS RETURN 0;');
+GO
 ALTER PROCEDURE [dbo].[sp_triage®]  --@Debug = 0]
 --DECLARE
 /* 
