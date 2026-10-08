@@ -169,32 +169,14 @@ END CATCH
 
 
 DECLARE @dynamicSQL [NVARCHAR] (4000)
-/*Check and Set xp_cmdshell*/
+/*Check xp_cmdshell. This script never changes server configuration: it does not switch xp_cmdshell on.
+  The checks that need it (SPNs, disk cluster size) run only when it is already enabled.*/
 DECLARE @StateOfXP_CMDSHELL INT
-SELECT @StateOfXP_CMDSHELL = CONVERT(INT, ISNULL(value, value_in_use)) 
+SELECT @StateOfXP_CMDSHELL = CONVERT(INT, ISNULL(value_in_use, value))
 FROM  [sys].configurations
 WHERE  name = 'xp_cmdshell' ;
-
-SET @dynamicSQL = '
-BEGIN
-	-- To allow advanced options to be changed.
-	EXEC sp_configure ''show advanced options'', 1
-	-- To update the currently configured value for advanced options.
-	RECONFIGURE
-	-- To enable the feature.
-	EXEC sp_configure ''xp_cmdshell'', 1
-	-- To update the currently configured value for this feature.
-	RECONFIGURE
-END'
-IF @StateOfXP_CMDSHELL = 0 
-BEGIN TRY
-	EXEC sp_executesql @dynamicSQL 
-END TRY
-BEGIN CATCH
-	SELECT @errMessage  = ERROR_MESSAGE()
-		RAISERROR (@errMessage,0,1) WITH NOWAIT;
-	PRINT 'Failed to reconfigure, likely Azure'
-END CATCH
+IF @StateOfXP_CMDSHELL = 0
+	RAISERROR (N'xp_cmdshell is disabled. sp_triage does not enable it, so the SPN and disk cluster size checks are skipped.',0,1) WITH NOWAIT;
 
 /*
 IF 'DoTrace' = '1' 
@@ -3250,6 +3232,7 @@ BEGIN
 		INSERT @syscountertable
 		EXEC xp_cmdshell @powershellrun
 END
+	IF @StateOfXP_CMDSHELL = 1
 	BEGIN TRY
 		/*While we are on the topic of xm_cmdshell, check the SPNs as well*/
 		DECLARE @spnCheckCmd [NVARCHAR] (4000);
@@ -3308,6 +3291,19 @@ IF @Debug = 1
 			, 'No SPNs registered';
 		END
 
+
+	END TRY
+	BEGIN CATCH
+IF @Debug = 1
+	BEGIN
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTime = GETDATE();
+		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
+			RAISERROR (N'Error: xp_cmdshell DISABLED',0,1) WITH NOWAIT; 
+		END
+	END CATCH
+
+	/*SPNs the error log reports. Needs no xp_cmdshell*/
 		INSERT #output_sqldba_org_sp_triage 
 		(
 			SectionID
@@ -3321,18 +3317,6 @@ IF @Debug = 1
 		FROM @xp_errorlog
 		WHERE [Text] 
 		LIKE '%(SPN)%';
-
-
-	END TRY
-	BEGIN CATCH
-IF @Debug = 1
-	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
-		SET @DebugTime = GETDATE();
-		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
-			RAISERROR (N'Error: xp_cmdshell DISABLED',0,1) WITH NOWAIT; 
-		END
-	END CATCH
 
 	DECLARE @sqlnamedinstance sysname;
 	DECLARE @networkname sysname;
@@ -9083,6 +9067,7 @@ IF CHARINDEX ('\', @svrName) > 0
 BEGIN
        SET @svrName = SUBSTRING(@svrName, 1, CHARINDEX('\',@svrName)-1)
 END
+IF @StateOfXP_CMDSHELL = 1
 BEGIN TRY
 	SET @powershellrun = 'powershell.exe -c "Get-WmiObject -ComputerName ' + QUOTENAME(@svrName,'''') + ' -Class Win32_Volume -Filter ''DriveType = 3'' | select Name, BlockSize | format-table"'
 	INSERT INTO @volumeinfo
@@ -10899,26 +10884,6 @@ END
 		RAISERROR (N'Failed to clean old records in output table',0,1) WITH NOWAIT;
 	END CATCH
 
-SET @dynamicSQL = '
-BEGIN
-	-- To allow advanced options to be changed.
-	EXEC sp_configure ''show advanced options'', 0
-	-- To update the currently configured value for advanced options.
-	RECONFIGURE
-	-- To enable the feature.
-	EXEC sp_configure ''xp_cmdshell'', 0
-	-- To update the currently configured value for this feature.
-	RECONFIGURE
-END'
-IF @StateOfXP_CMDSHELL = 0 
-BEGIN TRY
-	EXEC sp_executesql @dynamicSQL 
-END TRY
-BEGIN CATCH
-	SELECT @errMessage  = ERROR_MESSAGE()
-		RAISERROR (@errMessage,0,1) WITH NOWAIT;
-	PRINT 'Failed to reconfigure, likely Azure'
-END CATCH
 
 
 
