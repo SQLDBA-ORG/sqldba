@@ -568,6 +568,8 @@ BEGIN
 	DECLARE @Kb FLOAT;
 	DECLARE @PageSize FLOAT;
 	DECLARE @VLFcount INT;
+	DECLARE @ReadSkippedMsg [NVARCHAR] (2000); /* per-database read failures, reported at severity 0 (2026-10-09) */
+	DECLARE @LogInfoInsert [NVARCHAR] (1000);
 	DECLARE @starttime DATETIME;
 	DECLARE @ErrorSeverity int;
 	DECLARE @ErrorState int;
@@ -5115,15 +5117,22 @@ BEGIN
 			databasename 
 			FROM @DatabasesForLOG
 		)  
-        SET @query = 'dbcc loginfo (' + '''' + @dbname + ''') ' ; 
-		
-		IF @IsSQLAzure = 0
-		BEGIN
-			INSERT into @dbccloginfo  
-			exec (@query)  ;
-		END
+        /* Quote-safe literal; a failed read leaves @vlfs NULL (never 0 or @@ROWCOUNT) and the run continues (2026-10-09). */
+        SET @query = N'dbcc loginfo (N''' + REPLACE(@dbname, N'''', N'''''') + N''') ' ;
+		SET @vlfs = NULL;
   
-        SET @vlfs = @@rowcount ; 
+		IF @IsSQLAzure = 0 AND HAS_DBACCESS(@dbname) = 1
+		BEGIN
+			BEGIN TRY
+				INSERT into @dbccloginfo
+				exec (@query)  ;
+				SET @vlfs = @@rowcount ;
+			END TRY
+			BEGIN CATCH
+				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @dbname + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
+			END CATCH
+		END
   
         INSERT @vlfcounts  
         values(@dbname, @vlfs) ; 
@@ -5164,15 +5173,22 @@ BEGIN
 			databasename 
 			FROM @DatabasesForLOG
 		)  
-        SET @query = 'dbcc loginfo (' + '''' + @dbname + ''') '  ;
-
-		IF @IsSQLAzure = 0
-		BEGIN
-			INSERT into @dbccloginfo2012  
-			exec (@query) ; 
-		END
+        /* Quote-safe literal; a failed read leaves @vlfs NULL (never 0 or @@ROWCOUNT) and the run continues (2026-10-09). */
+        SET @query = N'dbcc loginfo (N''' + REPLACE(@dbname, N'''', N'''''') + N''') '  ;
+		SET @vlfs = NULL;
   
-        SET @vlfs = @@rowcount  ;
+		IF @IsSQLAzure = 0 AND HAS_DBACCESS(@dbname) = 1
+		BEGIN
+			BEGIN TRY
+				INSERT into @dbccloginfo2012
+				exec (@query) ;
+				SET @vlfs = @@rowcount  ;
+			END TRY
+			BEGIN CATCH
+				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @dbname + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
+			END CATCH
+		END
   
         INSERT @vlfcounts  
         values(@dbname, @vlfs);  
@@ -5288,6 +5304,7 @@ BEGIN
 	END --as LogSizeCommentary1
 	+ CASE 
 		WHEN vlfcount>50 THEN ' .High VLFs' 
+		WHEN vlfcount IS NULL THEN ' .VLF count unavailable' /* read failed or skipped; see the severity-0 message */
 		ELSE ''
 	END --as VLFCommentary 
 	+ CASE 
@@ -5298,7 +5315,7 @@ BEGIN
 
 	---
 	--[vlfcount];[Size_MBs];[log_size_mb];[AvgBackupSizeMB];[MaxBackupSizeMB]
-	, CONVERT([NVARCHAR] (20),v.vlfcount)
+	, ISNULL(CONVERT([NVARCHAR] (20),v.vlfcount), N'?') /* NULL = not read; CONCAT_NULL_YIELDS_NULL would blank the row */
 	 + ';' + CONVERT([NVARCHAR] (20),ds.Size_MBs)
 	 + ';' + CONVERT([NVARCHAR] (20),ds.log_size_mb)
 	 + ';' + CONVERT([NVARCHAR] (20),ls.avgsize)
@@ -5830,6 +5847,11 @@ END
 	SET @Databasei_Count = 1; 
 	WHILE @Databasei_Count <= @Databasei_Max 
 	BEGIN 
+		/* Reset before the SELECT: if this id's DB is offline/recovering (state 2/6) the row is
+		   filtered out and a `SELECT @var = ...` with no matching row leaves the vars holding the
+		   PRIOR iteration's DB, so the DBCC block below would run against the wrong database. */
+		SELECT @DatabaseName = NULL, @DatabaseState = NULL, @AGBackupPref = NULL, @SecondaryReadRole = NULL, @VLFcount = NULL;
+		/* @VLFcount too: a failed loginfo read must leave VLFCount NULL, never 0 or the previous database's count. */
 		SELECT 
 			@DatabaseName = d.databasename
 			, @DatabaseState = d.state 
@@ -5839,39 +5861,60 @@ END
 		WHERE id = @Databasei_Count 
 		AND d.state NOT IN (2,6);
 
-		IF (
-			@SecondaryReadRole <> 'NO' 
-			AND @AGBackupPref <> 'primary'
+		/* Non-AG databases arrive with BackupPref/ReadSecondary NULL (first UNION branch), so the bare <> was UNKNOWN and
+		   this block never ran on a server without an AG: section 11 was empty. ISNULL keeps the AG 'primary' exclusion. */
+		IF @DatabaseName IS NOT NULL
+		AND HAS_DBACCESS(@DatabaseName) = 1
+		AND (
+			ISNULL(@SecondaryReadRole, N'') <> N'NO'
+			AND ISNULL(@AGBackupPref, N'') <> N'primary'
 		) 
-		AND EXISTS( SELECT @DatabaseName)
 		BEGIN
-			SET @dynamicSQL = 'USE [' + @DatabaseName + '];
+			/* Each read is isolated: a failure skips that read for this database only, reported at severity 0.
+			   No ROLLBACK or XACT_STATE test in the CATCH: the proc opens no transaction (checked 2026-10-09). */
+			BEGIN TRY
+				SET @dynamicSQL = N'USE ' + QUOTENAME(@DatabaseName) + N';
 			DBCC showfilestats WITH NO_INFOMSGS;';
 
-			INSERT @FileStats
-			EXEC sp_executesql @dynamicSQL;
+				INSERT @FileStats
+				EXEC sp_executesql @dynamicSQL;
 
-			SET @dynamicSQL = 'USE [' + @DatabaseName + '];
-			SELECT ''' +@DatabaseName + ''', filename, size, ISNULL(FILEGROUP_NAME(groupid),''LOG''), [name] ,maxsize, growth  FROM dbo.sysfiles sf ; ';
-			
-			INSERT @FileSize 
-			EXEC sp_executesql @dynamicSQL;
+				/* Same TRY as showfilestats: a data file with no @FileStats row would take the LOG's SpaceUsedPercent
+				   fallback in section 11 (a wrong Used % graded Good; found 2026-10-09). If either read fails,
+				   the database is left out of section 11 and the message below names it. */
+				SET @dynamicSQL = N'USE ' + QUOTENAME(@DatabaseName) + N';
+			SELECT N''' + REPLACE(@DatabaseName, N'''', N'''''') + N''', filename, size, ISNULL(FILEGROUP_NAME(groupid),''LOG''), [name] ,maxsize, growth  FROM dbo.sysfiles sf ; ';
 
-			SET @dynamicSQL = 'USE [' + @DatabaseName + '];
+				INSERT @FileSize
+				EXEC sp_executesql @dynamicSQL;
+			END TRY
+			BEGIN CATCH
+				SET @ReadSkippedMsg = N'sp_triage: file reads (DBCC showfilestats, sysfiles) skipped for [' + @DatabaseName + N'], left out of section 11: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
+			END CATCH
+
+			SET @dynamicSQL = N'USE ' + QUOTENAME(@DatabaseName) + N';
 			DBCC loginfo WITH NO_INFOMSGS;';
 
 			IF @IsSQLAzure = 0
 			BEGIN
-				SET IDENTITY_INSERT #output_sqldba_org_sp_triage_dbccloginfo ON;
+				/* No SET IDENTITY_INSERT: the id column is not IDENTITY, so it raised Msg 8106 and aborted the run on any AG
+				   server. Explicit column list (DBCC gives 8 columns, 7 before
+				   SQL 2012; the table also has id), built dynamically so pre-2012 never compiles a RecoveryUnitId reference. */
+				SET @LogInfoInsert = N'INSERT #output_sqldba_org_sp_triage_dbccloginfo ('
+					+ CASE WHEN @SQLVersion >= 11 THEN N'[RecoveryUnitId], ' ELSE N'' END
+					+ N'[fileid], [file_size], [start_offset], [fseqno], [status], [parity], [create_lsn]) EXEC sp_executesql @LogInfoSQL;';
+				BEGIN TRY
+					EXEC sp_executesql @LogInfoInsert, N'@LogInfoSQL [NVARCHAR] (4000)', @LogInfoSQL = @dynamicSQL;
 
-				INSERT #output_sqldba_org_sp_triage_dbccloginfo
-				EXEC sp_executesql @dynamicSQL;
-
-				SET IDENTITY_INSERT #output_sqldba_org_sp_triage_dbccloginfo OFF;
+					SELECT @VLFcount = COUNT(*)
+					FROM #output_sqldba_org_sp_triage_dbccloginfo ;
+				END TRY
+				BEGIN CATCH
+					SET @ReadSkippedMsg = N'sp_triage: VLF count (DBCC loginfo) skipped for [' + @DatabaseName + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+					RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
+				END CATCH
 			END
-
-			SELECT @VLFcount = COUNT(*) 
-			FROM #output_sqldba_org_sp_triage_dbccloginfo ;
 
 			DELETE 
 			FROM #output_sqldba_org_sp_triage_dbccloginfo;
@@ -5922,7 +5965,7 @@ END
 		UPPER(DriveLetter)
 		+ ' FG:'
 		+ FileGroupName 
-		+ CASE WHEN FileGroupName = 'LOG' THEN '(' + CONVERT([VARCHAR](20),VLFCount) + 'vlfs)' ELSE '' END
+		+ CASE WHEN FileGroupName = 'LOG' THEN '(' + ISNULL(CONVERT([VARCHAR](20),VLFCount),'?') + 'vlfs)' ELSE '' END /* '?' = not read */
 		--, LogicalName  
 		+ '; MAX:'
 		+ CONVERT([VARCHAR](20),maxsize)
