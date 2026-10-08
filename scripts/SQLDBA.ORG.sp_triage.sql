@@ -2742,20 +2742,23 @@ BEGIN TRY
 		+ '; Wait Duraion: ' + CONVERT([VARCHAR](25), ISNULL(wait_duration_ms,''))
 		+ '; Blocking SPID: ' + CONVERT([VARCHAR](20), ISNULL(blocking_session_id,''))
 		+ '; Description: ' + CONVERT([VARCHAR](200), ISNULL(resource_description,''))
+		/* tempdb allocation pages (fixed 2026-10-08). Page 1 or a positive multiple of 8088 is PFS;
+		   page 2 or a positive multiple of 511232 is GAM; page 3 or a positive multiple of 511232 plus 1 is SGAM; page 0 is the
+		   file header, which both modulo terms would match, so p.pg > 0 comes first. Until 2026-10-08 this read
+		   "<page> - 1 % 8088 = 0", which T-SQL parses as "<page> - (1 % 8088) = 0": pages 1, 2 and 3 only. */
 		, Case
-                 WHEN Cast(Right(resource_description, Len(resource_description) - Charindex(':', resource_description, 3)) As Int) - 1 % 8088 = 0 Then @Result_Warning
-                                     WHEN Cast(Right(resource_description, Len(resource_description) - Charindex(':', resource_description, 3)) As Int) - 2 % 511232 = 0 Then @Result_Warning
-                                     WHEN Cast(Right(resource_description, Len(resource_description) - Charindex(':', resource_description, 3)) As Int) - 3 % 511232 = 0 Then @Result_Warning
-                                     ELSE @Result_Good
-                                     End 
+			WHEN p.pg > 0 AND (p.pg = 1 OR p.pg % 8088 = 0 OR p.pg = 2 OR p.pg % 511232 = 0 OR p.pg = 3 OR p.pg % 511232 = 1) Then @Result_Warning
+			ELSE @Result_Good
+			End 
 		, CONVERT([VARCHAR](200), Case
-		WHEN Cast(Right(resource_description, Len(resource_description) - Charindex(':', resource_description, 3)) As Int) - 1 % 8088 = 0 Then 'Is PFS Page'
-					WHEN Cast(Right(resource_description, Len(resource_description) - Charindex(':', resource_description, 3)) As Int) - 2 % 511232 = 0 Then 'Is GAM Page'
-					WHEN Cast(Right(resource_description, Len(resource_description) - Charindex(':', resource_description, 3)) As Int) - 3 % 511232 = 0 Then 'Is SGAM Page'
-					ELSE 'Is Not PFS, GAM, or SGAM page'
-					End
-				)
+			WHEN p.pg > 0 AND (p.pg = 1 OR p.pg % 8088 = 0) Then 'Is PFS Page'
+			WHEN p.pg > 0 AND (p.pg = 2 OR p.pg % 511232 = 0) Then 'Is GAM Page'
+			WHEN p.pg > 0 AND (p.pg = 3 OR p.pg % 511232 = 1) Then 'Is SGAM Page'
+			ELSE 'Is Not PFS, GAM, or SGAM page'
+			End
+		)
 		FROM [sys].dm_os_waiting_tasks
+		CROSS APPLY (SELECT Cast(Right(resource_description, Len(resource_description) - Charindex(':', resource_description, 3)) As Int) AS pg) AS p
 		WHERE wait_type LIKE 'PAGE%LATCH_%'
 		AND resource_description LIKE '2:%';
 
