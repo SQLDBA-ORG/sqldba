@@ -1,13 +1,16 @@
 /* بسم الله الرحمن الرحيم  */
 /* In the name of God, the Merciful, the Compassionate */
-IF OBJECT_ID('dbo.[sp_triage®]') IS NULL
+IF OBJECT_ID('dbo.sp_triage®') IS NULL
   EXEC ('CREATE PROCEDURE dbo.[sp_triage®] AS RETURN 0;');
 GO
+
 ALTER PROCEDURE [dbo].[sp_triage®]  --@Debug = 0]
 --DECLARE
 /* 
 WANT [sp_triage®]?
 https://github.com/SQLDBA-ORG/sqldba/
+
+Minimum version: SQL Server 2008. The script parses as SQL Server 2008 T-SQL and runs on SQL Server 2017 and 2022. A step that needs a newer version shows in the Could not run section with its reason.
 
 Sample command:
 	EXEC  [dbo].[sp_triage®]  @MailResults = 1
@@ -20,7 +23,7 @@ RAISERROR (NCHAR(65021),0,1) WITH NOWAIT;
 --Clean up
 DROP PROCEDURE [master].[dbo].[sp_triage®]
 
-*/
+*/ 
  /*@TopQueries. How many queries need to be looked at, TOP xx*/
   @TopQueries [INT]  = 500 
 /*@FTECost. Average price in $$$ that you pay someone at your company every year.*/
@@ -33,10 +36,23 @@ DROP PROCEDURE [master].[dbo].[sp_triage®]
 /*@ShowMigrationRelatedOutputs. WHEN you need to show migration stuff, like possible breaking connections and DMA script outputs, set to 1 to show information*/
 , @ShowMigrationRelatedOutputs [INT] = 1 
 , @SkipHeaps [INT] = 0 /*Set to 1 to Skip Heap Table Checks. These can be intensive*/
+/* @EnableXpCmdShell. 0 (default) = no host command runs, even on a server where xp_cmdshell is ALREADY on:
+   the script calls no sp_configure and no xp_cmdshell, and the one host-probe section (SPN registration
+   via setspn) reports "skipped: opt-in (@EnableXpCmdShell = 1 runs setspn)".
+   1 (opt-in) = if xp_cmdshell is OFF, switch xp_cmdshell (and show advanced options, if that is off
+   too) on for this run, and put BOTH settings back when the run reaches its end. A timeout, a cancel
+   or a KILL leaves both on, because a script cannot run code after an attention; SQLTriage's own
+   restore covers runs started from SQLTriage. If the switch-on fails, the SPN section reports
+   "skipped: xp_cmdshell could not be enabled". Default changed 1 -> 0 on 2026-10-10; with 0 the probe
+   stopped running on already-on servers on 2026-10-16. */
+, @EnableXpCmdShell BIT = 0
 
-/*Email results*/
+/* DEPRECATED 2026-07-02: mail delivery was removed (client-PII egress + EXECUTE AS 'sa'; see the
+   REMOVED note near the housekeeping section). These two params are RETAINED as no-ops purely so
+   existing callers that still pass @MailResults / @EmailRecipients don't fail with a parameter
+   error; they do nothing. Remove them once no caller references them. */
 , @MailResults BIT = 0
-, @EmailRecipients [NVARCHAR] (500) ='scriptoutput@sqldba.org'
+, @EmailRecipients [NVARCHAR] (500) = NULL
  /*Screen / Table*/
 , @Export [NVARCHAR] (10) = 'TABLE'
 , @ShowOnScreenWhenResultsToTable [INT] = 1 
@@ -44,13 +60,15 @@ DROP PROCEDURE [master].[dbo].[sp_triage®]
 , @ExportSchema [NVARCHAR] (25)  = 'dbo'
 , @ExportDBName  [NVARCHAR] (20) = 'master'
 , @ExportTableName [NVARCHAR] (55) = 'sqldba_sp_triage®_output'
-, @ExportCleanupDays [INT] = 180
+, @ExportCleanupDays [INT] = 180 /*TABLE runs only: export rows older than the SMALLER of @ExportCleanupDays and @CleanupTime (days) are deleted; NULL on both, or a negative value, = keep everything. ONE delete, inside the @Export = TABLE block (2026-10-16); a SCREEN run deletes nothing.*/
 /* @PrintMatrixHeader. Added to turn it off since some control chars coming through stopping a copy/paste from the messages window in SSMS */
 , @PrintMatrixHeader [INT] = 1
-, @Debug BIT =1 /*0 is off, 1 is on, no internal raiserror will be shown*/
+, @Debug BIT =0 /*0 is off, 1 is on. Default OFF so a client-facing run is quiet; set 1 for internal step/error RAISERROR trace*/
 , @ShowDebugTime BIT =0 /*0 is off, 1 is on, shows execution times*/
-, @CleanupTime [INT] = 180 /*If output goes to a table then clean up records older than this many days*/
-WITH RECOMPILE, ENCRYPTION
+, @CleanupTime [INT] = 180 /*TABLE runs only: export rows older than the SMALLER of @CleanupTime and @ExportCleanupDays (days) are deleted; NULL on both, or a negative value, = keep everything. Both parameters are kept so positional callers do not shift; ONE delete reads them (2026-10-16).*/
+, @BufferScanMaxGB [INT] = 64 /*Per-DB buffer-pool residency (sys.dm_os_buffer_descriptors) is only scanned when the pool holds at most this many GB of data pages - the scan takes minutes on big-memory servers. NULL or 0 = always skip; section 14 and the usage-likelihood section then report 0 buffer pages. Appended after @CleanupTime on purpose - legacy positional callers passing through @CleanupTime must not shift.*/
+, @PerfCounterSampleSeconds [INT] = 10 /*Length of the in-run performance-counter sample behind section 121 (right now): two readings this many seconds apart. 0 or NULL = off (section 121 says so); clamped to 1..300. Every run that samples takes this much longer. Appended LAST on purpose - positional callers must not shift (2026-10-21; the 10 s default is a ruling).*/
+WITH RECOMPILE/*, ENCRYPTION*/
 AS
 BEGIN
 	SET NOCOUNT ON;
@@ -62,10 +80,60 @@ BEGIN
 	SET QUOTED_IDENTIFIER ON;
 	SET STATISTICS IO OFF;
 	SET STATISTICS TIME OFF;
-	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; 
+	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	/* 2026-10-16: no step waits on a lock longer than 5000 ms. A step that times out raises 1222
+	   inside its TRY and records its Could not run row. LOCK_TIMEOUT bounds lock waits only (not scans, latches, xp
+	   calls or DBCC). Both settings revert when the procedure returns; they are reset before the export-table block.
+	   A constant, not a parameter: SET LOCK_TIMEOUT takes no variable (Msg 102, PROVED on OLD2017 2026-10-16). */
+	SET LOCK_TIMEOUT 5000;
+	SET DEADLOCK_PRIORITY LOW;
+
+	/* Invariant 2 (2026-10-16): every step either emits its rows or records ONE skip here. The FIRST
+	   statement of every BEGIN CATCH before the output fix-up is
+	     INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'<step>', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	   and ONE INSERT near the end turns these rows into "Could not run" output rows (Severity 8).
+	   Created before the first TRY. */
+	CREATE TABLE #sp_triage_skipped
+	(
+		Seq INT IDENTITY(1,1)
+		, Step [NVARCHAR] (400)
+		, ErrorNumber INT
+		, ErrorMessage [NVARCHAR] (4000)
+	);
+
+	/* Invariant 3 (2026-10-20): NO DATABASE STATE MAKES sp_triage ABORT.
+	   OFFLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT, EMERGENCY, SINGLE_USER or RESTRICTED_USER: a step that
+	   cannot read a database leaves it out and the run goes on to the output. Every statement that OPENS a database
+	   other than the current one takes its databases from the ONE guard below:
+	     #sp_triage_readable_db   online (state 0), MULTI_USER, HAS_DBACCESS, and not an AG secondary that refuses
+	                              connections. Per-database loops (@Databases, @DatabasesForLOG, @cc_list) are filled from it.
+	     #sp_triage_readable_plan the captured plan handles whose plan dbid is in that list (or the resource database),
+	                              filled once after the query-stats capture. Every dm_exec_query_plan / dm_exec_sql_text /
+	                              dm_exec_text_query_plan reads only these handles, and sits inside a TRY whose CATCH
+	                              records the skip (a plan that names an unreadable database from another one still fails
+	                              only its own step).
+	   Reading the ROWS of sys.databases / sys.master_files is not opening a database and stays legal: 3001 must still see an
+	   offline database to report it. */
+	CREATE TABLE #sp_triage_readable_db (database_id INT NOT NULL PRIMARY KEY, name SYSNAME NOT NULL);
+	CREATE TABLE #sp_triage_readable_plan (plan_handle VARBINARY(64) NOT NULL PRIMARY KEY);
+	BEGIN TRY
+		INSERT #sp_triage_readable_db (database_id, name)
+		SELECT d.database_id, d.name
+		FROM sys.databases AS d
+		WHERE CASE WHEN d.state = 0 AND d.user_access = 0 THEN ISNULL(HAS_DBACCESS(d.name), 0) ELSE 0 END = 1;
+		IF CONVERT(INT, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0)) = 1
+			EXEC sp_executesql N'DELETE r FROM #sp_triage_readable_db AS r
+				WHERE EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states AS rs
+					INNER JOIN sys.availability_replicas AS rep ON rep.replica_id = rs.replica_id
+					WHERE rs.database_id = r.database_id AND ISNULL(rs.is_local, 0) = 1
+					AND ISNULL(rs.is_primary_replica, 1) = 0 AND ISNULL(rep.secondary_role_allow_connections, 1) = 0);';
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Readable database list', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	END CATCH
 
 	DECLARE @MagicVersion [NVARCHAR] (25)
-	SET @MagicVersion = '05/06/2025' /*DD/MM/YYYY*/
+	SET @MagicVersion = '22/10/2026' /*DD/MM/YYYY*/
 	DECLARE @License [NVARCHAR] (4000)
 	SET @License = '----------------
 	GNU GENERAL PUBLIC LICENSE
@@ -114,24 +182,25 @@ BEGIN
 */
 
 
-/*Check that all schema related objects are escaped with brackets [ ] */
+/*Escape the export schema, database and table names with QUOTENAME (a ] inside a name is doubled) unless the caller passed them already bracketed.*/
 IF(LEFT(@ExportSchema,1) <> '[')
 	BEGIN
-		SET @ExportSchema = '[' + @ExportSchema + ']'
+		SET @ExportSchema = QUOTENAME(@ExportSchema)
 	END
 IF(LEFT(@ExportDBName,1) <> '[')
 	BEGIN
-		SET @ExportDBName = '[' + @ExportDBName + ']'
+		SET @ExportDBName = QUOTENAME(@ExportDBName)
 	END
 IF(LEFT(@ExportTableName,1) <> '[')
 	BEGIN
-		SET @ExportTableName = '[' + @ExportTableName + ']'
+		SET @ExportTableName = QUOTENAME(@ExportTableName)
 	END
 
 /*Before anything, start a trace and get some information.*/
 DECLARE @IsSQLAzure BIT
 DECLARE @IsSQLMI BIT
 SET @IsSQLAzure = 0
+SET @IsSQLMI = 0   /* init (was left NULL; only SET=1 on EngineEdition 8) so BIT comparisons aren't 3-valued */
 IF (SELECT ServerProperty('EngineEdition')) = 5 
 	SET @IsSQLAzure = 1
 IF (SELECT ServerProperty('EngineEdition')) = 8
@@ -157,10 +226,11 @@ BEGIN TRY
 		SELECT @ThisServer = REPLACE(@@SERVERNAME,'','')
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server name lookup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 1
   BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -169,269 +239,67 @@ END CATCH
 
 
 DECLARE @dynamicSQL [NVARCHAR] (4000)
-/*Check xp_cmdshell. This script never changes server configuration: it does not switch xp_cmdshell on.
-  The checks that need it (SPNs, disk cluster size) run only when it is already enabled.*/
+/*Check and Set xp_cmdshell
+  @StateOfXP_CMDSHELL   = the CURRENT effective state of xp_cmdshell (read here, raised by the opt-in below).
+  @HostProbesAllowed    = the ONE gate every host command tests (IF @HostProbesAllowed = 1), set below.
+  @XpCmdShellWasOff     = remembers whether WE turned it on, so we can restore it to OFF at the end.
+                          Fixes the old mutation bug: the script no longer leaves xp_cmdshell enabled
+                          on a server where it started disabled. */
 DECLARE @StateOfXP_CMDSHELL INT
-SELECT @StateOfXP_CMDSHELL = CONVERT(INT, ISNULL(value_in_use, value))
+DECLARE @XpCmdShellWasOff BIT = 0
+DECLARE @AdvancedOptionsWasOff BIT = 0  /* 1 = THIS run switched show advanced options on; undo it at the end */
+SELECT @StateOfXP_CMDSHELL = CONVERT(INT, ISNULL(value, value_in_use))
 FROM  [sys].configurations
 WHERE  name = 'xp_cmdshell' ;
+
 IF @StateOfXP_CMDSHELL = 0
-	RAISERROR (N'xp_cmdshell is disabled. sp_triage does not enable it, so the SPN and disk cluster size checks are skipped.',0,1) WITH NOWAIT;
-
-/*
-IF 'DoTrace' = '1' 
 BEGIN
-	DECLARE @tcid [INT]  
-	DECLARE @format_datetime [VARCHAR](50)  
-	DECLARE @file [NVARCHAR] (500)  
-	DECLARE @file2 [NVARCHAR] (500)  
-	DECLARE @cmd [NVARCHAR] (4000)  
-	DECLARE @cmd2 [NVARCHAR] (4000)  
-	DECLARE @file_path [NVARCHAR] (500)  
-	DECLARE @catchout [NVARCHAR] (250)
-	SET NOCOUNT ON
-
-	DECLARE @file_list TABLE  
-		(  
-		fl_name [VARCHAR](500)  
-		)  
-
-	SET @ThisServer = REPLACE(@@servername, '\', '_')
-	/*Create folder for output*/
-	SET @file_path = 'C:\Temp'
-	SELECT @cmd2 = 'mkdir "' + @file_path + '"'  
-	EXEC xp_cmdshell @cmd2   ,no_output
-	SET @cmd2 = 'EXEC xp_cmdshell ''dir "' + @file_path + '" /b /s''' 
-
-	SET @format_datetime = CONVERT([VARCHAR](10), GETDATE(), 112)  + REPLACE(CONVERT([VARCHAR](10), GETDATE(), 108), ':', '')  
-	SET @file = @file_path + '\sqldba_sp_triage®_trace_' + @ThisServer 
- 
-  
-	/*Check for existing traces that match the name*/
-	IF EXISTS ( SELECT *  FROM  [sys].traces  WHERE path LIKE '%sqldba_sp_triage®_trace%' )  
-		BEGIN  
-			SELECT @tcid = id  FROM  [sys].traces  WHERE path LIKE '%sqldba_sp_triage®_trace%'  
-			RAISERROR (N'Found existing trace. Stop and disable trace',0,1) WITH NOWAIT; 
-			EXEC sp_trace_setstatus @tcid, 0  
-			EXEC sp_trace_setstatus @tcid, 2  
-        
-			RAISERROR (N'Rename existing trace file. Could remove, but let us just keep it around',0,1) WITH NOWAIT;
-			SET @file2 = 'SQLDBA_TRC_' + @ThisServer+ '_' + @format_datetime + '.trc'  
-			SELECT @cmd = 'RENAME ' + @file + '.trc' + ' ' + @file2 
-			EXEC xp_cmdshell @cmd  ,no_output
-		END  
-  
- 
-
-
-	INSERT INTO @file_list  
-	EXEC  (@cmd2) 
-
-	-- This condition was added to see if a trace was abrutply stopped  
-	IF EXISTS ( SELECT 1 FROM  @file_list WHERE fl_name = @file + '.trc' )  
-		BEGIN  
-			RAISERROR (N'Rename existing trace file. Could remove, but let us just keep it around',0,1) WITH NOWAIT;
-			SET @file2 = 'SQLDBA_TRC_' + @ThisServer  + '_' + @format_datetime + '.trc'  
-			SELECT @cmd = 'RENAME ' + @file + '.trc' + ' ' + @file2  
-			EXEC xp_cmdshell @cmd  ,no_output
-		END  
-	ELSE 
-		BEGIN
-			RAISERROR (N'Could not find any running trace. No file changes made.',0,1) WITH NOWAIT;
-		END
-
-
+	IF @EnableXpCmdShell = 1
 	BEGIN
-		/*Create the next trace*/
-		DECLARE @rc [INT]  
-		DECLARE @TraceID [INT]  
-		DECLARE @maxfilesize [BIGINT]  
-		DECLARE @tracefile [NVARCHAR] (255) 
-
-		SET @tracefile=@file 
-		SET @maxfilesize = 3  /*MB*/
-  
-		EXEC @rc = sp_trace_create @TraceID OUTPUT, 2, @tracefile , @maxfilesize, NULL  
-		IF (@rc != 0) GOTO ERROR  
-  
-
-		DECLARE @on BIT
-		SET @on = 1
-		EXEC sp_trace_setevent @TraceID, 10, 1, @on
-		EXEC sp_trace_setevent @TraceID, 10, 9, @on
-		EXEC sp_trace_setevent @TraceID, 10, 66, @on
-		EXEC sp_trace_setevent @TraceID, 10, 10, @on
-		EXEC sp_trace_setevent @TraceID, 10, 3, @on
-		EXEC sp_trace_setevent @TraceID, 10, 4, @on
-		EXEC sp_trace_setevent @TraceID, 10, 6, @on
-		EXEC sp_trace_setevent @TraceID, 10, 7, @on
-		EXEC sp_trace_setevent @TraceID, 10, 8, @on
-		EXEC sp_trace_setevent @TraceID, 10, 11, @on
-		EXEC sp_trace_setevent @TraceID, 10, 12, @on
-		EXEC sp_trace_setevent @TraceID, 10, 13, @on
-		EXEC sp_trace_setevent @TraceID, 10, 14, @on
-		EXEC sp_trace_setevent @TraceID, 10, 15, @on
-		EXEC sp_trace_setevent @TraceID, 10, 16, @on
-		EXEC sp_trace_setevent @TraceID, 10, 17, @on
-		EXEC sp_trace_setevent @TraceID, 10, 18, @on
-		EXEC sp_trace_setevent @TraceID, 10, 25, @on
-		EXEC sp_trace_setevent @TraceID, 10, 26, @on
-		EXEC sp_trace_setevent @TraceID, 10, 31, @on
-		EXEC sp_trace_setevent @TraceID, 10, 34, @on
-		EXEC sp_trace_setevent @TraceID, 10, 35, @on
-		EXEC sp_trace_setevent @TraceID, 10, 41, @on
-		EXEC sp_trace_setevent @TraceID, 10, 48, @on
-		EXEC sp_trace_setevent @TraceID, 10, 49, @on
-		EXEC sp_trace_setevent @TraceID, 10, 50, @on
-		EXEC sp_trace_setevent @TraceID, 10, 51, @on
-		EXEC sp_trace_setevent @TraceID, 10, 60, @on
-		EXEC sp_trace_setevent @TraceID, 10, 64, @on
-		EXEC sp_trace_setevent @TraceID, 41, 1, @on
-		EXEC sp_trace_setevent @TraceID, 41, 9, @on
-		EXEC sp_trace_setevent @TraceID, 41, 3, @on
-		EXEC sp_trace_setevent @TraceID, 41, 4, @on
-		EXEC sp_trace_setevent @TraceID, 41, 6, @on
-		EXEC sp_trace_setevent @TraceID, 41, 7, @on
-		EXEC sp_trace_setevent @TraceID, 41, 8, @on
-		EXEC sp_trace_setevent @TraceID, 41, 10, @on
-		EXEC sp_trace_setevent @TraceID, 41, 11, @on
-		EXEC sp_trace_setevent @TraceID, 41, 12, @on
-		EXEC sp_trace_setevent @TraceID, 41, 13, @on
-		EXEC sp_trace_setevent @TraceID, 41, 14, @on
-		EXEC sp_trace_setevent @TraceID, 41, 15, @on
-		EXEC sp_trace_setevent @TraceID, 41, 16, @on
-		EXEC sp_trace_setevent @TraceID, 41, 17, @on
-		EXEC sp_trace_setevent @TraceID, 41, 18, @on
-		EXEC sp_trace_setevent @TraceID, 41, 25, @on
-		EXEC sp_trace_setevent @TraceID, 41, 26, @on
-		EXEC sp_trace_setevent @TraceID, 41, 35, @on
-		EXEC sp_trace_setevent @TraceID, 41, 41, @on
-		EXEC sp_trace_setevent @TraceID, 41, 48, @on
-		EXEC sp_trace_setevent @TraceID, 41, 49, @on
-		EXEC sp_trace_setevent @TraceID, 41, 50, @on
-		EXEC sp_trace_setevent @TraceID, 41, 51, @on
-		EXEC sp_trace_setevent @TraceID, 41, 60, @on
-		EXEC sp_trace_setevent @TraceID, 41, 64, @on
-		EXEC sp_trace_setevent @TraceID, 41, 66, @on
-
-
-		DECLARE @tracethetrace [INT] 
-		EXEC sp_trace_setfilter @TraceID, 1, 0, 7, N'exec sp_reset_connection'
-		EXEC sp_trace_setfilter @TraceID, 10, 0, 7, N'SQL Server Profiler %'
-		RAISERROR (N'Events and filters set. STARTING TRACE.',0,1) WITH NOWAIT;
-		EXEC @tracethetrace = sp_trace_setstatus @TraceID, 1
-
+		/* Try to enable it just for this run. If we lack ALTER SETTINGS (locked-down / Azure), fail
+		   SAFE: leave @StateOfXP_CMDSHELL = 0 so every host-probe section skips gracefully. */
+		BEGIN TRY
+			IF (SELECT CONVERT(INT, ISNULL(value, value_in_use)) FROM sys.configurations WHERE name = 'show advanced options') = 0
+			BEGIN
+				EXEC sp_configure 'show advanced options', 1;
+				RECONFIGURE;
+				SET @AdvancedOptionsWasOff = 1; /* we changed it; remember to undo at the end */
+			END;
+			EXEC sp_configure 'xp_cmdshell', 1;
+			RECONFIGURE;
+			SET @XpCmdShellWasOff = 1;      /* we changed it; remember to undo at the end */
+			SET @StateOfXP_CMDSHELL = 1;    /* probes may now run */
+			RAISERROR ('xp_cmdshell was OFF; enabled for this run only. xp_cmdshell and show advanced options will be restored to their state before this run at the end.',0,1) WITH NOWAIT;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Enable xp_cmdshell for this run', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @StateOfXP_CMDSHELL = 0;    /* stay skipped */
+			IF @AdvancedOptionsWasOff = 1
+			BEGIN TRY
+				EXEC sp_configure 'show advanced options', 0;
+				RECONFIGURE;
+				SET @AdvancedOptionsWasOff = 0;
+			END TRY
+			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Restore show advanced options after a failed enable', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+				RAISERROR ('WARNING: could not restore show advanced options to 0 - please set it manually.',0,1) WITH NOWAIT;
+			END CATCH
+			RAISERROR ('Could not enable xp_cmdshell (insufficient rights or Azure); host-probe sections will be skipped.',0,1) WITH NOWAIT;
+		END CATCH
 	END
-	GOTO FINISH  
-  
-	ERROR:  
-		SELECT ErrorCode=@rc  
-  
-	FINISH:  
+	ELSE
+	BEGIN
+		RAISERROR ('xp_cmdshell disabled and @EnableXpCmdShell=0; host-probe sections (SPN) will be skipped.',0,1) WITH NOWAIT;
+	END
+END
 
-
-	RAISERROR (N'Waiting for trace to stop.',0,1) WITH NOWAIT;
-	WAITFOR DELAY '00:00:10'
-
-	IF EXISTS ( SELECT 1 FROM  [sys].traces WHERE path LIKE '%sqldba_sp_triage®_trace%' )  
-	BEGIN  
-		SELECT @tcid = id  FROM  [sys].traces  WHERE path LIKE '%sqldba_sp_triage®_trace%'  
-		RAISERROR (N'Delay finished. STOPPING TRACE',0,1) WITH NOWAIT;
-		EXEC @tracethetrace = sp_trace_setstatus @tcid, 0  
-		EXEC @tracethetrace = sp_trace_setstatus @tcid, 2  
-
-		RAISERROR (N'Loading trace file.',0,1) WITH NOWAIT;
-    
-		INSERT INTO @file_list  
-		EXEC (@cmd2)
-  
-		IF EXISTS ( SELECT 1 FROM  @file_list WHERE fl_name = @file + '.trc' )  
-		BEGIN 
-			RAISERROR (N'Loading trace file..',0,1) WITH NOWAIT;
-		END 
-    
-	   -- INSERT INTO dbo.SQLDBA_Audit  
-		SELECT  [TextData]
-		  ,[BinaryData]
-		  ,[DatabaseID]
-		  ,[TransactionID]
-		  ,[LineNumber]
-		  ,[NTUserName]
-		  ,[NTDomainName]
-		  ,[HostName]
-		  ,[ClientProcessID]
-		  ,[ApplicationName]
-		  ,[LoginName]
-		  ,[SPID]
-		  ,[Duration]
-		  ,[StartTime]
-		  ,[EndTime]
-		  ,[Reads]
-		  ,[Writes]
-		  ,[CPU]
-		  ,[Permissions]
-		  ,[Severity]
-		  ,[EventSubClass]
-		  ,[ObjectID]
-		  ,[Success]
-		  ,[IndexID]
-		  ,[IntegerData]
-		  ,[ServerName]
-		  ,[EventClass]
-		  ,[ObjectType]
-		  ,[NestLevel]
-		  ,[State]
-		  ,[Error]
-		  ,[Mode]
-		  ,[Handle]
-		  ,[ObjectName]
-		  ,[DatabaseName]
-		  ,[FileName]
-		  ,[OwnerName]
-		  ,[RoleName]
-		  ,[TargetUserName]
-		  ,[DBUserName]
-		  ,[LoginSid]
-		  ,[TargetLoginName]
-		  ,[TargetLoginSid]
-		  ,[ColumnPermissions]
-		  ,[LinkedServerName]
-		  ,[ProviderName]
-		  ,[MethodName]
-		  ,[RowCounts]
-		  ,[RequestID]
-		  ,[XactSequence]
-		  ,[EventSequence]
-		  ,[[BIGINT]Data1]
-		  ,[[BIGINT]Data2]
-		  ,[GUID]
-		  ,[IntegerData2]
-		  ,[ObjectID2]
-		  ,[Type]
-		  ,[OwnerID]
-		  ,[ParentName]
-		  ,[IsSystem]
-		  ,[Offset]
-		  ,[SourceDatabaseID]
-		  ,[SqlHandle]
-		  ,[SessionLoginName]
-		  ,[PlanHandle]
-		--Not in SQL 2005 mate  ,[GroupID]
-	   -- INTO dbo.SQLDBA_Audit 
-		FROM  FN_TRACE_GETTABLE('' + @file + '.trc', DEFAULT) 
-		RAISERROR (N'Cleaning up.Renaming trace file.',0,1) WITH NOWAIT; 
-		--SET @file2 = 'SQLDBA_TRC_' + @ThisServer + '_' + @format_datetime + '.trc'  
-		SELECT @cmd = 'RENAME ' + @file + '.trc' + ' ' + @file2   
-		EXEC xp_cmdshell @cmd  ,no_output
-  
-
-	END  
-  
- END
- */
-
-
-
+/* Invariant 1 (2026-10-16): with default parameters NO host command runs (xp_cmdshell, sp_OA*,
+   sp_execute_external_script, a CmdExec/PowerShell job step), even when xp_cmdshell is already on.
+   Every such call sits in the THEN branch of IF @HostProbesAllowed = 1 and nowhere else; a ScriptDom
+   walk checks it. Do not test @StateOfXP_CMDSHELL in a probe. */
+DECLARE @HostProbesAllowed BIT = 0;
+IF @EnableXpCmdShell = 1 AND @StateOfXP_CMDSHELL = 1
+	SET @HostProbesAllowed = 1;
 
     DECLARE @Result_Good [NVARCHAR] (2);
     DECLARE @Result_NA [NVARCHAR] (2);
@@ -454,6 +322,10 @@ BEGIN
     SET @Result_YourServerIsDead = N'6';
 	/*NCHAR(9760)*/;
 	SET @Sparkle = N'7';
+	/* 8 = a step that could not run: one "Could not run" row per failed step, written in ONE place from
+	   #sp_triage_skipped just before the final output fix-up (Invariant 2). */
+	DECLARE @Result_CouldNotRun [NVARCHAR] (2);
+	SET @Result_CouldNotRun = N'8';
 	
 
 	
@@ -481,7 +353,7 @@ BEGIN
             END
             --PRINT (@sliverofawesome) ;
             SET @matrixthis = @matrixthis + 1;
-            WAITFOR DELAY '00:00:00.011';
+            --WAITFOR DELAY '00:00:00.011';
         END
 
 
@@ -494,7 +366,7 @@ BEGIN
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@License,0,1) WITH NOWAIT; 
@@ -512,7 +384,7 @@ BEGIN
 	
 	SET @dynamicSQL = N'';
 	DECLARE @MinWorkerTime [BIGINT] ;
-	SET @MinWorkerTime = 0.01 * 1000000;
+	SET @MinWorkerTime = CONVERT(INT,0.01 * 1000000);
 	DECLARE @MinChangePercentage MONEY ;
 	DECLARE @DoStatistics MONEY ;
 	SET @MinChangePercentage = 5; /*Assume 5% on */
@@ -558,7 +430,6 @@ BEGIN
 	DECLARE @ErrorMessage [NVARCHAR] (400);
 	DECLARE @CustomErrorText [NVARCHAR] (500);
 	DECLARE @sql [NVARCHAR] (4000);
-	DECLARE @powershellrun VARCHAR(4000)
 	/*Performance section variables*/
 	DECLARE @cnt INT;
 	DECLARE @record_count INT;
@@ -568,6 +439,7 @@ BEGIN
 	DECLARE @grand_total_IO FLOAT ; 
 	DECLARE @evaldate [NVARCHAR] (20);
 	DECLARE @TotalIODailyWorkload MONEY ;
+	DECLARE @TotalProcIODailyWorkload MONEY ;  /*2026-07-02: proc-level I/O proxy from dm_exec_procedure_stats, same units + same @DaysOldestCachedQuery divisor as @TotalIODailyWorkload so the two are comparable*/
 	
 	SET @evaldate = CONVERT([VARCHAR](20),GETDATE(),120);
 
@@ -588,7 +460,7 @@ DECLARE @SP_ISCLUSTERED [NVARCHAR] (50);
 
 /*Populate some SQL Server Properties first*/
 DECLARE @ThisDomain [NVARCHAR] (100);
-IF @IsSQLAzure = 0 OR @IsSQLMI = 0
+IF @IsSQLAzure = 0 AND @IsSQLMI = 0  /* was OR: two mutually-exclusive flags OR'd is always TRUE, so xp_regread ran on Azure/MI too (survived only via the TRY/CATCH) */
 	BEGIN
 	BEGIN TRY
 		DECLARE @ThisDomainTable TABLE 
@@ -606,6 +478,7 @@ IF @IsSQLAzure = 0 OR @IsSQLMI = 0
 		
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'SQL Server properties', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 		PRINT 'Failed xp_regread, likely Azure';
@@ -618,10 +491,14 @@ SET @ThisDomain = ISNULL(@ThisDomain, DEFAULT_DOMAIN());
 SELECT 
 @SP_MachineName = CONVERT([NVARCHAR] (50),SERVERPROPERTY('MACHINENAME') )
 , @SP_INSTANCENAME = ISNULL(CONVERT([NVARCHAR] (50),SERVERPROPERTY('INSTANCENAME') ),'')
-, @SP_PRODUCTVERSION = CONVERT([NVARCHAR] (50),SERVERPROPERTY('PRODUCTVERSION ') )
-, @SP_SQL_VERSION = CASE 
+, @SP_PRODUCTVERSION = CONVERT([NVARCHAR] (50),SERVERPROPERTY('PRODUCTVERSION') )
+, @SP_SQL_VERSION = CASE
+WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),2) = '17'
+	THEN 'SQL SERVER 2025'
+WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),2) = '16'
+	THEN 'SQL SERVER 2022'
 WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),2) = '15'
-	THEN 'SQL SERVER 2019' 
+	THEN 'SQL SERVER 2019'
 WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),2) = '14'	
 	THEN 'SQL SERVER 2017' 
 WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),2) = '13'	
@@ -636,9 +513,10 @@ WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),4) ='10.0'
 	THEN 'SQL SERVER 2008' 
 WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),1) ='9'		
 	THEN 'SQL SERVER 2005' 
-WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),1) ='8'		
-	THEN 'SQL SERVER 2000' 
-END 
+WHEN LEFT(CONVERT([NVARCHAR] (5),SERVERPROPERTY('PRODUCTVERSION')),1) ='8'
+	THEN 'SQL SERVER 2000'
+ELSE 'SQL SERVER (major ' + PARSENAME(CONVERT([NVARCHAR](50),SERVERPROPERTY('PRODUCTVERSION')),4) + ')' /*future-proof: never NULL on a newer/unmapped build*/
+END
 , @SP_PRODUCTLEVEL = CONVERT([NVARCHAR] (50),SERVERPROPERTY('PRODUCTLEVEL') )
 , @SP_EDITION = CONVERT([NVARCHAR] (50),SERVERPROPERTY('EDITION'))
 , @SP_ISCLUSTERED = CONVERT([NVARCHAR] (50),SERVERPROPERTY('ISCLUSTERED')  );
@@ -685,14 +563,16 @@ SET @dynamicSQL = 'SELECT
 INSERT @sysdatabasesTable
 EXEC sp_executesql @dynamicSQL ;
 	DECLARE @FileSize TABLE
-	(  
-		[DatabaseName] sysname 
+	(
+		[DatabaseName] sysname
 		, [FileName] [NVARCHAR] (500) NULL
 		, [FileSize] [BIGINT] NULL
 		, [FileGroupName] [NVARCHAR] (500)NULL
 		, [LogicalName] [NVARCHAR] (500) NULL
 		, [maxsize] MONEY  NULL
 		, [growth] MONEY  NULL
+		, rid INT IDENTITY(1,1) NOT NULL
+		, UNIQUE NONCLUSTERED ([DatabaseName], rid) /*perf 2026-07-02: this table var is GROUP BY/JOINed on DatabaseName in 2 output queries; the key enables seeks + real cardinality (no logic change). SQL Server 2008 has no inline INDEX on a table variable, so a UNIQUE key made unique by rid stands in for the index*/
 	);
 	DECLARE @FileStats TABLE 
 	(  
@@ -852,185 +732,23 @@ SET @dynamicSQL = 'SELECT sql_handle
 , last_elapsed_time
 , min_elapsed_time
 , max_elapsed_time'
-IF CONVERT( TINYINT ,@SQLVersion) < 10
+/* 2026-10-16. Invariant: sp_triage reads no DMV column the running
+   instance lacks. Every column after max_elapsed_time is selected as itself when COL_LENGTH finds it on this
+   instance, else as NULL, from ONE list in the INSERT's column order (a test checks the
+   order). This replaced six version branches: the documented version is not a reliable gate. SQL Server 2017 RTM
+   has the columnstore columns but not total_spills, so the 2016/2017 branch failed with error 207 and left
+   #dadatafor_exec_query_stats empty for every section that reads it. */
+DECLARE @qsOptionalColumns [NVARCHAR] (4000);
+DECLARE @qsColumn SYSNAME;
+DECLARE @qsComma INT;
+SET @qsOptionalColumns = N'query_hash,query_plan_hash,total_rows,last_rows,min_rows,max_rows,statement_sql_handle,statement_context_id,total_dop,last_dop,min_dop,max_dop,total_grant_kb,last_grant_kb,min_grant_kb,max_grant_kb,total_used_grant_kb,last_used_grant_kb,min_used_grant_kb,max_used_grant_kb,total_ideal_grant_kb,last_ideal_grant_kb,min_ideal_grant_kb,max_ideal_grant_kb,total_reserved_threads,last_reserved_threads,min_reserved_threads,max_reserved_threads,total_used_threads,last_used_threads,min_used_threads,max_used_threads,total_columnstore_segment_reads,last_columnstore_segment_reads,min_columnstore_segment_reads,max_columnstore_segment_reads,total_columnstore_segment_skips,last_columnstore_segment_skips,min_columnstore_segment_skips,max_columnstore_segment_skips,total_spills,last_spills,min_spills,max_spills,total_num_physical_reads,last_num_physical_reads,min_num_physical_reads,max_num_physical_reads,total_page_server_reads,last_page_server_reads,min_page_server_reads,max_page_server_reads,total_num_page_server_reads,last_num_page_server_reads,min_num_page_server_reads,max_num_page_server_reads,';
+WHILE LEN(@qsOptionalColumns) > 0
 BEGIN
-	/*add blanks to size for sql 2005*/
-	SET @dynamicSQL = @dynamicSQL + '
-, NULL
-, NULL
-, NULL
-, NULL
-, NULL
-, NULL
-';
-
-END
-
-IF CONVERT( TINYINT ,@SQLVersion) >= 10 -- 2008+ 
-BEGIN
-	SET @dynamicSQL = @dynamicSQL + '
-	, query_hash
-	, query_plan_hash
-	, total_rows
-	, last_rows
-	, min_rows
-	, max_rows
-	';
-END
-
-IF CONVERT( TINYINT ,@SQLVersion) < 12 -- 2012- 
-BEGIN
-	SET @dynamicSQL = @dynamicSQL + '
-	, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-	';
-END
-
-
-IF CONVERT( TINYINT ,@SQLVersion) = 12
-BEGIN
-SET @dynamicSQL = @dynamicSQL +  '
-	, [statement_sql_handle] 
-	, [statement_context_id]
-	, [total_dop]
-	, [last_dop]
-	, [min_dop]
-	, [max_dop]
-	, [total_grant_kb]
-	, [last_grant_kb]
-	, [min_grant_kb]
-	, [max_grant_kb]
-	, [total_used_grant_kb]
-	, [last_used_grant_kb]
-	, [min_used_grant_kb]
-	, [max_used_grant_kb]
-	, [total_ideal_grant_kb]
-	, [last_ideal_grant_kb]
-	, [min_ideal_grant_kb]
-	, [max_ideal_grant_kb]
-	, [total_reserved_threads]
-	, [last_reserved_threads]
-	, [min_reserved_threads]
-	, [max_reserved_threads]
-	, [total_used_threads]
-	, [last_used_threads]
-	, [min_used_threads]
-	, [max_used_threads]
-	, NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL
-';
-END
-
-
-IF CONVERT( TINYINT ,@SQLVersion) IN (13,14) -- 2008+ 
-BEGIN
-	SET @dynamicSQL = @dynamicSQL + '
-	, [statement_sql_handle] 
-	, [statement_context_id]
-	, [total_dop]
-	, [last_dop]
-	, [min_dop]
-	, [max_dop]
-	, [total_grant_kb]
-	, [last_grant_kb]
-	, [min_grant_kb]
-	, [max_grant_kb]
-	, [total_used_grant_kb]
-	, [last_used_grant_kb]
-	, [min_used_grant_kb]
-	, [max_used_grant_kb]
-	, [total_ideal_grant_kb]
-	, [last_ideal_grant_kb]
-	, [min_ideal_grant_kb]
-	, [max_ideal_grant_kb]
-	, [total_reserved_threads]
-	, [last_reserved_threads]
-	, [min_reserved_threads]
-	, [max_reserved_threads]
-	, [total_used_threads]
-	, [last_used_threads]
-	, [min_used_threads]
-	, [max_used_threads]
-	, [total_columnstore_segment_reads]
-	, [last_columnstore_segment_reads]
-	, [min_columnstore_segment_reads]
-	, [max_columnstore_segment_reads]
-	, [total_columnstore_segment_skips]
-	, [last_columnstore_segment_skips]
-	, [min_columnstore_segment_skips]
-	, [max_columnstore_segment_skips]
-	, [total_spills]
-	, [last_spills]
-	, [min_spills]
-	, [max_spills]
-	, NULL--[total_num_physical_reads]
-	, NULL--[last_num_physical_reads]
-	, NULL--[min_num_physical_reads]
-	, NULL--[max_num_physical_reads]
-	, NULL--[total_page_server_reads]
-	, NULL--[last_page_server_reads]
-	, NULL--[min_page_server_reads]
-	, NULL--[max_page_server_reads]
-	, NULL--[total_num_page_server_reads]
-	, NULL--[last_num_page_server_reads]
-	, NULL--[min_num_page_server_reads]
-	, NULL--[max_num_page_server_reads]
-	';
-END
-
-IF CONVERT( TINYINT ,@SQLVersion) >= 15 
-BEGIN
-	SET @dynamicSQL = @dynamicSQL + '
-	, [statement_sql_handle] 
-	, [statement_context_id]
-	, [total_dop]
-	, [last_dop]
-	, [min_dop]
-	, [max_dop]
-	, [total_grant_kb]
-	, [last_grant_kb]
-	, [min_grant_kb]
-	, [max_grant_kb]
-	, [total_used_grant_kb]
-	, [last_used_grant_kb]
-	, [min_used_grant_kb]
-	, [max_used_grant_kb]
-	, [total_ideal_grant_kb]
-	, [last_ideal_grant_kb]
-	, [min_ideal_grant_kb]
-	, [max_ideal_grant_kb]
-	, [total_reserved_threads]
-	, [last_reserved_threads]
-	, [min_reserved_threads]
-	, [max_reserved_threads]
-	, [total_used_threads]
-	, [last_used_threads]
-	, [min_used_threads]
-	, [max_used_threads]
-	, [total_columnstore_segment_reads]
-	, [last_columnstore_segment_reads]
-	, [min_columnstore_segment_reads]
-	, [max_columnstore_segment_reads]
-	, [total_columnstore_segment_skips]
-	, [last_columnstore_segment_skips]
-	, [min_columnstore_segment_skips]
-	, [max_columnstore_segment_skips]
-	, [total_spills]
-	, [last_spills]
-	, [min_spills]
-	, [max_spills]
-	, [total_num_physical_reads]
-	, [last_num_physical_reads]
-	, [min_num_physical_reads]
-	, [max_num_physical_reads]
-	, [total_page_server_reads]
-	, [last_page_server_reads]
-	, [min_page_server_reads]
-	, [max_page_server_reads]
-	, [total_num_page_server_reads]
-	, [last_num_page_server_reads]
-	, [min_num_page_server_reads]
-	, [max_num_page_server_reads]
-	';
+	SET @qsComma = CHARINDEX(N',', @qsOptionalColumns);
+	SET @qsColumn = LEFT(@qsOptionalColumns, @qsComma - 1);
+	SET @qsOptionalColumns = SUBSTRING(@qsOptionalColumns, @qsComma + 1, 4000);
+	SET @dynamicSQL = @dynamicSQL + N'
+	, ' + CASE WHEN COL_LENGTH(N'sys.dm_exec_query_stats', @qsColumn) IS NOT NULL THEN QUOTENAME(@qsColumn) ELSE N'NULL' END;
 END
 
 SET @dynamicSQL = @dynamicSQL + '
@@ -1129,19 +847,62 @@ SET @dynamicSQL = @dynamicSQL + '
 				)
 	EXEC sp_executesql @dynamicSQL;
 
+	/* Index the query-stats snapshot AFTER the one-shot load (indexing before the insert would slow
+	   the load). ~9 later sections GROUP BY / JOIN on plan_handle & sql_handle; without these they
+	   full-scan+sort the whole heap each time. Added 2026-07-02. */
+	IF OBJECT_ID('tempdb..#dadatafor_exec_query_stats') IS NOT NULL
+	BEGIN TRY
+		CREATE CLUSTERED INDEX CX_qs_plan ON #dadatafor_exec_query_stats([plan_handle]);
+		CREATE NONCLUSTERED INDEX IX_qs_sql ON #dadatafor_exec_query_stats([sql_handle]);
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Query stats capture index', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		RAISERROR(N'Could not index #dadatafor_exec_query_stats; continuing unindexed',0,1) WITH NOWAIT;
+	END CATCH
+
 
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Query stats capture', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   IF @Debug = 1
   BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
-		RAISERROR (N'Problem inserting data into #dadatafor_exec_query_stats',0,1) WITH NOWAIT; 
+		RAISERROR (N'Problem inserting data into #dadatafor_exec_query_stats',0,1) WITH NOWAIT;
 		SELECT @errMessage  = ERROR_MESSAGE();
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	END
+END CATCH
+
+/* Invariant 3: the ONE plan-handle guard (declared with #sp_triage_readable_db). A captured plan whose dbid is a database
+   that cannot be read now is left out of every query section, and ONE skip row names those databases. dm_exec_plan_attributes
+   reads the cached plan's attributes, not the database. */
+DECLARE @sp_triage_plan_dbid TABLE (plan_handle VARBINARY(64) NOT NULL PRIMARY KEY, dbid INT NULL);
+DECLARE @sp_triage_unreadable [NVARCHAR] (MAX);
+BEGIN TRY
+	INSERT @sp_triage_plan_dbid (plan_handle, dbid)
+	SELECT q.plan_handle, a.dbid
+	FROM (SELECT DISTINCT qs.plan_handle FROM #dadatafor_exec_query_stats AS qs) AS q
+	OUTER APPLY (SELECT TOP (1) CONVERT(INT, pa.value) AS dbid FROM [sys].dm_exec_plan_attributes(q.plan_handle) AS pa WHERE pa.attribute = N'dbid') AS a;
+	INSERT #sp_triage_readable_plan (plan_handle)
+	SELECT p.plan_handle
+	FROM @sp_triage_plan_dbid AS p
+	WHERE p.dbid = 32767 OR p.dbid IN (SELECT r.database_id FROM #sp_triage_readable_db AS r);
+	SELECT @sp_triage_unreadable = STUFF((
+		SELECT N', ' + QUOTENAME(d.name)
+		FROM sys.databases AS d
+		WHERE d.database_id IN (SELECT p.dbid FROM @sp_triage_plan_dbid AS p)
+		AND d.database_id NOT IN (SELECT r.database_id FROM #sp_triage_readable_db AS r)
+		ORDER BY d.name
+		FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'');
+	IF @sp_triage_unreadable IS NOT NULL
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage)
+		VALUES (N'Query plans of databases that cannot be read', 0, LEFT(N'left out of the query sections: ' + @sp_triage_unreadable, 4000));
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Readable query plan list', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 END CATCH
 
 
@@ -1178,9 +939,10 @@ END
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Query stats extra columns', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Problem with adding columns to #dadatafor_exec_query_stats',0,1) WITH NOWAIT;
@@ -1420,9 +1182,10 @@ END CATCH
 			
 	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_spnCheck') IS NOT NULL
 				DROP TABLE #output_sqldba_org_sp_triage_spnCheck
-	CREATE TABLE #output_sqldba_org_sp_triage_spnCheck 
+	CREATE TABLE #output_sqldba_org_sp_triage_spnCheck
 			(
 			output [VARCHAR](1024) NULL
+			, Seq INT IDENTITY(1,1) /* setspn output order: the "could not read SPNs" row quotes the lines in order */
 			);
 
  IF(OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_InvalidLogins') IS NOT NULL)
@@ -1758,7 +1521,21 @@ END CATCH
 		, ('WAITFOR_TASKSHUTDOWN', 'https://www.sqlskills.com/help/waits/WAITFOR_TASKSHUTDOWN')
         , ('WAIT_XTP_RECOVERY', 'https://www.sqlskills.com/help/waits/WAIT_XTP_RECOVERY')
         , ('WAIT_XTP_HOST_WAIT', 'https://www.sqlskills.com/help/waits/WAIT_XTP_HOST_WAIT')
-        , ('WAIT_XTP_OFFLINE_CKPT_NEW_LOG', 'https://www.sqlskills.com/help/waits/WAIT_XTP_OFFLINE_CKPT_NEW_LOG')
+		, ('PARALLEL_REDO_LOG_CAPTURE','')
+		, ('POPULATE_LOCK_ORDINALS','')
+		, ('PREEMPTIVE_OS_FLUSHFILEBUFFERS','')
+		, ('PWAIT_EXTENSIBILITY_CLEANUP_TASK','')
+		, ('SLEEP_BUFFERPOOL_HELPLW','')
+		, ('SLEEP_DIAG','')
+		, ('SLEEP_TEMPDBSHRINK','')
+		, ('SLEEP_WORKER','')
+		, ('SLEEP_WORKSPACE_MANAGER','')
+		, ('STARTUP_DEPENDENCY_MANAGER','')
+		, ('VDI_CLIENT_OTHER','')
+		, ('XE_FILE_TARGET_TVF','')
+		, ('PVS_PREALLOCATE','')
+		, ('PREEMPTIVE_XE_DISPATCHER','')
+		, ('SLEEP_MASTERDBUPGRADED_ISDONE','')
 		 ) AS X(wait_type,  Source);
 	
 	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_TraceTypes') IS NOT NULL
@@ -1892,18 +1669,21 @@ DECLARE @TurnNumericRoundabortOn BIT;
 		END;
 
 	
-SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' startup step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+IF @Debug = 1  /*gate 2026-07-02: was ungated, so it reset timing + RAISERRORed on every client run unlike the ~123 sibling blocks*/
+BEGIN
+	SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' startup step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+	SET @DebugTime = GETDATE()  /*was missing: next step's timing double-counted the startup step*/
+	IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT;
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END
 
-IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
-RAISERROR (@errMessage,0,1) WITH NOWAIT; 
-	
-	
+
 
 
 SELECT @errMessage  = 'Checking xp_msver table'
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -1915,10 +1695,11 @@ BEGIN TRY
 	/*Rather useful this one*/
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'xp_msver server details', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -1947,43 +1728,78 @@ DECLARE @xp_errorlog  TABLE
 	DECLARE @xp_errorlogs TABLE
 		(
 			Archive INT
-			, [Date] DATETIME
+			/* NVARCHAR on purpose (2026-07-08): sp_enumerrorlogs returns a fixed US
+			   'MM/DD/YYYY hh:mm' STRING. Stored as DATETIME it was parsed with the SESSION
+			   dateformat - dmy sessions (British/NZ/AU login language) either aborted the
+			   insert (Msg 8114, day>12) or silently swapped day/month. Convert with explicit
+			   style 101 at the point of use instead. */
+			, [Date] NVARCHAR(30)
 			,  [Log File Size (Byte)] BIGINT
 		)
-	INSERT @xp_errorlogs
-	EXEC sys.sp_enumerrorlogs;
-
-	DECLARE @logcounter INT = 0 ;
-	DECLARE @lastlog INT;
 	DECLARE @RestartInfoLog INT;
-	SELECT @lastlog = MAX(Archive) FROM @xp_errorlogs;
-	WHILE @logcounter <= @lastlog
-	BEGIN
-		INSERT @xp_errorlog
-		EXEC xp_ReadErrorLog @logcounter, 1, N'Command Line Startup Parameters:';
-		IF EXISTS(SELECT 1 FROM @xp_errorlog WHERE [Text] LIKE 'Command Line Startup Parameters:%')
-		BEGIN
-			SET @RestartInfoLog = @logcounter;
-			SET @logcounter = @lastlog + 1;
-			--BREAK
-		END
-		SET @logcounter = @logcounter + 1;
-	END
+	DECLARE @SvcStartTime DATETIME;
+	DECLARE @LogWindowStart DATETIME;
+	DECLARE @LogWindowEnd DATETIME;
+	/* Guarded 2026-07-02: sp_enumerrorlogs / xp_ReadErrorLog / xp_readerrorlog do not exist on
+	   Azure SQL DB / MI and this block was NOT in a TRY/CATCH, so it aborted the whole batch there.
+	   Now Azure/MI-gated AND wrapped so a failure degrades to an empty restart-info section. */
+	IF @IsSQLAzure = 0 AND @IsSQLMI = 0
+	BEGIN TRY
+		INSERT @xp_errorlogs
+		EXEC sys.sp_enumerrorlogs;
 
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'locked pages';
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'Database Instant File Initialization: enabled';
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'System Manufacturer:';
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'(SPN)'; 
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'Server is listening on';
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'A self-generated certificate was successfully loaded for encryption.';
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'certificate was successfully loaded for encryption.';
+		/* Rewritten 2026-07-08: the old locator WHILE loop full-scanned EVERY archived log
+		   searching for 'Command Line Startup Parameters:' - minutes per log on servers with
+		   huge error logs. The startup block can only live in the log that was current at the
+		   last service start = the OLDEST log whose last-write date is on/after
+		   sqlserver_start_time (a log closed before the service started cannot contain it).
+		   That candidate comes from pure date math over sp_enumerrorlogs; because enum dates
+		   are minute-granular and a log closed during the preceding shutdown can share that
+		   minute, the candidate is VERIFIED by a date-windowed probe for the startup-parameters
+		   line, walking toward the current log on a miss - normally zero extra probes, and a
+		   probe is never a full-log scan. All reads below are likewise date-bounded to the
+		   startup window so a huge current log is not re-scanned end-to-end per search term. */
+		SELECT @SvcStartTime = sqlserver_start_time
+			, @LogWindowStart = DATEADD(MINUTE,-5,sqlserver_start_time)
+			, @LogWindowEnd = DATEADD(MINUTE,60,sqlserver_start_time)
+		FROM [sys].dm_os_sys_info;
+
+		SELECT @RestartInfoLog = ISNULL(MAX(Archive),0)
+		FROM @xp_errorlogs
+		WHERE CONVERT(DATETIME, [Date], 101) >= DATEADD(MINUTE,-1,@SvcStartTime); /*style 101 = fixed US parse, immune to session DATEFORMAT*/
+
+		WHILE @RestartInfoLog >= 0
+		BEGIN
+			INSERT @xp_errorlog
+			EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'Command Line Startup Parameters:', NULL, @LogWindowStart, @LogWindowEnd;
+			IF EXISTS(SELECT 1 FROM @xp_errorlog WHERE [Text] LIKE 'Command Line Startup Parameters:%')
+				BREAK;
+			SET @RestartInfoLog = @RestartInfoLog - 1;
+		END
+		IF @RestartInfoLog < 0 SET @RestartInfoLog = 0; /*probe never hit (clock skew/odd locale): degrade to current log*/
+
+		INSERT @xp_errorlog
+		EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'locked pages', NULL, @LogWindowStart, @LogWindowEnd;
+		INSERT @xp_errorlog
+		EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'Database Instant File Initialization: enabled', NULL, @LogWindowStart, @LogWindowEnd;
+		INSERT @xp_errorlog
+		EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'System Manufacturer:', NULL, @LogWindowStart, @LogWindowEnd;
+		INSERT @xp_errorlog
+		EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'(SPN)', NULL, @LogWindowStart, @LogWindowEnd;
+		/* end-unbounded on purpose: AG listeners created or brought online AFTER startup also
+		   write 'Server is listening on' and belong in the port inventory (verify 2026-07-08) */
+		INSERT @xp_errorlog
+		EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'Server is listening on', NULL, @LogWindowStart, NULL;
+		/* 2026-07-08: the old extra read for 'A self-generated certificate was successfully
+		   loaded for encryption.' was a strict substring-superset of the read below, so those
+		   rows were inserted TWICE and Section 109 emitted duplicates. One read only. */
+		INSERT @xp_errorlog
+		EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'certificate was successfully loaded for encryption.', NULL, @LogWindowStart, @LogWindowEnd;
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Restart info from the error log', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		RAISERROR (N'Restart-info error-log read skipped/failed (expected on Azure)',0,1) WITH NOWAIT;
+	END CATCH
 	
 
 	--SELECT CONVERT(MONEY,LEFT(Character_Value,3)) FROM @msversion WHERE Name = 'WindowsVersion'
@@ -1991,7 +1807,7 @@ DECLARE @xp_errorlog  TABLE
 SELECT @errMessage  = 'Checking power plan';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 	END
@@ -2008,8 +1824,8 @@ BEGIN TRY
 	FROM @msversion 
 	WHERE Name = 'WindowsVersion';
 
-	INSERT @xp_errorlog
-	EXEC [sys].xp_readerrorlog @RestartInfoLog, 1, N'locked pages';
+	/* 2026-07-08: duplicate 'locked pages' read removed - the restart-info block above
+	   already inserted those rows once. */
 
 	/*CASE WHEN windows_release IN ('6.3','10.0') AND (@@VERSION LIKE '%Build 10586%' OR @@VERSION LIKE '%Build 14393%')THEN '10.0' ELSE CONVERT([VARCHAR](5),windows_release) END 
 	FROM [sys].dm_os_windows_info (NOLOCK);*/
@@ -2066,7 +1882,7 @@ BEGIN TRY
 		/*PRINT @PowerPlan*/
 		IF @Debug = 1
 			BEGIN
-				SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+				SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 				SET @DebugTime = GETDATE();
 				IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Power Options checked',0,1) WITH NOWAIT;
@@ -2076,10 +1892,11 @@ BEGIN TRY
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Power plan', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE()
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2108,6 +1925,7 @@ BEGIN
 		FROM @DTUtable;
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Azure DTU usage', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 		/*Well this is not Azure*/
 		SET @IsSQLAzure = 1
 	END CATCH
@@ -2120,7 +1938,7 @@ END
 SELECT @errMessage  = 'Checking server properties'
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2366,10 +2184,11 @@ BEGIN TRY
 	
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server properties', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2440,10 +2259,11 @@ BEGIN TRY
 		+ 'x'+SUBSTRING(CONVERT([NVARCHAR] (100),@MachineKey,1),7,6);
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Machine key', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2457,7 +2277,7 @@ END CATCH
 SELECT @errMessage  = 'Checking server build versions';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2514,7 +2334,9 @@ BEGIN TRY
 		UNION ALL SELECT '2016', '13', '2019-07-09', '13.0.4001.0', '13.0.4604.0' 
 		UNION ALL SELECT '2016', '13', '2026-07-14', '13.0.5026.0', '13.0.5820.21' 
 		UNION ALL SELECT '2017', '14', '2027-10-12', '14.0.1.246', '14.0.900.75' 
-		UNION ALL SELECT '2019', '15', '2030-01-08', '15.0.1000.34', '15.0.4043.16';
+		UNION ALL SELECT '2019', '15', '2030-01-08', '15.0.1000.34', '15.0.4999.99'
+		UNION ALL SELECT '2022', '16', '2033-01-11', '16.0.1000.6', '16.0.4999.99'
+		UNION ALL SELECT '2025', '17', '2036-01-01', '17.0.1000.0', '17.9.9999.99';
 	
 	/*This step requires administrative permissions on the local machine for SQL server Service account, at least it does not play nicely with "NT xx" accounts*/
 	INSERT #output_sqldba_org_sp_triage 
@@ -2548,10 +2370,11 @@ BEGIN TRY
  
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server build versions', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2561,7 +2384,7 @@ END CATCH
 
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'CPU NUMA node details',0,1) WITH NOWAIT;
@@ -2602,10 +2425,11 @@ BEGIN TRY
 	WHERE status = 'VISIBLE ONLINE';
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'CPU NUMA node details', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2617,7 +2441,7 @@ END CATCH
 SELECT @errMessage  = 'Checking Antivirus scanning SQL process';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2647,10 +2471,11 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Antivirus scanning SQL process', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2662,7 +2487,7 @@ END CATCH
 SELECT @errMessage  = 'Checking tempDB file count';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2685,10 +2510,11 @@ BEGIN TRY
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TempDB file count', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2698,7 +2524,7 @@ END CATCH
 SELECT @errMessage  = 'Looking for tempdb latching';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2726,10 +2552,12 @@ BEGIN TRY
 		+ '; Wait Duraion: ' + CONVERT([VARCHAR](25), ISNULL(wait_duration_ms,''))
 		+ '; Blocking SPID: ' + CONVERT([VARCHAR](20), ISNULL(blocking_session_id,''))
 		+ '; Description: ' + CONVERT([VARCHAR](200), ISNULL(resource_description,''))
-		/* tempdb allocation pages (fixed 2026-10-08). Page 1 or a positive multiple of 8088 is PFS;
+		/* tempdb allocation pages (2026-10-08). Page 1 or a positive multiple of 8088 is PFS;
 		   page 2 or a positive multiple of 511232 is GAM; page 3 or a positive multiple of 511232 plus 1 is SGAM; page 0 is the
 		   file header, which both modulo terms would match, so p.pg > 0 comes first. Until 2026-10-08 this read
-		   "<page> - 1 % 8088 = 0", which T-SQL parses as "<page> - (1 % 8088) = 0": pages 1, 2 and 3 only. */
+		   "<page> - 1 % 8088 = 0", which T-SQL parses as "<page> - (1 % 8088) = 0": pages 1, 2 and 3 only.
+		   The tempdb_contention alert uses the same predicate; a test checks which pages every shipped
+		   copy selects and records the one vendored exception. */
 		, Case
 			WHEN p.pg > 0 AND (p.pg = 1 OR p.pg % 8088 = 0 OR p.pg = 2 OR p.pg % 511232 = 0 OR p.pg = 3 OR p.pg % 511232 = 1) Then @Result_Warning
 			ELSE @Result_Good
@@ -2750,10 +2578,11 @@ BEGIN TRY
 			
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TempDB latching', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2764,7 +2593,7 @@ END CATCH
 SELECT @errMessage  = 'Checking errorlog';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2826,10 +2655,11 @@ BEGIN TRY
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Locked Pages in Memory', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2843,7 +2673,7 @@ END CATCH
 SELECT @errMessage  = 'Checking service account details';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2950,10 +2780,11 @@ BEGIN TRY
 
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Service account names', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	  SELECT @errMessage  = ERROR_MESSAGE()
 	  IF @Debug = 1
 		BEGIN
-			SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+			SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 			SET @DebugTime = GETDATE();
 			IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2962,10 +2793,11 @@ BEGIN TRY
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Service account details', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -2978,7 +2810,7 @@ END CATCH
 SELECT @errMessage  = 'Checking for high worker thread usage';
   IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3030,7 +2862,7 @@ BEGIN TRY
 
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Looked at worker thread usage',0,1) WITH NOWAIT;
@@ -3038,10 +2870,11 @@ IF @Debug = 1
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Worker thread usage', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3080,7 +2913,7 @@ BEGIN TRY
 	   IF @IsSQLAzure = 1
 	   BEGIN
 			SET @instStr = 'MSSQLSERVER';
-			SET @ExportDBName = '[' + DB_NAME() + ']';
+			SET @ExportDBName = QUOTENAME(DB_NAME());
 	   END
 	   ELSE
 	   BEGIN
@@ -3185,10 +3018,11 @@ BEGIN TRY
 		) AS X(counter_name,is_captured_in);
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counter setup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
     SELECT @errMessage  = ERROR_MESSAGE();
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3199,7 +3033,7 @@ END CATCH
 SELECT @errMessage  = 'Working those perfom counters';
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT;
 		SELECT @errMessage  = ERROR_MESSAGE();
@@ -3208,57 +3042,75 @@ IF @Debug = 1
 BEGIN TRY
 
 BEGIN
-IF 'Skip syscounters until I can find a use for it' = 'Yup'
-BEGIN
-	DECLARE @syscounters [NVARCHAR] (4000);
-	SET @syscounters=STUFF((SELECT DISTINCT ''',''' +LTRIM([counter_name])
-	FROM @PerformanceCounterList
-	WHERE [is_captured_in] = 1 FOR XML PATH('')), 1, 2, '')+'''' ;
-
-	DECLARE @syscountertable TABLE 
+/* 2026-10-16: the dead 'Skip syscounters' block (a PowerShell get-counter through xp_cmdshell that never ran)
+   was deleted. @syscountertable stays: the perf-counter INSERTs below still read it (always empty). */
+	DECLARE @syscountertable TABLE
 	(
 		id [INT] IDENTITY(1,1)
 		, [output] [VARCHAR](500)
 	);
-	
-	DECLARE @syscountervaluestable TABLE 
-	(
-		id [INT] IDENTITY(1,1)
-		, [value] [VARCHAR](500)
-	);
-	
-	
-	SET @powershellrun = 'C:\WINDOWS\system32\WindowsPowerShell\v1.0\powershell.exe "& get-counter -counter '+ @syscounters +' -SampleInterval 5 -MaxSamples 2 | Select-Object -ExpandProperty Readings"'
-		INSERT @syscountertable
-		EXEC xp_cmdshell @powershellrun
-END
-	IF @StateOfXP_CMDSHELL = 1
 	BEGIN TRY
-		/*While we are on the topic of xm_cmdshell, check the SPNs as well*/
+		/* SPN registration for the service account: setspn, a HOST COMMAND. It runs only when the caller
+		   opted in (@HostProbesAllowed = 1) AND the account name passes the allow-list below; otherwise the
+		   section says why it was skipped. Never "No SPNs registered" for a probe that did not run. */
 		DECLARE @spnCheckCmd [NVARCHAR] (4000);
-		SET @spnCheckCmd = 'setspn -L ' + @DBEngineLogin;
-		--IF @Debug = 1
-		--PRINT @spnCheckCmd
+		DECLARE @spnSkipText [NVARCHAR] (200);
+		SET @spnSkipText = NULL;
+		IF @HostProbesAllowed = 0
+		BEGIN
+			IF @EnableXpCmdShell = 1
+				SET @spnSkipText = N'skipped: xp_cmdshell could not be enabled';
+			ELSE
+				SET @spnSkipText = N'skipped: opt-in (@EnableXpCmdShell = 1 runs setspn)';
+		END
+		/* Allow-list for a value placed on a cmd.exe line: letters, digits, space, . \ _ $ @ and hyphen
+		   (hyphen FIRST in the class so it is literal; BIN2 so ranges are ASCII only), no leading hyphen
+		   (setspn would read it as a switch). % stays out: cmd.exe expands it even inside double quotes. */
+		ELSE IF NOT (@DBEngineLogin IS NOT NULL
+			AND LEN(@DBEngineLogin) > 0
+			AND LEFT(@DBEngineLogin, 1) <> '-'
+			AND @DBEngineLogin COLLATE Latin1_General_BIN2 NOT LIKE '%[^-A-Za-z0-9 .\_$@]%')
+		BEGIN
+			SET @spnSkipText = N'skipped: service account name has characters unsafe for a shell command';
+		END
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
-		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
-			RAISERROR (N'Checking SPNs',0,1) WITH NOWAIT; 
+		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT;
+			RAISERROR (N'Checking SPNs',0,1) WITH NOWAIT;
 		END
-		INSERT #output_sqldba_org_sp_triage_spnCheck 
-		EXEC xp_cmdshell @spnCheckCmd;
-		
-		
-		
-		IF EXISTS
+		IF @HostProbesAllowed = 1
+		BEGIN
+			IF @spnSkipText IS NULL
+			BEGIN
+				SET @spnCheckCmd = N'setspn -L "' + CONVERT([NVARCHAR] (100), @DBEngineLogin) + N'"';
+				INSERT #output_sqldba_org_sp_triage_spnCheck ([output])
+				EXEC xp_cmdshell @spnCheckCmd;
+			END
+		END
+
+		IF @spnSkipText IS NOT NULL
+		BEGIN
+			INSERT #output_sqldba_org_sp_triage
+			(
+				SectionID
+				, Section
+				, Summary
+			)
+			SELECT
+			0
+			, N'SPNs for server'
+			, @spnSkipText;
+		END
+		ELSE IF EXISTS
 		(
-			SELECT 1 
-			FROM #output_sqldba_org_sp_triage_spnCheck 
+			SELECT 1
+			FROM #output_sqldba_org_sp_triage_spnCheck
 			WHERE  output like 'Registered%' OR output like 'MS%/%'
 		)
 		BEGIN
-			INSERT #output_sqldba_org_sp_triage 
+			INSERT #output_sqldba_org_sp_triage
 			(
 				SectionID
 				, Section
@@ -3272,14 +3124,13 @@ IF @Debug = 1
 			WHERE  output like 'Registered%'
 			OR output like 'MS%/%';
 		END
-		IF NOT EXISTS
-		(
-			SELECT 1 
-			FROM #output_sqldba_org_sp_triage_spnCheck 
-			WHERE  output like 'Registered%' OR output like 'MS%/%'
-		)
+		ELSE
 		BEGIN
-			INSERT #output_sqldba_org_sp_triage 
+			/* setspn ran but printed no "Registered ..." header: it failed (it prints the header even for an
+			   account with no SPNs). Say what it said, never "No SPNs registered": its output lines in order,
+			   joined with ' | ' (on a workgroup box the first line is "FindDomainForAccount: ..." and the line
+			   that names the account, "Could not find account ...", comes after it). */
+			INSERT #output_sqldba_org_sp_triage
 			(
 				SectionID
 				, Section
@@ -3287,24 +3138,18 @@ IF @Debug = 1
 			)
 			SELECT
 			0
-			, 'SPNs for server'
-			, 'No SPNs registered';
+			, N'SPNs for server'
+			, N'could not read SPNs: ' + LEFT(ISNULL(STUFF(
+				(
+					SELECT N' | ' + CONVERT([NVARCHAR] (1024), [output])
+					FROM #output_sqldba_org_sp_triage_spnCheck
+					WHERE [output] IS NOT NULL
+					ORDER BY Seq ASC
+					FOR XML PATH(''), TYPE
+				).value('.', 'NVARCHAR(MAX)'), 1, 3, N''), N'(no output)'), 3900);
 		END
 
-
-	END TRY
-	BEGIN CATCH
-IF @Debug = 1
-	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
-		SET @DebugTime = GETDATE();
-		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
-			RAISERROR (N'Error: xp_cmdshell DISABLED',0,1) WITH NOWAIT; 
-		END
-	END CATCH
-
-	/*SPNs the error log reports. Needs no xp_cmdshell*/
-		INSERT #output_sqldba_org_sp_triage 
+		INSERT #output_sqldba_org_sp_triage
 		(
 			SectionID
 			, Section
@@ -3315,8 +3160,21 @@ IF @Debug = 1
 		, 'SPNs for server'
 		,  [Text]
 		FROM @xp_errorlog
-		WHERE [Text] 
+		WHERE [Text]
 		LIKE '%(SPN)%';
+
+
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'SPNs for server', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+IF @Debug = 1
+	BEGIN
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTime = GETDATE();
+		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT;
+			RAISERROR (N'Error checking SPNs',0,1) WITH NOWAIT;
+		END
+	END CATCH
 
 	DECLARE @sqlnamedinstance sysname;
 	DECLARE @networkname sysname;
@@ -3371,10 +3229,11 @@ END
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counters', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3386,7 +3245,7 @@ END CATCH
 SELECT @errMessage  = 'Checking Azure calculations';
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3556,10 +3415,11 @@ BEGIN TRY
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Azure calculations', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3568,7 +3428,7 @@ END CATCH
 
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Finished rough IOPS calculation',0,1) WITH NOWAIT;
@@ -3581,7 +3441,7 @@ IF @Debug = 1
 SELECT @errMessage  = 'Checking for suspiciouns pages';
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3649,7 +3509,7 @@ BEGIN TRY
 
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Included Suspect Pages, if any',0,1) WITH NOWAIT;
@@ -3657,10 +3517,11 @@ IF @Debug = 1
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Suspect pages', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
   SELECT @errMessage  = ERROR_MESSAGE();
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
@@ -3782,7 +3643,7 @@ END CATCH
 	END
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done checking for possible breaking SQL 2000 things',0,1) WITH NOWAIT;
@@ -3879,7 +3740,7 @@ IF @Debug = 1
 
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done checking compatability levels and sets for database things',0,1) WITH NOWAIT;
@@ -3915,13 +3776,19 @@ BEGIN
 			@ThisistoStandardisemyOperatorCostMate = count(N) 
 		FROM cteTally OPTION (RECOMPILE);
 		SET @EndTest = GETDATE();
+		BEGIN TRY
 		SELECT   
 			@secondsperoperator = AVG(qs.total_worker_time/qs.execution_count/1000)/0.7248/1000  
 		FROM  #dadatafor_exec_query_stats qs
 		CROSS APPLY [sys].dm_exec_sql_text(qs.sql_handle) qt
 		WHERE qs.total_logical_reads = 0 
+		AND qs.plan_handle IN (SELECT rp.plan_handle FROM #sp_triage_readable_plan AS rp)
 		AND qs.last_execution_time BETWEEN DATEADD(MINUTE,-2,@StartTest) AND GETDATE()
 		AND PATINDEX('%ThisistoStandardisemyOperatorCostMate%',CAST(qt.TEXT AS [NVARCHAR] (MAX))) > 0
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) SELECT LEFT(N'Operator cost calibration', 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000) WHERE NOT EXISTS (SELECT 1 FROM #sp_triage_skipped AS k WHERE k.Step = N'Operator cost calibration');
+		END CATCH
 			
 		WAITFOR DELAY '00:00:00.5'
 		SET @testloop = @testloop + 1
@@ -3935,7 +3802,7 @@ END
 	--PRINT N'Your cost (in seconds) per operator roughly equates to around '+ CONVERT([VARCHAR](20),ISNULL(@secondsperoperator,0)) + ' seconds' ;
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Benchmarking done',0,1) WITH NOWAIT;
@@ -3963,7 +3830,10 @@ DECLARE @Databases TABLE
 		, [CurrentLocation] [NVARCHAR] (250)
 		, AGName [NVARCHAR] (250)
 		, [ReadSecondary] [NVARCHAR] (250)
-		
+		, [TotalIO] BIGINT
+		, [TotalIORank] INT
+		, [SkipForDBLoop] BIT
+
 	);
 	SET @dynamicSQL = 'SELECT 
 	db.database_id
@@ -3981,19 +3851,36 @@ DECLARE @Databases TABLE
 	, NULL
 	, NULL
 	, NULL
+	,DS.[TotalIO]
+	, DS.[Rank]
+	,NULL
 	FROM 
-	[sys].databases db 
+	[sys].databases db
+	LEFT OUTER JOIN (
+	SELECT Name AS [DatabaseName]
+		, d.database_id
+		, SUM(num_of_reads) AS[Number of Reads]
+		, SUM(num_of_writes) AS[Number of Writes]
+		, SUM(num_of_writes) +  SUM(num_of_reads) [TotalIO]
+		, RANK() OVER (ORDER BY SUM(num_of_writes) +  SUM(num_of_reads) DESC) [Rank]
+		FROM [sys].dm_io_virtual_file_stats(NULL,NULL) I
+		INNER JOIN [sys].databases d ON I.database_id = d.database_id
+		GROUP BY Name, d.database_id
+	) DS on DS.database_id = db.database_id
+
+
+
 	WHERE 1 = 1 ';
 	IF @SQLVersion >= 11 
 	BEGIN 
 		SET @dynamicSQL = @dynamicSQL + ' AND replica_id IS NULL /*Don''t touch anything AG related*/';
 	END
 	
-	SET @dynamicSQL = @dynamicSQL + ' AND db.database_id > 4 AND db.user_access = 0 AND db.State = 0 ';
+	SET @dynamicSQL = @dynamicSQL + ' AND 1=1/*db.database_id > 4*/ AND db.user_access = 0 AND db.State = 0 AND db.database_id IN (SELECT r.database_id FROM #sp_triage_readable_db AS r) ';
 	
 	BEGIN TRY
 
-	IF @SQLVersion >= 11 AND @isSQLAzure = 0 
+	IF @SQLVersion >= 11 AND @IsSQLAzure = 0 
 		BEGIN
 
 			IF EXISTS(SELECT OBJECT_ID('master.[sys].availability_groups', 'V')) /*You have active AGs*/
@@ -4016,8 +3903,23 @@ DECLARE @Databases TABLE
 			, [CurrentLocation]
 			, AGName
 			, [ReadSecondary]
-			FROM 
-			[sys].databases db 
+			, DS.TotalIO
+			, DS.[Rank]
+			,NULL
+	FROM 
+	[sys].databases db
+	LEFT OUTER JOIN (
+	SELECT Name AS [DatabaseName]
+		, d.database_id
+		, SUM(num_of_reads) AS[Number of Reads]
+		, SUM(num_of_writes) AS[Number of Writes]
+		, SUM(num_of_writes) +  SUM(num_of_reads) [TotalIO]
+		, RANK() OVER (ORDER BY SUM(num_of_writes) +  SUM(num_of_reads) DESC) [Rank]
+		FROM [sys].dm_io_virtual_file_stats(NULL,NULL) I
+		INNER JOIN [sys].databases d ON I.database_id = d.database_id
+		GROUP BY Name, d.database_id
+	) DS on DS.database_id = db.database_id
+			 
 			LEFT OUTER JOIN(
 			
 			SELECT top 100 percent
@@ -4066,17 +3968,18 @@ DECLARE @Databases TABLE
 			ORDER BY AG.name ASC, dbcs.database_name
 			
 			) t1 on t1.DatabaseName = db.name 
-			WHERE /*db.database_id > 4 AND*/ db.user_access = 0 AND db.State = 0 
+			WHERE /*db.database_id > 4 AND*/ db.user_access = 0 AND db.State = 0 AND db.database_id IN (SELECT r.database_id FROM #sp_triage_readable_db AS r)
 			AND t1.LocalReplicaRole IS NOT NULL
 			';
 		END
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Availability Group database list', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 		SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Trouble with Availability Group database list',0,1) WITH NOWAIT;
@@ -4135,6 +4038,8 @@ IF @Debug = 1
 	SET @CachevsUpdate = @DaysOldestCachedQuery*100/@DaysUptime;
 	IF @CachevsUpdate < 1
 		SET @CachevsUpdate = 1
+	IF @CachevsUpdate > 100
+		SET @CachevsUpdate = 100  /*upper clamp: REPLICATE('.',100-@CachevsUpdate) with a negative length returns NULL and NULLs the whole bar string*/
 	INSERT #output_sqldba_org_sp_triage 
 	(
 		[SectionID]
@@ -4171,7 +4076,7 @@ IF @Debug = 1
 
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Server uptime and cache age established',0,1) WITH NOWAIT;
@@ -4402,7 +4307,7 @@ IF @Debug = 1
 
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked CPU usage for the last 5 hours',0,1) WITH NOWAIT;
@@ -4416,7 +4321,7 @@ IF @Debug = 1
 			----------------------------------------*/
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Reading Error Log.. this should take a couple of seconds',0,1) WITH NOWAIT;
@@ -4530,6 +4435,27 @@ IF @Debug = 1
 				, Severity
 				, HoursToResolveWithTesting 
 			)
+			SELECT TOP 50 5
+			,L.ProcessInfo
+			, CONVERT(NVARCHAR(500),CONVERT(NVARCHAR(50),[EventCount]) +' events in ' + CONVERT(NVARCHAR(50), DATEDIFF(HOUR,L.[From],L.[To])) + ' hours. ' + L.LogText +'. ' + M.text)
+			--,L.[Error]
+			--,L.[From]
+			--,L.[To]
+			, @Result_Warning 
+			, 0.25
+			FROM(
+			SELECT L.ProcessInfo, L.LogText
+			,REPLACE(LEFT(L.LogText, CHARINDEX(',',L.LogText)-1),'Error: ','') [Error]
+			, COUNT(1) [EventCount]
+			,MIN(L.LogDate) [From]
+			,MAX(L.LogDate) [To]
+			FROM @SQLLogData L
+			GROUP BY L.ProcessInfo, L.LogText
+			)L
+			INNER JOIN  sys.messages M ON M.message_id = L.Error AND M.language_id = 1033
+			WHERE L.LogText LIKE 'Error:%'
+
+			UNION ALL
 			SELECT TOP 35 5, 'Date:'
 			+ CONVERT([VARCHAR](20),LogDate,120)
 			, replace(replace(replace(replace(CONVERT([NVARCHAR] (500),LogText), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ')  
@@ -4538,14 +4464,13 @@ IF @Debug = 1
 
 			FROM @SQLLogData
 			WHERE LogDate > DATEADD(MONTH,-1,GETDATE())
-			--FROM @LoginLog 
-			ORDER BY LogDate DESC
+			AND LogText NOT LIKE 'Error:%'
 			OPTION (RECOMPILE);
 		END
 	END
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Server logins have been checked from the log',0,1) WITH NOWAIT;
@@ -4572,7 +4497,7 @@ IF @Debug = 1
 		BEGIN
 			IF @Debug = 1
 			BEGIN
-				SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+				SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 				SET @DebugTime = GETDATE();
 				IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR (N'Agent started much later than Service. Might point to Agent never being restarted before. If you see the following error, just restart the agent and run this script again >>',0,1) WITH NOWAIT;
@@ -4592,11 +4517,13 @@ IF @Debug = 1
 			EXEC sp_executesql @dynamicSQL;
 		END 
 
+		/*Already checked before
 		BEGIN   
 			SET @dynamicSQL = 'EXEC sp_readerrorlog 1, 1, ''Error:'' '
 			INSERT @Errorlog
 			EXEC sp_executesql @dynamicSQL;
 		END
+		*/
 		IF EXISTS (SELECT * FROM @Errorlog)
 		BEGIN
 			INSERT #output_sqldba_org_sp_triage 
@@ -4621,7 +4548,7 @@ IF @Debug = 1
 				, Details
 				, HoursToResolveWithTesting  
 			)
-			SELECT 
+			SELECT TOP 100
 			6
 			, 'Date:'+ CONVERT([VARCHAR](20),LogDate ,120)
 			, 'ErrorLevel:'+ CONVERT([VARCHAR](20),ErrorLevel)
@@ -4632,11 +4559,12 @@ IF @Debug = 1
 		END  
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Agent log', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 		SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT; 
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Error reading agent log',0,1) WITH NOWAIT;
@@ -4644,7 +4572,7 @@ IF @Debug = 1
 	END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Agent log parsed for errors',0,1) WITH NOWAIT;
@@ -4679,6 +4607,8 @@ DECLARE @sysjobhistoryTable TABLE
 	job_id uniqueidentifier
 	, step_id INT
 	, instance_id INT
+	, rid INT IDENTITY(1,1) NOT NULL
+	, UNIQUE NONCLUSTERED (instance_id, rid) /*perf 2026-07-02: joined on instance_id; the key enables seeks (no logic change). SQL Server 2008 has no inline INDEX on a table variable, so a UNIQUE key made unique by rid stands in for the index*/
 )
 SET @dynamicSQL = '
 	SELECT 
@@ -4709,6 +4639,8 @@ DECLARE @sysjobhistoryTable2 TABLE
 	, run_duration INT
 	, retries_attempted INT
 	, [server] [NVARCHAR] (400)
+	, rid INT IDENTITY(1,1) NOT NULL
+	, UNIQUE NONCLUSTERED (instance_id, rid) /*perf 2026-07-02: joined on instance_id; the key enables seeks (no logic change). SQL Server 2008 has no inline INDEX on a table variable, so a UNIQUE key made unique by rid stands in for the index*/
 );
 
 SET @dynamicSQL = '
@@ -4874,7 +4806,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked for failed agent jobs',0,1) WITH NOWAIT;
@@ -4896,6 +4828,7 @@ DECLARE @backupset TABLE
 	, first_lsn numeric(25,0)
 	, database_backup_lsn numeric(25,0)
 	, PRIMARY KEY CLUSTERED (id,[backup_start_date],[database_name],[recovery_model])
+	, UNIQUE NONCLUSTERED ([database_name],[backup_finish_date], id) /*perf 2026-07-02: the correlated MAX(backup_finish_date) per database_name subquery couldn't seek (clustered PK leads with id); this NC key lets it seek instead of scanning the whole table var per outer row (no logic change). SQL Server 2008 has no inline INDEX on a table variable, so a UNIQUE key made unique by id stands in for the index*/
 );
 
 SET @dynamicSQL = '
@@ -4997,7 +4930,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked for failed backups',0,1) WITH NOWAIT;
@@ -5026,6 +4959,9 @@ DECLARE @DatabasesForLOG TABLE
 		, [CurrentLocation] [NVARCHAR] (250)
 		, AGName [NVARCHAR] (250)
 		, [ReadSecondary] [NVARCHAR] (250)
+		, [TotalIO] BIGINT
+		, [TotalIORank] INT
+		, [SkipForDBLoop] BIT
 	);
 
 INSERT INTO @DatabasesForLOG
@@ -5105,7 +5041,7 @@ BEGIN
         SET @query = N'dbcc loginfo (N''' + REPLACE(@dbname, N'''', N'''''') + N''') ' ;
 		SET @vlfs = NULL;
   
-		IF @IsSQLAzure = 0 AND HAS_DBACCESS(@dbname) = 1
+		IF @IsSQLAzure = 0 AND EXISTS (SELECT 1 FROM #sp_triage_readable_db AS r WHERE r.name = @dbname)
 		BEGIN
 			BEGIN TRY
 				INSERT into @dbccloginfo
@@ -5113,6 +5049,7 @@ BEGIN
 				SET @vlfs = @@rowcount ;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'VLF count (dbcc loginfo)' + ISNULL(N' ' + QUOTENAME(@dbname), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @dbname + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
 				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 			END CATCH
@@ -5161,7 +5098,7 @@ BEGIN
         SET @query = N'dbcc loginfo (N''' + REPLACE(@dbname, N'''', N'''''') + N''') '  ;
 		SET @vlfs = NULL;
   
-		IF @IsSQLAzure = 0 AND HAS_DBACCESS(@dbname) = 1
+		IF @IsSQLAzure = 0 AND EXISTS (SELECT 1 FROM #sp_triage_readable_db AS r WHERE r.name = @dbname)
 		BEGIN
 			BEGIN TRY
 				INSERT into @dbccloginfo2012
@@ -5169,6 +5106,7 @@ BEGIN
 				SET @vlfs = @@rowcount  ;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'VLF count (dbcc loginfo)' + ISNULL(N' ' + QUOTENAME(@dbname), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @dbname + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
 				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 			END CATCH
@@ -5319,7 +5257,7 @@ BEGIN
 END
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done with Log and VLF Checks',0,1) WITH NOWAIT;
@@ -5611,7 +5549,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Recovery Model information matched with backups',0,1) WITH NOWAIT;
@@ -5774,7 +5712,7 @@ END
 	
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked for disk latency and space',0,1) WITH NOWAIT;
@@ -5806,23 +5744,33 @@ END
 
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Page size from spt_values', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 		SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 		RAISERROR (N'Server does not seem to have spt_values table ',0,1) WITH NOWAIT;
 		SET @PageSize = 8 /*as in 8 KB*/;
 	END CATCH
 
-	INSERT @LogSpace 
-	EXEC sp_executesql N'DBCC sqlperf(logspace) WITH NO_INFOMSGS';
-	
-	INSERT #output_sqldba_org_sp_triage_LogSpace
-	SELECT DatabaseName
-		, LogSize
-		, SpaceUsedPercent
-		, Status 
-		, NULL
-	FROM @LogSpace 
-	OPTION (RECOMPILE);
+	/* Guarded 2026-07-02: DBCC sqlperf(logspace) is unsupported on Azure SQL DB and was outside any
+	   TRY/CATCH, so it aborted the batch there. Azure-gated + wrapped to degrade to an empty section. */
+	IF @IsSQLAzure = 0
+	BEGIN TRY
+		INSERT @LogSpace
+		EXEC sp_executesql N'DBCC sqlperf(logspace) WITH NO_INFOMSGS';
+
+		INSERT #output_sqldba_org_sp_triage_LogSpace
+		SELECT DatabaseName
+			, LogSize
+			, SpaceUsedPercent
+			, Status
+			, NULL
+		FROM @LogSpace
+		OPTION (RECOMPILE);
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'DBCC sqlperf(logspace)', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		RAISERROR (N'DBCC sqlperf(logspace) skipped/failed (expected on Azure SQL DB)',0,1) WITH NOWAIT;
+	END CATCH
 
 	DECLARE @SecondaryReadRole [NVARCHAR] (250);
 	DECLARE @AGBackupPref [NVARCHAR] (250);
@@ -5848,14 +5796,14 @@ END
 		/* Non-AG databases arrive with BackupPref/ReadSecondary NULL (first UNION branch), so the bare <> was UNKNOWN and
 		   this block never ran on a server without an AG: section 11 was empty. ISNULL keeps the AG 'primary' exclusion. */
 		IF @DatabaseName IS NOT NULL
-		AND HAS_DBACCESS(@DatabaseName) = 1
+		AND EXISTS (SELECT 1 FROM #sp_triage_readable_db AS r WHERE r.name = @DatabaseName)
 		AND (
 			ISNULL(@SecondaryReadRole, N'') <> N'NO'
 			AND ISNULL(@AGBackupPref, N'') <> N'primary'
 		) 
 		BEGIN
 			/* Each read is isolated: a failure skips that read for this database only, reported at severity 0.
-			   No ROLLBACK or XACT_STATE test in the CATCH: the proc opens no transaction (checked 2026-10-09). */
+			   No ROLLBACK or XACT_STATE test in the CATCH: the proc opens no transaction (PROVED 2026-10-09). */
 			BEGIN TRY
 				SET @dynamicSQL = N'USE ' + QUOTENAME(@DatabaseName) + N';
 			DBCC showfilestats WITH NO_INFOMSGS;';
@@ -5864,7 +5812,7 @@ END
 				EXEC sp_executesql @dynamicSQL;
 
 				/* Same TRY as showfilestats: a data file with no @FileStats row would take the LOG's SpaceUsedPercent
-				   fallback in section 11 (a wrong Used % graded Good; found 2026-10-09). If either read fails,
+				   fallback in section 11 (a wrong Used % graded Good, PROVED 2026-10-09). If either read fails,
 				   the database is left out of section 11 and the message below names it. */
 				SET @dynamicSQL = N'USE ' + QUOTENAME(@DatabaseName) + N';
 			SELECT N''' + REPLACE(@DatabaseName, N'''', N'''''') + N''', filename, size, ISNULL(FILEGROUP_NAME(groupid),''LOG''), [name] ,maxsize, growth  FROM dbo.sysfiles sf ; ';
@@ -5873,6 +5821,7 @@ END
 				EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'File reads (DBCC showfilestats, sysfiles)' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SET @ReadSkippedMsg = N'sp_triage: file reads (DBCC showfilestats, sysfiles) skipped for [' + @DatabaseName + N'], left out of section 11: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
 				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 			END CATCH
@@ -5895,6 +5844,7 @@ END
 					FROM #output_sqldba_org_sp_triage_dbccloginfo ;
 				END TRY
 				BEGIN CATCH
+					INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'VLF count (DBCC loginfo)' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 					SET @ReadSkippedMsg = N'sp_triage: VLF count (DBCC loginfo) skipped for [' + @DatabaseName + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
 					RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 				END CATCH
@@ -5986,7 +5936,7 @@ END
 	
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked free space',0,1) WITH NOWAIT;
@@ -6045,7 +5995,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Got cached plan statistics',0,1) WITH NOWAIT;
@@ -6086,7 +6036,7 @@ END
 	/*Need to become more clever to do this bit
 	replace(replace(replace(replace(LEFT(CONVERT([NVARCHAR] (4000),[text]),@LeftText), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' ') */
 	FROM [sys].dm_exec_cached_plans AS cp WITH (NOLOCK)
-	CROSS APPLY [sys].dm_exec_sql_text(plan_handle) 
+	/* perf 2026-07-02: removed dead CROSS APPLY dm_exec_sql_text(plan_handle) - its text was never used (QueryText='') */
 	WHERE cp.cacheobjtype = N'Compiled Plan' 
 	AND cp.objtype IN (N'Adhoc', N'Prepared') 
 	AND cp.usecounts = 1
@@ -6095,18 +6045,47 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Got cached plan statistics - Biggest single use plans',0,1) WITH NOWAIT;
 	END
+
+	/* 2026-10-16. Invariant: every sys.dm_os_buffer_descriptors read sits
+	   behind ONE @BufferScanMaxGB gate, computed once from one perf-counter read placed above its first use. That DMV
+	   enumerates EVERY buffer-pool page (minutes on big-memory servers), so it is read ONCE, here, and only when the
+	   pool holds at most @BufferScanMaxGB of data pages. Section 14 and the migration section's usage-likelihood
+	   estimate both read @bufferPagesPerDB. Past the gate, or with the pool size unknown, nothing is scanned. */
+	DECLARE @BufferPoolPagesMB BIGINT;
+	DECLARE @bufferPagesPerDB TABLE (database_id INT PRIMARY KEY, db_buffer_pages BIGINT);
+	BEGIN TRY
+		SELECT @BufferPoolPagesMB = cntr_value*8/1024
+		FROM [sys].dm_os_performance_counters
+		WHERE [counter_name] = 'Database pages'
+		AND [object_name] LIKE '%Buffer Manager%';
+		IF @BufferPoolPagesMB IS NOT NULL /*fail CLOSED: unknown pool size (broken perf counters, a real production state) must not trigger the scan*/
+			AND @BufferPoolPagesMB <= CONVERT(BIGINT, ISNULL(@BufferScanMaxGB,0)) * 1024 /*BIGINT: INT*1024 overflows (error 8115) past @BufferScanMaxGB=2097151*/
+			AND ISNULL(@BufferScanMaxGB,0) > 0
+		BEGIN
+			INSERT @bufferPagesPerDB
+			SELECT database_id, COUNT_BIG(*)
+			FROM [sys].dm_os_buffer_descriptors
+			WHERE database_id IS NOT NULL /*metadata-nullable; a NULL row would violate the PK*/
+			GROUP BY database_id;
+		END
+		ELSE
+			RAISERROR (N'Buffer-pool residency scan skipped (@BufferScanMaxGB gate: pool too large, size unknown, or scan disabled); Pages(MB) in memory reported as 0',0,1) WITH NOWAIT;
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Buffer-pool residency scan', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	END CATCH
 
 			/*----------------------------------------
 			--Find cpu load, io and memory per DB
 			----------------------------------------*/
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Reading buffer pages takes longer on higher memory servers',0,1) WITH NOWAIT;
@@ -6163,14 +6142,14 @@ END
 	FROM
 	(
 	SELECT
-		Name AS 'DatabaseName'
+		name AS 'DatabaseName'
 		, d.database_id
 		, SUM(num_of_reads) AS'Number of Reads'
 		, SUM(num_of_writes) AS'Number of Writes'
 		, SUM(num_of_writes) +  SUM(num_of_reads) [TotalIO]
 		FROM [sys].dm_io_virtual_file_stats(NULL,NULL) I
 		INNER JOIN @sysdatabasesTable d ON I.database_id = d.database_id
-		GROUP BY Name, d.database_id
+		GROUP BY name, d.database_id
 	) T2
 	LEFT OUTER JOIN 
 	(
@@ -6194,9 +6173,8 @@ END
 	(
 		SELECT 
 			database_id
-			, db_buffer_pages =COUNT_BIG(*)
-		FROM [sys].dm_os_buffer_descriptors
-		GROUP BY database_id
+			, db_buffer_pages
+		FROM @bufferPagesPerDB /*the ONE gated buffer-descriptor read above*/
 	) src ON src.database_id = T2.database_id
 	LEFT OUTER JOIN  
 	(
@@ -6236,7 +6214,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Checked CPU, IO  and memory usage',0,1) WITH NOWAIT;
@@ -6296,7 +6274,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Filtered wait stats have been prepared',0,1) WITH NOWAIT;
@@ -6304,7 +6282,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Looking at query stats.. this might take a wee while',0,1) WITH NOWAIT;
@@ -6459,6 +6437,7 @@ END
 			) AS qs 
 			OUTER APPLY [sys].dm_exec_query_plan(qs.plan_handle) tp  
 			WHERE tp.query_plan.exist('//MissingIndex')=1 
+			AND qs.plan_handle IN (SELECT rp.plan_handle FROM #sp_triage_readable_plan AS rp)
 		) AS tab 
 		CROSS APPLY query_plan.nodes('//StmtSimple') AS q(n) 
 		) TF
@@ -6466,7 +6445,7 @@ END
 		LEFT OUTER JOIN 
 		(
 			SELECT  
-				(( ISNULL(user_seeks,0) + ISNULL(user_scans,0 ) * avg_total_user_cost * avg_user_impact)/1) [Magic]
+				(( (ISNULL(user_seeks,0) + ISNULL(user_scans,0 )) * avg_total_user_cost * avg_user_impact)/1) [Magic] /*fixed precedence: (seeks+scans) must be multiplied by cost*impact, not just scans*/
 				, user_seeks 
 				, user_scans
 				, user_seeks + user_scans AllScans
@@ -6500,15 +6479,17 @@ END
 		, TF.plan_handle
 	) TFF
 	CROSS APPLY [sys].dm_exec_query_plan(TFF.plan_handle) tp  
+	WHERE TFF.plan_handle IN (SELECT rp.plan_handle FROM #sp_triage_readable_plan AS rp)
 	ORDER BY  [SecondsSavedPerDay] DESC, total_elapsed_time DESC 
 	OPTION (RECOMPILE);
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Plan insight - missing index', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 		SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR	  (N'ERROR Section 16 looking for missing indexes in Query plan',0,1) WITH NOWAIT;
@@ -6609,6 +6590,7 @@ END
 			CROSS APPLY [sys].dm_exec_sql_text(T1.sql_handle) qt
 			INNER JOIN @Databases d ON d.database_id = qp.dbid
 			WHERE T1.Id <= @TopQueries
+			AND T1.plan_handle IN (SELECT rp.plan_handle FROM #sp_triage_readable_plan AS rp)
 			--WHERE PATINDEX('%MissingIndex%',CAST(query_plan AS [NVARCHAR] (MAX))) > 0
 			ORDER BY 
 			CASE 
@@ -6623,11 +6605,12 @@ END
 		ORDER BY CASE WHEN [Impact%] > 0 THEN 1 ELSE 0 END DESC, [Total_GBsRead]*[Impact%] DESC OPTION (RECOMPILE);
 	END TRY
 	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Plan insight - most intensive query', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 		IF @Debug = 1
 	BEGIN
 		SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR	  (N'ERROR Section 17 Find most intensive query',0,1) WITH NOWAIT;
@@ -6636,7 +6619,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR	  (N'Evaluated execution plans for missing indexes',0,1) WITH NOWAIT;
@@ -6650,7 +6633,7 @@ END
 		SET @CustomErrorText = '['+@DatabaseName+'] Looking for missing indexes in DMVs'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
@@ -6676,7 +6659,7 @@ END
 				, mid.inequality_columns
 				, mid.included_columns
 				, ''SELECT STUFF(( SELECT '''', '''' + [Columns] 
-			FROM ( SELECT TOP 25 c1.[id], [Columns], [Count] 
+			FROM ( SELECT TOP 100 PERCENT c1.[id], [Columns], [Count] 
 			FROM (
 			SELECT ROW_NUMBER() OVER(ORDER BY [RankMe]) [id], LTRIM([Columns]) [Columns] 
 			FROM (VALUES('''''' + REPLACE(ISNULL(mid.equality_columns + ISNULL('',''+ mid.inequality_columns,''''),ISNULL(mid.inequality_columns,'''')) ,'','','''''',1),('''''') 
@@ -6684,8 +6667,8 @@ END
 			+ '' LEFT OUTER JOIN (
 			SELECT ROW_NUMBER() OVER(ORDER BY [Count]) [id] ,LTRIM([Count]) [Count] 
 			FROM (VALUES((SELECT COUNT (DISTINCT '' + REPLACE(ISNULL(mid.equality_columns + ISNULL('',''+ mid.inequality_columns,''''),ISNULL(mid.inequality_columns,'''')) ,'',''
-			,'') FROM '' + [statement] +'')),((SELECT COUNT (DISTINCT '') 
-			+'') FROM '' + [statement] +'')))t ([Count]) )c2 ON c2.id = c1.id 
+			,'') FROM '' + [statement] +'' WITH(NOLOCK)),((SELECT COUNT (DISTINCT '') 
+			+'') FROM '' + [statement] +'' WITH(NOLOCK))))t ([Count]) )c2 ON c2.id = c1.id 
 			ORDER BY c2.[Count] * 1 DESC
 			) t1 FOR XML PATH('''''''')),1,1,'''''''') AS NameValues'' [BeingClever]
 			FROM [sys].dm_db_missing_index_group_stats AS migs 
@@ -6699,6 +6682,7 @@ END
 				EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for missing indexes in DMVs', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -6708,16 +6692,16 @@ END
 			SET @CustomErrorText = '['+@DatabaseName+'] Index usage checks'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			END
 
 			SELECT @dynamicSQL = '
-			USE ['+@DatabaseName+']
+			USE '+QUOTENAME(@DatabaseName)+'
 			SELECT --TOP 5000 
-				'''+@DatabaseName+'''
+				N'''+REPLACE(@DatabaseName, N'''', N'''''')+N'''
 				, OBJECT_NAME(s.[object_id]) AS [ObjectName]
 				, i.name AS [IndexName]
 				, i.index_id
@@ -6753,6 +6737,7 @@ END
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Index usage checks', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -6761,28 +6746,60 @@ END
 
 			/*----------------------------------------
 			--Loop all the user databases to run database specific commands against them
+			some build in logic, if more than 10 non-core database, just do the heaviest usage databases.
+			Loop logic would set the variables then delete the entry from the @databases table
 			----------------------------------------*/
+	
+	IF (SELECT COUNT(1) FROM @Databases WHERE database_id > 4) > 10
+	BEGIN
+		RAISERROR (N'Lots of databases, only taking the top 5',0,1) WITH NOWAIT;
+	
+
+		DELETE FROM @Databases
+		WHERE [TotalIORank] > 10 OR database_id <5
+
+		SELECT @Databasei_Max = COUNT(1) FROM @Databases
+
+		/* 2026-10-16: a debug result set. Unguarded, it reached the client as an extra result set on every
+		   server with more than 10 user databases. */
+		IF @Debug = 1
+			SELECT * from @Databases
+	END
+
 	DECLARE @SkipthisDB BIT	
 	SET @SkipthisDB = 0
 	SET @dynamicSQL = ''
 	SET @Databasei_Count = 1; 
+	/* Per-database loop. Invariant (2026-10-16): every database name concatenated into SQL that runs goes
+	   through QUOTENAME when it is an identifier, and through REPLACE(x, N'''', N'''''') when it sits inside a string
+	   literal of that SQL (fix text: REPLACE(QUOTENAME(x), ...)).
+	   Each iteration starts by resetting @SkipthisDB and the SELECT TOP 1 targets; the loop ends when that SELECT
+	   finds no row, so a database is never processed twice on stale values. */
 	WHILE @Databasei_Count <= @Databasei_Max 
 	BEGIN 
-		SELECT 
+		SET @SkipthisDB = 0;
+		SELECT @DatabaseName = NULL, @DatabaseState = NULL, @AGBackupPref = NULL, @AGCurrentLocation = NULL, @SecondaryReadRole = NULL;
+		SELECT TOP 1
 			@DatabaseName = d.databasename
 			, @DatabaseState = d.state 
 			, @AGBackupPref = BackupPref
 			, @AGCurrentLocation = CurrentLocation
 			, @SecondaryReadRole = ReadSecondary
 		FROM @Databases d 
-		WHERE id = @Databasei_Count 
+		WHERE 1=1
+		--AND id = @Databasei_Count 
 		AND d.state NOT IN (2,6)
 		OPTION (RECOMPILE)
+		IF @DatabaseName IS NULL BREAK;
+
+		/*Now we have the variables, so delete the entry so the table loops become simpler*/
+		DELETE FROM @Databases
+		WHERE databasename = @DatabaseName
 
 		SET @ErrorMessage = 'Looping Database ' + CONVERT([VARCHAR](4),@Databasei_Count) +' of ' + CONVERT([VARCHAR](4),@Databasei_Max ) + ': [' + @DatabaseName + '] ';
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (@ErrorMessage,0,1) WITH NOWAIT;
@@ -6804,7 +6821,7 @@ END
 				SET @CustomErrorText = '['+@DatabaseName+'] Looking at unused indexes'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
@@ -6812,7 +6829,7 @@ END
 			SET ANSI_WARNINGS OFF
 			
 			SET @dynamicSQL = '
-			USE ['+@DatabaseName +']
+			USE '+QUOTENAME(@DatabaseName)+'
 			DECLARE @DaysAgo INT
 			DECLARE @TheDate DATETIME
 			SET @DaysAgo = 15
@@ -6851,6 +6868,7 @@ END
 				EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking at unused indexes' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -6866,14 +6884,14 @@ END
 				SET @CustomErrorText = '['+@DatabaseName+'] Looking for heap tables'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			END
 
 			SET @dynamicSQL = CASE 
-			WHEN @IsSQLAzure = 0 THEN 'USE ['+@DatabaseName +']'
+			WHEN @IsSQLAzure = 0 THEN 'USE '+QUOTENAME(@DatabaseName)
 			ELSE '' END
 +'
 	SELECT 
@@ -6907,15 +6925,15 @@ END
 			, last_user_lookup
 			/*, forwarded_record_count, record_count, page_count*/
 
-		FROM ['+@DatabaseName +'].[sys].indexes IDX  
-		INNER JOIN ['+@DatabaseName +'].[sys].dm_db_index_usage_stats ius ON IDX.object_id = ius.object_id AND IDX.index_id = ius.index_id --AND IDXPS.database_id = ius.database_id
-		INNER JOIN ['+@DatabaseName +'].[sys].partitions p ON IDX.object_id = p.object_id AND IDX.index_id = p.index_id
+		FROM '+QUOTENAME(@DatabaseName)+'.[sys].indexes IDX  
+		INNER JOIN '+QUOTENAME(@DatabaseName)+'.[sys].dm_db_index_usage_stats ius ON IDX.object_id = ius.object_id AND IDX.index_id = ius.index_id --AND IDXPS.database_id = ius.database_id
+		INNER JOIN '+QUOTENAME(@DatabaseName)+'.[sys].partitions p ON IDX.object_id = p.object_id AND IDX.index_id = p.index_id
 
 		WHERE  IDX.type = 0
-		--AND rows< 500
+		AND p.rows > 0  /*perf 2026-07-02: skip empty heaps - SAMPLED dm_db_index_physical_stats reads pages per heap; empty heaps never have meaningful fragmentation, so this cuts needless page reads without dropping a real finding*/
 	) T1
 	CROSS APPLY
-	['+@DatabaseName +'].[sys].dm_db_index_physical_stats(DB_ID(), T1.object_id, T1.index_id, partition_number, ''SAMPLED'') IDXPS '
+	'+QUOTENAME(@DatabaseName)+'.[sys].dm_db_index_physical_stats(DB_ID(), T1.object_id, T1.index_id, partition_number, ''SAMPLED'') IDXPS '
 			IF @SkipHeaps = 0
 			BEGIN
 				
@@ -6924,6 +6942,7 @@ END
 					EXEC sp_executesql @dynamicSQL;
 				END TRY
 				BEGIN CATCH
+					INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for heap tables' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 					SELECT @errMessage  = ERROR_MESSAGE()
 					RAISERROR (@errMessage,0,1) WITH NOWAIT;
 					SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -6935,15 +6954,15 @@ END
 			SET @CustomErrorText = '['+@DatabaseName+'] Looking for stale statistics'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			END
 			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-			USE ['+@DatabaseName+'];
+			USE '+QUOTENAME(@DatabaseName)+';
 			SELECT 
-				'''+@DatabaseName+''' [DbName]
+				N'''+REPLACE(@DatabaseName, N'''', N'''''')+N''' [DbName]
 				, ObjectNm
 				, StatsID
 				, StatsName
@@ -7019,6 +7038,7 @@ END
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for stale statistics' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7029,14 +7049,14 @@ END
 		SET @CustomErrorText = '['+@DatabaseName+'] Skipping bad NC Indexes tables'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			END
 
 		   SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-			USE ['+@DatabaseName+'];
+			USE '+QUOTENAME(@DatabaseName)+';
 		   -- Possible Bad NC Indexes (writes > reads)  (Query 52) (Bad NC Indexes)
 			SELECT OBJECT_NAME(s.[object_id]) AS [Table Name], i.name AS [Index Name], i.index_id, 
 			i.is_disabled, i.is_hypothetical, i.has_filter, i.fill_factor,
@@ -7061,6 +7081,7 @@ END
 				PRINT ''
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Bad nonclustered indexes' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7075,14 +7096,14 @@ END
 	SET @CustomErrorText = '['+@DatabaseName+'] Looking for bad constraints'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			END
 
 			SET @dynamicSQL = 'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-				USE ['+@DatabaseName+'];
+				USE '+QUOTENAME(@DatabaseName)+';
 			IF EXISTS
 			(
 				SELECT 1
@@ -7093,10 +7114,10 @@ END
 				INSERT  #output_sqldba_org_sp_triage_notrust (KeyType, Tablename, KeyName, DBCCcommand, Fix)
 				SELECT 
 					''Check'' as [KeyType]
-					, ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + '']'' [tablename]
-					, ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS keyname
+					, '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+'.['' + s.name + ''].['' + o.name + '']'' [tablename]
+					, '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+'.['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS keyname
 					, ''DBCC CHECKCONSTRAINTS (['' + i.name + '']) WITH ALL_ERRORMSGS'' [DBCC]
-					, ''ALTER TABLE ['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + ''] WITH CHECK CHECK CONSTRAINT ['' + i.name + '']'' [Fix]
+					, ''ALTER TABLE '+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+'.['' + s.name + ''].'' + ''['' + o.name + ''] WITH CHECK CHECK CONSTRAINT ['' + i.name + '']'' [Fix]
 				FROM [sys].check_constraints i
 				INNER JOIN [sys].objects o ON i.parent_object_id = o.object_id
 				INNER JOIN [sys].schemas s ON o.schema_id = s.schema_id
@@ -7122,10 +7143,10 @@ END
 				INSERT  #output_sqldba_org_sp_triage_notrust (KeyType, Tablename, KeyName, DBCCcommand, Fix)
 				SELECT 
 					''FK'' as[ KeyType]
-					,  ''['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + '']'' AS TableName
-					, ''['+@DatabaseName+'].['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS FKName
+					,  '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+'.['' + s.name + ''].'' + ''['' + o.name + '']'' AS TableName
+					, '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+'.['' + s.name + ''].['' + o.name + ''].['' + i.name + '']'' AS FKName
 					,''DBCC CHECKCONSTRAINTS (['' + i.name + '']) WITH ALL_ERRORMSGS'' [DBCC]
-					, ''ALTER TABLE ['+@DatabaseName+'].['' + s.name + ''].'' + ''['' + o.name + ''] WITH CHECK CHECK CONSTRAINT ['' + i.name + '']'' [Fix]
+					, ''ALTER TABLE '+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+'.['' + s.name + ''].'' + ''['' + o.name + ''] WITH CHECK CHECK CONSTRAINT ['' + i.name + '']'' [Fix]
 				FROM    [sys].foreign_keys i
 					INNER JOIN [sys].objects o ON i.parent_object_id = o.OBJECT_ID
 					INNER JOIN [sys].schemas s ON o.schema_id = s.schema_id
@@ -7142,6 +7163,7 @@ END
 				EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for bad constraints' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7152,23 +7174,23 @@ END
 			SET @CustomErrorText = '['+@DatabaseName+'] Looking for indexes with possible compression benefit'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			END
 			SET @dynamicSQL = '
-			USE ['+@DatabaseName+']
-			SELECT TOP 10 '''+@DatabaseName+'''
+			USE '+QUOTENAME(@DatabaseName)+'
+			SELECT TOP 10 N'''+REPLACE(@DatabaseName, N'''', N'''''')+N'''
 			, CASE 
 				WHEN i.index_id >0 THEN ''ALTER INDEX ''+ ''['' + i.[name] + '']''  + '' ON '' 
 				ELSE''ALTER TABLE '' 
 			END  
-			+ ''['+@DatabaseName+']'' + ''.'' + ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' 
+			+ '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+''' + ''.'' + ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' 
 			+ '' REBUILD WITH (DATA_COMPRESSION=PAGE);''
 			[Just compress]
 			, CASE 
-				WHEN ps.lob_used_page_count > 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''['+@DatabaseName+']'' + ''.'' +  ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
+				WHEN ps.lob_used_page_count > 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+''' + ''.'' +  ''['' + s.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
 				ELSE '''' END [For LOB data]
 			, ps.[reserved_page_count]
 			, ps.row_count
@@ -7210,6 +7232,7 @@ END
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for indexes with possible compression benefit' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7220,7 +7243,7 @@ END
 		SET @CustomErrorText = '['+@DatabaseName+'] Intelligent compression evaluation'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
@@ -7229,7 +7252,7 @@ END
 			SET @dynamicSQL=' 
 			SELECT 
 			TOP 10 
-			'''+@DatabaseName+'''
+			N'''+REPLACE(@DatabaseName, N'''', N'''''')+N'''
 			, i.[name] AS IndexName
 			, i.index_id,p.partition_number
 			, t.[name] AS TableName
@@ -7245,23 +7268,23 @@ END
 			, CASE 
 				WHEN i.index_id >0 THEN ''ALTER INDEX ''+ ''['' + i.[name] + '']''  + '' ON '' 
 				ELSE ''ALTER TABLE '' 
-			END  + ''['+@DatabaseName+']'' 
+			END  + '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+''' 
 			+ ''.'' + ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' 
 			+ '' REBUILD WITH (DATA_COMPRESSION=PAGE);''
 			[Just compress]
 			, CASE 
-				WHEN SUM(s.lob_used_page_count )> 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + ''['+@DatabaseName+']'' + ''.'' +  ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
+				WHEN SUM(s.lob_used_page_count )> 0 THEN  ''ALTER INDEX ''+ ''['' + i.[name] + '']'' + '' ON '' + '''+REPLACE(QUOTENAME(@DatabaseName), N'''', N'''''')+''' + ''.'' +  ''['' + sc.[name] + '']'' + ''.'' + ''['' + o.[name] + '']'' + '' reorganize WITH (LOB_COMPACTION = ON);''
 				ELSE '''' 
 			END [For LOB data]
-			FROM ['+@DatabaseName+'].[sys].dm_db_partition_stats AS s
-			INNER JOIN ['+@DatabaseName+'].[sys].indexes AS i 
+			FROM '+QUOTENAME(@DatabaseName)+'.[sys].dm_db_partition_stats AS s
+			INNER JOIN '+QUOTENAME(@DatabaseName)+'.[sys].indexes AS i 
 				ON s.[object_id] = i.[object_id] AND s.[index_id] = i.[index_id]
-			INNER JOIN ['+@DatabaseName+'].[sys].tables t 
+			INNER JOIN '+QUOTENAME(@DatabaseName)+'.[sys].tables t 
 				ON t.OBJECT_ID = i.object_id
-			INNER JOIN ['+@DatabaseName+'].[sys].partitions p 
+			INNER JOIN '+QUOTENAME(@DatabaseName)+'.[sys].partitions p 
 				ON i.object_id = p.OBJECT_ID AND i.index_id = p.index_id
-			INNER JOIN ['+@DatabaseName+'].[sys].objects AS o WITH (NOLOCK)	ON o.[object_id] = i.[object_id]
-			INNER JOIN ['+@DatabaseName+'].[sys].schemas sc WITH (NOLOCK)	ON o.[schema_id] = sc.[schema_id]
+			INNER JOIN '+QUOTENAME(@DatabaseName)+'.[sys].objects AS o WITH (NOLOCK)	ON o.[object_id] = i.[object_id]
+			INNER JOIN '+QUOTENAME(@DatabaseName)+'.[sys].schemas sc WITH (NOLOCK)	ON o.[schema_id] = sc.[schema_id]
 			WHERE p.data_compression_desc NOT IN (''ROW'',''PAGE'')
 			GROUP BY i.[name],sc.[name], t.[name],o.[name] ,i.index_id,i.is_disabled
 			, i.is_hypothetical, p.data_compression_desc,p.partition_number
@@ -7274,6 +7297,7 @@ END
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Intelligent compression evaluation' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7284,16 +7308,16 @@ END
 	SET @CustomErrorText = '['+@DatabaseName+'] Blocking tables'
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 	END
 
-			SELECT @dynamicSQL = ' USE ['+@DatabaseName+']
+			SELECT @dynamicSQL = ' USE '+QUOTENAME(@DatabaseName)+'
 			SELECT 
 			TOP 5 
-				'''+@DatabaseName+''' DatabaseName
+				N'''+REPLACE(@DatabaseName, N'''', N'''''')+N''' DatabaseName
 				, object_name(object_id) as ObjectName
 				, ISNULL(row_lock_count,0) + ISNULL(page_lock_count,0) as LocksCount
 				, ISNULL(row_lock_wait_count,0) + ISNULL(page_lock_wait_count,0) as BlocksCount
@@ -7315,7 +7339,7 @@ END
 				, ISNULL(leaf_update_count,0) + ISNULL(nonleaf_update_count,0) [update_count]
 				, ISNULL(leaf_allocation_count,0) + ISNULL(nonleaf_allocation_count,0) [allocation_count]
 				, ISNULL(leaf_page_merge_count,0) + ISNULL(nonleaf_page_merge_count,0) [page_merge_count]
-			FROM [sys].dm_db_index_operational_stats(NULL,NULL,NULL,NULL)
+			FROM [sys].dm_db_index_operational_stats(DB_ID(),NULL,NULL,NULL) /*perf 2026-07-02: scope to current DB at source (was NULL=whole-instance scan repeated per looped DB)*/
 			WHERE db_name(database_id) = DB_NAME()
 			AND row_lock_count + page_lock_count > 0
 			AND object_name(object_id) NOT LIKE ''sys%''
@@ -7328,6 +7352,7 @@ END
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Blocking tables' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7339,17 +7364,17 @@ END
 		SET @CustomErrorText = '['+@DatabaseName+'] FKs without Indexes'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
 			END
 
-		SELECT @dynamicSQL = ' USE ['+@DatabaseName+']
+		SELECT @dynamicSQL = ' USE '+QUOTENAME(@DatabaseName)+'
 
 		SELECT 
 			DISTINCT 
-			'''+@DatabaseName+''' DatabaseName
+			N'''+REPLACE(@DatabaseName, N'''', N'''''')+N''' DatabaseName
 			, OBJECT_NAME(a.parent_object_id) AS TableName
 			, b.[name]  AS Column_Name
 			, N''CREATE NONCLUSTERED INDEX '' + QUOTENAME(N''IX_SQLDBA_FKI_'' + b.[name]) + N'' ON ''
@@ -7381,6 +7406,7 @@ END
 			EXEC sp_executesql @dynamicSQL;
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'FKs without Indexes' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7398,7 +7424,7 @@ LOOPING of databases ends here, add new sections above this portion
 	END
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Evaluated all databases',0,1) WITH NOWAIT;
@@ -7410,7 +7436,7 @@ LOOPING of databases ends here, add new sections above this portion
 			SET @CustomErrorText = '['+@DatabaseName+'] Looking for Stored Procudure Workload'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
@@ -7449,6 +7475,7 @@ LOOPING of databases ends here, add new sections above this portion
 				JOIN [sys].dm_exec_cached_plans cp on qs.plan_handle = cp.plan_handle 
 				CROSS APPLY [sys].dm_exec_sql_text(cp.plan_handle) 
 				WHERE 1=1
+				AND qs.plan_handle IN (SELECT rp.plan_handle FROM #sp_triage_readable_plan AS rp)
 				AND dbid IS NOT NULL
 				AND DB_NAME(dbid) IS NOT NULL
 				AND objectid is not null
@@ -7456,6 +7483,7 @@ LOOPING of databases ends here, add new sections above this portion
 
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for Stored Procedure Workload', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7469,7 +7497,7 @@ BEGIN TRY
 				SET @CustomErrorText = 'MISSING INDEXES - !Benefit > 1mm!'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 	END
@@ -7534,6 +7562,7 @@ BEGIN TRY
 
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Missing index details output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7543,6 +7572,7 @@ BEGIN TRY
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Missing index details', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	RAISERROR (N'Error with missing index details',0,1) WITH NOWAIT;
 	SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
@@ -7551,7 +7581,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Completed missing index details',0,1) WITH NOWAIT;
@@ -7564,7 +7594,7 @@ BEGIN TRY
 					SET @CustomErrorText = 'HEAP TABLES - Bad news'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
@@ -7623,6 +7653,7 @@ BEGIN TRY
 			ORDER BY (ISNULL(user_scans,0)+ ISNULL(user_seeks,0) + ISNULL(user_lookups,0) + ISNULL(user_updates,0)) DESC,  DB OPTION (RECOMPILE);
 			END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Heap tables output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7631,6 +7662,7 @@ BEGIN TRY
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Heap tables', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	RAISERROR (N'Error with finding heaps',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
@@ -7639,7 +7671,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Found heap tables',0,1) WITH NOWAIT;
@@ -7652,7 +7684,7 @@ BEGIN TRY
 		SET @CustomErrorText = 'STALE INDEXES - Consider removing them at some stage'
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 				RAISERROR(@CustomErrorText,0,1) WITH NOWAIT;
@@ -7716,6 +7748,7 @@ BEGIN TRY
 			OPTION (RECOMPILE)
 	 	END TRY
 			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Stale statistics output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 				SELECT @errMessage  = ERROR_MESSAGE()
 				RAISERROR (@errMessage,0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -7767,6 +7800,7 @@ BEGIN TRY
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Stale statistics', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 	RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with stale stats',0,1) WITH NOWAIT;
@@ -7775,7 +7809,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Listed state stats',0,1) WITH NOWAIT;
@@ -7825,6 +7859,7 @@ BEGIN TRY
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Top 10 Stored Procedure workload', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 	RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with SP workload',0,1) WITH NOWAIT;
@@ -7833,7 +7868,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Database stored procedure details',0,1) WITH NOWAIT;
@@ -7885,6 +7920,7 @@ BEGIN TRY
 	AND counter_name = N'Memory Grants Pending' OPTION (RECOMPILE);
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server Details, PLE', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with server details',0,1) WITH NOWAIT;
@@ -7894,7 +7930,7 @@ END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Listed general instance stats',0,1) WITH NOWAIT;
@@ -8042,6 +8078,7 @@ BEGIN TRY
 	OPTION (RECOMPILE);
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Non-default server settings', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 	RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with non default server settings',0,1) WITH NOWAIT;
@@ -8050,7 +8087,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Listed non-default settings',0,1) WITH NOWAIT;
@@ -8075,6 +8112,7 @@ BEGIN TRY
 	ORDER BY COUNT(session_id) DESC OPTION (RECOMPILE);
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Current active users', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 	RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with current active users',0,1) WITH NOWAIT;
@@ -8083,7 +8121,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Connections listed',0,1) WITH NOWAIT;
@@ -8121,6 +8159,7 @@ BEGIN TRY
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'FK trust checks', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with trust issues.. it happens',0,1) WITH NOWAIT;
@@ -8129,7 +8168,7 @@ BEGIN CATCH
 END CATCH	
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Included Constraint trust issues',0,1) WITH NOWAIT;
@@ -8193,6 +8232,7 @@ BEGIN TRY
 	OPTION (RECOMPILE);
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Database connected users', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with connected users',0,1) WITH NOWAIT;
@@ -8201,7 +8241,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Database Connections counted',0,1) WITH NOWAIT;
@@ -8219,26 +8259,24 @@ INSERT INTO @ConfidenceLevel VALUES(1.96,'95%')
 
 BEGIN TRY
 INSERT INTO @confidence
-select d.name, [LastSomethingHours] = DATEDIFF(HOUR,ISNULL(
-(select X1= max(bb.xx) 
-FROM (
-    select xx = max(last_user_seek) 
-        where max(last_user_seek) is not null 
-    union all 
-    select xx = max(last_user_scan) 
-        where max(last_user_scan) is not null 
-    union all 
-    select xx = max(last_user_lookup) 
-        where max(last_user_lookup) is not null 
-    union all 
-        select xx = max(last_user_update) 
-        where max(last_user_update) is not null) bb) ,@lastservericerestart),GETDATE())
-FROM sysdatabases d 
-LEFT OUTER JOIN [sys].dm_db_index_usage_stats s on d.dbid= s.database_id 
-WHERE database_id > 4
-GROUP BY d.name
+/* Rewritten 2026-07-08: was a correlated 4-way UNION-ALL scalar subquery evaluated per
+   database group over the full sysdatabases x index-usage join - pathological on instances
+   with many databases/indexes. Same result in one pass: unpivot the four last_user_* columns,
+   aggregate per database once, then join. Semantics preserved: databases with NO usage rows
+   were (and are) excluded; all-NULL usage dates still fall back to @lastservericerestart. */
+SELECT d.name
+	, DATEDIFF(HOUR, ISNULL(x.LastActivity, @lastservericerestart), GETDATE())
+FROM sysdatabases d
+INNER JOIN (
+	SELECT s.database_id, MAX(v.LastDate) AS LastActivity
+	FROM [sys].dm_db_index_usage_stats s
+	CROSS APPLY (VALUES (s.last_user_seek),(s.last_user_scan),(s.last_user_lookup),(s.last_user_update)) v(LastDate)
+	WHERE s.database_id > 4
+	GROUP BY s.database_id
+) x ON d.dbid = x.database_id
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Current likely active databases', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Issue with @confidence',0,1) WITH NOWAIT;
@@ -8246,15 +8284,23 @@ BEGIN CATCH
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 
-BEGIN TRY	
+BEGIN TRY
 IF @ShowMigrationRelatedOutputs = 1
 BEGIN
+	/* 2026-07-08, 2026-10-16: the per-DB residency comes from the ONE gated buffer-descriptor read above section 14
+	   (@bufferPagesPerDB, behind the @BufferScanMaxGB gate). Past the gate it is empty, so Pages(MB) in memory
+	   reports 0 and the 100%-likely shortcut falls through to the connections/confidence estimate. */
+	DECLARE @pagesPerDB TABLE (database_id INT PRIMARY KEY, TotalPagesMB BIGINT);
+	INSERT @pagesPerDB
+	SELECT database_id, db_buffer_pages*8/1024
+	FROM @bufferPagesPerDB;
+
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
 		, [Summary]
 		, [Details]
-	) 
+	)
 	SELECT 30, 'Database usage likelyhood','------','------'
 	INSERT #output_sqldba_org_sp_triage (
 	SectionID
@@ -8265,14 +8311,30 @@ BEGIN
 	
 SELECT  30 [SectionID]
 	, base.name [Section]
-	,ISNULL(CONVERT([VARCHAR](10),CASE
-		WHEN pages.[TotalPages in MB] > 0 THEN 100
-		WHEN con.number_of_connections > 0 THEN confidence.low 
-		ELSE confidence.high  
-	END),'')  + '% likely'    
+	/* 2026-07-08 honesty fixes: (a) a database with NO usage-stats rows (untouched since
+	   restart) used to render a blank percentage - the strongest decommission signal hidden;
+	   (b) open connections are corroborating evidence of use, yet that branch reported the
+	   LOWER confidence bound while no-connections got the UPPER - both now use the upper
+	   bound and connections can only raise it (min 90); (c) NULL bounds (uptime under ~1h
+	   wipes the interval math) now say so instead of rendering blank; (d) 'HoursActive' was
+	   server uptime, identical for every row - renamed ServerUptimeHours. The interval is a
+	   recency heuristic, NOT a true confidence interval; the Details timestamps are the
+	   real evidence. */
+	,CASE
+		WHEN pages.TotalPagesMB > 0 THEN '100.00% likely'
+		WHEN confidence.DBName IS NULL AND ISNULL(con.number_of_connections,0) = 0
+			THEN '0.00% likely - no recorded activity since restart'
+		WHEN confidence.DBName IS NULL
+			THEN 'Unknown - connected now, but no recorded index activity since restart'
+		WHEN confidence.high IS NULL
+			THEN 'Unknown - server restarted under an hour ago'
+		WHEN con.number_of_connections > 0
+			THEN CONVERT([VARCHAR](10),CASE WHEN confidence.high < 90 THEN CONVERT(MONEY,90) ELSE confidence.high END) + '% likely'
+		ELSE CONVERT([VARCHAR](10),confidence.high) + '% likely'
+	END
 	+  '; Connections: ' + ISNULL(CONVERT([VARCHAR](10),con.number_of_connections ),'')
-	+ '; HoursActive: '+ ISNULL(CONVERT([VARCHAR](10),DATEDIFF(HOUR,@lastservericerestart,GETDATE())),'') 
-	+ '; Pages(MB) in memory: ' + ISNULL(CONVERT([VARCHAR](10), ISNULL(pages.[TotalPages in MB],0)),'') 
+	+ '; ServerUptimeHours: '+ ISNULL(CONVERT([VARCHAR](10),DATEDIFF(HOUR,@lastservericerestart,GETDATE())),'')
+	+ '; Pages(MB) in memory: ' + ISNULL(CONVERT([VARCHAR](10), ISNULL(pages.TotalPagesMB,0)),'')
 	 [Summary]
  
 	,  'DB Created: '   + ISNULL(CONVERT([VARCHAR],base.DBcreatedate,120),'')
@@ -8287,7 +8349,10 @@ SELECT  30 [SectionID]
 	FROM (
 	SELECT db.name, db.database_id
 	, MAX(db.create_date) [DBcreatedate]
-	, MAX(o.modify_date) [ObjectModifyDate]
+	/* 2026-07-08: MAX(o.modify_date) [ObjectModifyDate] and its sys.all_objects join removed -
+	   the column was never used in the output, and the join was both a row explosion (every
+	   cross-database index-usage row matched against the CURRENT database's objects) and
+	   semantically wrong (object_ids from other databases resolved against local objects). */
 	, MAX(ius.last_user_seek)    [last_user_seek]
 	, MAX(ius.last_user_scan)   [last_user_scan]
 	, MAX(ius.last_user_lookup) [last_user_lookup]
@@ -8295,8 +8360,7 @@ SELECT  30 [SectionID]
 	FROM
 		@sysdatabasesTable db
 		LEFT OUTER JOIN [sys].dm_db_index_usage_stats ius  ON db.database_id = ius.database_id
-		LEFT OUTER JOIN  [sys].all_objects o ON o.object_id = ius.object_id AND o.type = 'U'
-	WHERE 
+	WHERE
 		db.database_id > 4 AND state NOT IN (1,2,3,6) AND user_access = 0
 	GROUP BY 
 		db.name, db.database_id
@@ -8310,12 +8374,7 @@ SELECT  30 [SectionID]
 		WHERE database_id > 4
 		GROUP BY name
 	) con ON con.dbname = base.name
-	LEFT OUTER JOIN (
-	SELECT DB_NAME (database_id) AS 'Database Name'
-	,  COUNT(*) *8/1024 AS [TotalPages in MB]
-	FROM [sys].dm_os_buffer_descriptors
-	GROUP BY database_id
-	) pages ON pages.[Database Name] = base.name
+	LEFT OUTER JOIN @pagesPerDB pages ON pages.database_id = base.database_id
 
 	LEFT OUTER JOIN (
 	SELECT DBName
@@ -8323,11 +8382,11 @@ SELECT  30 [SectionID]
 	  , intervals.x as [TargetActiveHours]
 	  , CONVERT(MONEY,(p - se * 1.96)*100) as low
 	  , CONVERT(MONEY,(intervals.p * 100)) as mid
-	  , CONVERT(MONEY,(p + se * 1.96)*100) as high 
+	  , CONVERT(MONEY,CASE WHEN (p + se * 1.96) > 1 THEN 100 ELSE (p + se * 1.96)*100 END) as high -- 2026-07-08: capped at 100 (the normal-approx upper bound can exceed it)
 	FROM (
 	  SELECT 
-		rates.*, 
-		sqrt(p * (1 - p) / n) as se -- calculate se
+		rates.*,
+		sqrt(p * (1 - p) / NULLIF(n,0)) as se -- calculate se (NULLIF guards divide-by-zero on a freshly-restarted server where n=hours-since-restart=0)
 	  FROM (
 		SELECT 
 		  conversions.*, 
@@ -8358,7 +8417,7 @@ SELECT  30 [SectionID]
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Database usage likelyhood measured',0,1) WITH NOWAIT;
@@ -8369,6 +8428,7 @@ SELECT  30 [SectionID]
 END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Database usage likelihood', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with database usage measures',0,1) WITH NOWAIT;
@@ -8402,7 +8462,7 @@ IF @ShowMigrationRelatedOutputs = 1
 
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Create DMA commands',0,1) WITH NOWAIT;
@@ -8410,6 +8470,7 @@ IF @ShowMigrationRelatedOutputs = 1
 	END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'DMA Output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with creating DMA commands',0,1) WITH NOWAIT;
@@ -8527,6 +8588,7 @@ END
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Default trace data', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with trace part 1 before autogrowth',0,1) WITH NOWAIT;
@@ -8592,6 +8654,7 @@ EXEC sp_executesql @dynamicSQL
 
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Trace data autogrowth', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Issue with Trace data insert',0,1) WITH NOWAIT;
@@ -8602,7 +8665,7 @@ END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done with Trace data',0,1) WITH NOWAIT;
@@ -8653,6 +8716,7 @@ BEGIN TRY
 		FROM  #output_sqldba_org_sp_triage_SqueezeMe  S
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Index compression checks', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with compression candidates',0,1) WITH NOWAIT;
@@ -8661,7 +8725,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done reading compression options',0,1) WITH NOWAIT;
@@ -8700,6 +8764,7 @@ INSERT #output_sqldba_org_sp_triage (
 		FROM  #output_sqldba_org_sp_triage_compressionstates  S
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Actual index compression validation', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error compression validation',0,1) WITH NOWAIT;
@@ -8708,7 +8773,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done with compression evaluation',0,1) WITH NOWAIT;
@@ -8739,10 +8804,10 @@ BEGIN TRY
 		+',[has_filter]:'+ CONVERT([VARCHAR](25),has_filter) 
 
 		, '[IndexType]:' + ISNULL(IndexType,'')
-		+',[last_user_scan]:' + CONVERT([VARCHAR],ISNULL(IndexType,''),120) 
-		+',[last_user_lookup]:'+CONVERT([VARCHAR],ISNULL(IndexType,''),120) 
-		+',[last_user_seek]:'+ CONVERT([VARCHAR],ISNULL(IndexType,''),120)
-		FROM  
+		+',[last_user_scan]:' + ISNULL(CONVERT([VARCHAR],last_user_scan,120),'') /*fixed copy-paste: was CONVERT(IndexType) x3, now the real date columns*/
+		+',[last_user_lookup]:'+ ISNULL(CONVERT([VARCHAR],last_user_lookup,120),'')
+		+',[last_user_seek]:'+ ISNULL(CONVERT([VARCHAR],last_user_seek,120),'')
+		FROM
 		(
 			SELECT RANK() OVER(ORDER BY([Reads] + [Writes]) DESC) RankMe
 			,dbname
@@ -8753,11 +8818,15 @@ BEGIN TRY
 			,Writes
 			,[FillFactor]
 			,has_filter
+			,last_user_scan
+			,last_user_lookup
+			,last_user_seek
 		FROM #output_sqldba_org_sp_triage_indexusage
 		)  S
 		WHERE RankMe < 25
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TOP 25 index usage', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with index usage stats',0,1) WITH NOWAIT;
@@ -8767,7 +8836,7 @@ END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done with index usage patterns',0,1) WITH NOWAIT;
@@ -8812,8 +8881,7 @@ INSERT #output_sqldba_org_sp_triage (
 			,[TotalReadActivity%]
 		FROM #output_sqldba_org_sp_triage_indexusage
 		)  S
-		WHERE UPPER(IndexName) LIKE '%LEXEL%' 
-		OR UPPER(IndexName) LIKE '%SQLDBA%'
+		WHERE UPPER(IndexName) LIKE '%SQLDBA%'
 		
 
 	INSERT #output_sqldba_org_sp_triage (
@@ -8853,11 +8921,11 @@ INSERT #output_sqldba_org_sp_triage (
 			,[TotalReadActivity%]
 		FROM #output_sqldba_org_sp_triage_indexusage
 		)  S
-		WHERE UPPER(IndexName) LIKE '%LEXEL%' 
-		OR UPPER(IndexName) LIKE '%SQLDBA%'
+		WHERE UPPER(IndexName) LIKE '%SQLDBA%'
 		GROUP BY dbname,[ObjectName]
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Our index usage evaluation', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with custom index evaluation',0,1) WITH NOWAIT;
@@ -8866,7 +8934,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done with index evaluation',0,1) WITH NOWAIT;
@@ -8919,6 +8987,7 @@ SET @CustomErrorText = 'Current blocking tables'
 		ORDER BY [page_io_latch_wait_in_ms] DESC
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Current blocking tables', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with currently blocking tables',0,1) WITH NOWAIT;
@@ -8927,7 +8996,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at blocking queries',0,1) WITH NOWAIT;
@@ -8988,7 +9057,11 @@ BEGIN TRY
 	+ '; [Query]:'+ replace(replace(replace(replace(CONVERT([NVARCHAR] (3600),st.text), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800)
 
 FROM
+/* Perf 2026-07-02: TOP (35) ORDER BY RankIO applied to the aggregate BEFORE the plan/text DMV
+   APPLYs, so dm_exec_query_plan/dm_exec_sql_text run for ~35 rows not every plan_handle. */
 (
+	SELECT TOP (35) * FROM
+	(
 	SELECT
 		CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)  [Total Elapsed Time in S]
 		, RANK() OVER(ORDER BY((SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))) DESC) [RankIO]
@@ -9027,8 +9100,12 @@ FROM
 		, qs.plan_handle AS [Plan Handle]
 	FROM
 		#dadatafor_exec_query_stats qs
-	GROUP BY qs.plan_handle 
+	WHERE qs.plan_handle IN (SELECT rp.plan_handle FROM #sp_triage_readable_plan AS rp)
+	GROUP BY qs.plan_handle
 	--HAVING CONVERT(MONEY,(SUM(qs.total_elapsed_time) / 1000000.0)) > 1
+	) sAgg
+	WHERE sAgg.[RankIO] <= 35
+	ORDER BY sAgg.[RankIO] ASC
 	) s
 OUTER APPLY
 	[sys].dm_exec_query_plan(s.[Plan Handle]) AS qp
@@ -9040,6 +9117,7 @@ WHERE [RankIO] <= 35
 ORDER BY [RankIO]  ASC
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Top queries', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with selecting the top queries',0,1) WITH NOWAIT;
@@ -9049,67 +9127,74 @@ END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Usage top xx queries completed',0,1) WITH NOWAIT;
 	END
 
 			/*----------------------------------------
-			--Disk Cluster Sizes
+			--Disk Volumes  (SectionID 40)
+			--
+			-- Converted 2026-07-02 from a WMI/xp_cmdshell (Get-WmiObject Win32_Volume) call to pure
+			-- T-SQL via sys.dm_os_volume_stats. No xp_cmdshell needed here anymore -> SPN is the ONLY
+			-- xp_cmdshell consumer left in the script. This is RICHER than the old output (mount point,
+			-- filesystem, total/free/used GB, %free, compression) but it does NOT expose the NTFS
+			-- allocation-unit / cluster size (BytesPerCluster) -- that field only comes from WMI/fsutil.
+			-- Accepted trade-off: the 64K-allocation-unit best-practice check is dropped in favour of
+			-- never touching the host. dm_os_volume_stats is 2008R2+ and works on Azure SQL MI; on
+			-- Azure SQL DB it returns nothing (no OS volumes) which is fine.
 			----------------------------------------*/
-SET @CustomErrorText = 'Checking volume cluster size'
-DECLARE @svrName [VARCHAR](255)
-DECLARE @output TABLE (line [VARCHAR](255))
-DECLARE @volumeinfo TABLE (Info [NVARCHAR] (500))
-SET @svrName = @ThisServer 
-IF CHARINDEX ('\', @svrName) > 0
+SET @CustomErrorText = 'Checking disk volumes'
+IF OBJECT_ID(N'sys.dm_os_volume_stats') IS NOT NULL
 BEGIN
-       SET @svrName = SUBSTRING(@svrName, 1, CHARINDEX('\',@svrName)-1)
-END
-IF @StateOfXP_CMDSHELL = 1
 BEGIN TRY
-	SET @powershellrun = 'powershell.exe -c "Get-WmiObject -ComputerName ' + QUOTENAME(@svrName,'''') + ' -Class Win32_Volume -Filter ''DriveType = 3'' | select Name, BlockSize | format-table"'
-	INSERT INTO @volumeinfo
-	EXEC xp_cmdshell @powershellrun
-
-	DECLARE @volumes TABLE 
+	DECLARE @volumes TABLE
 	(
-		Volume [NVARCHAR] (500)
-		, [BlockSize] INT
+		Volume [NVARCHAR] (520)
+		, FileSystem [NVARCHAR] (50)
+		, TotalGB DECIMAL(18,1)
+		, FreeGB DECIMAL(18,1)
+		, PercentFree DECIMAL(5,1)
+		, IsCompressed BIT
 	)
-	INSERT INTO @volumes
-	SELECT [Measure], T2.Value
-	--, RANK ( ) OVER ( partition by T2.Measure ORDER BY Value ) RowID
-	FROM (
-	SELECT LEFT(Info, PATINDEX('%\%',Info)) [Measure]
-	, REPLACE(RIGHT(Info, LEN(Info)-PATINDEX('%\%',Info)),' ','') [Value]
-	FROM (
-	SELECT REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(Info,'  ',' '),'  ',' '),'  ',' '),'  ',' '),'  ',' '),'  ',' ') Info
-	FROM @volumeinfo
-	) T1
-	WHERE Info LIKE '[A-Z][:]\%' 
-	) T2
+	/* One row per distinct volume that holds a database file. MIN() collapses the
+	   multiple (database_id,file_id) rows that map to the same physical volume. */
+	INSERT INTO @volumes (Volume, FileSystem, TotalGB, FreeGB, PercentFree, IsCompressed)
+	SELECT
+		vs.volume_mount_point
+		, MIN(vs.file_system_type)
+		, CONVERT(DECIMAL(18,1), MIN(vs.total_bytes)     / 1073741824.0)
+		, CONVERT(DECIMAL(18,1), MIN(vs.available_bytes) / 1073741824.0)
+		, CONVERT(DECIMAL(5,1), CASE WHEN MIN(vs.total_bytes) > 0
+			THEN MIN(vs.available_bytes) * 100.0 / MIN(vs.total_bytes) ELSE 0 END)
+		, MIN(CONVERT(INT, vs.is_compressed))
+	FROM sys.master_files AS mf
+	CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) AS vs
+	WHERE mf.database_id IN (SELECT r.database_id FROM #sp_triage_readable_db AS r)
+	GROUP BY vs.volume_mount_point;
 END TRY
 BEGIN CATCH
-	
-	RAISERROR (N'Error with volume cluster size',0,1) WITH NOWAIT;
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Checking disk volumes', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	RAISERROR (N'Error reading sys.dm_os_volume_stats (expected on Azure SQL DB)',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 	SELECT @errMessage  = ERROR_MESSAGE()
-	--IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
-	RAISERROR (@errMessage,0,1) WITH NOWAIT; 
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
 END CATCH
+END
+ELSE
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (N'Checking disk volumes', 0, N'sys.dm_os_volume_stats is not on this server. It needs a newer SQL Server version.');
 
 BEGIN TRY
-	SET @CustomErrorText = 'Disk cluster size'
+	SET @CustomErrorText = 'Disk volumes'
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
 		, [Summary]
 		, [Details]
-	) 
-	SELECT 40, 'Disk Cluster size','------','------'
+	)
+	SELECT 40, 'Disk Volumes','------','------'
 	INSERT #output_sqldba_org_sp_triage (
 	SectionID
 	, Section
@@ -9117,25 +9202,30 @@ BEGIN TRY
 	, Details
 	)
 	SELECT 40
-		,'Disk Cluster size'
+		,'Disk Volumes'
 		, Volume
-		, [BlockSize]
+		, CONVERT([NVARCHAR](4000),
+			FileSystem + N' | Total ' + CONVERT([NVARCHAR](20), TotalGB) + N' GB'
+			+ N' | Free ' + CONVERT([NVARCHAR](20), FreeGB) + N' GB (' + CONVERT([NVARCHAR](10), PercentFree) + N'%)'
+			+ CASE WHEN IsCompressed = 1 THEN N' | COMPRESSED' ELSE N'' END)
 	FROM @volumes V1
+	ORDER BY Volume
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Disk volumes', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
-	RAISERROR (N'Error with volume cluster size to output table',0,1) WITH NOWAIT;
+	RAISERROR (N'Error writing disk volumes to output table',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
-		RAISERROR (N'Done with disk cluster sizes',0,1) WITH NOWAIT;
+		RAISERROR (N'Done with disk volumes',0,1) WITH NOWAIT;
 	END
 
 			/*----------------------------------------
@@ -9217,6 +9307,7 @@ BEGIN
 END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Maintenance summary', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with reading or finding CommandLog table for Ola output',0,1) WITH NOWAIT;
@@ -9226,7 +9317,7 @@ END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done reading  CommandLog table for Ola output0',0,1) WITH NOWAIT;
@@ -9239,7 +9330,7 @@ END CATCH
 			----------------------------------------*/
 
 SET @CustomErrorText = 'Daily workload'
---BEGIN TRY
+BEGIN TRY
 	set @dbid = db_id(); 
 	SET @cnt = 0; 
 	SET @record_count = 0; 
@@ -9252,10 +9343,24 @@ SET @CustomErrorText = 'Daily workload'
 	--REWRITE FROM HERE
 
 	/* SELECT @TotalIODailyWorkload = SUM(CONVERT(MONEY,CONVERT(FLOAT,t_total_IO) * 8 /*KB*/ /1024/*MB*//1024)/@DaysOldestCachedQuery)  
-	FROM #LEXEL_OES_stats_output
 	*/
  SELECT @TotalIODailyWorkload = CONVERT(MONEY,SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))  * 8 /1024/1024 /@DaysOldestCachedQuery
 	FROM #dadatafor_exec_query_stats qs
+
+	/* 2026-07-02: proc-level I/O from dm_exec_procedure_stats (per-proc aggregates), same GB/day units +
+	   same @DaysOldestCachedQuery divisor as @TotalIODailyWorkload above. TRY/CATCH because it's an
+	   additive read; leaves NULL->0 if unavailable. NOTE the two totals are NOT strict subsets:
+	   @TotalIODailyWorkload comes from the FILTERED capture (the (reads+writes)*execs>200 predicate),
+	   while proc-stats is unfiltered - so proc CAN exceed it, which is why the DELTA below uses ABS(). */
+	BEGIN TRY
+		SELECT @TotalProcIODailyWorkload = CONVERT(MONEY,SUM(ps.total_physical_reads) + SUM(ps.total_logical_reads) + SUM(ps.total_logical_writes)) * 8 /1024/1024 /@DaysOldestCachedQuery
+		FROM [sys].dm_exec_procedure_stats ps;
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Proc-level I/O (dm_exec_procedure_stats)', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		SET @TotalProcIODailyWorkload = NULL;
+	END CATCH
+	SET @TotalProcIODailyWorkload = ISNULL(@TotalProcIODailyWorkload, 0);
 
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
@@ -9278,6 +9383,24 @@ SET @CustomErrorText = 'Daily workload'
 	, 'Total' [Details]
 	FROM #dadatafor_exec_query_stats qs
 
+	/* 2026-07-02: proc-vs-non-proc split of the cached workload. Total PROC I/O = the stored-proc share
+	   (dm_exec_procedure_stats); DELTA NON-PROC = ABS(all-query-stats - proc) ~= ad-hoc/prepared share.
+	   ABS() because the query-stats total is filtered and proc-stats is not (see note above). */
+	INSERT #output_sqldba_org_sp_triage (
+		SectionID
+		, Section
+		, Summary
+		, Details
+	)
+	SELECT 99
+		, 'Total PROC I/O per day: ' + CONVERT([VARCHAR](50), @TotalProcIODailyWorkload) + 'GB/day'
+		, 'Stored-proc share of cached I/O workload (dm_exec_procedure_stats)'
+		, 'Proc'
+	UNION ALL
+	SELECT 99
+		, 'DELTA NON-PROC I/O per day: ' + CONVERT([VARCHAR](50), ABS(@TotalIODailyWorkload - @TotalProcIODailyWorkload)) + 'GB/day'
+		, 'Approx ad-hoc/prepared share = ABS(total exec-stats I/O - proc I/O)'
+		, 'Non-Proc'
 
 	INSERT #output_sqldba_org_sp_triage (
 	SectionID
@@ -9302,9 +9425,14 @@ SET @CustomErrorText = 'Daily workload'
 		+ 'GB/day; ' + CONVERT([VARCHAR](15),(CASE WHEN s.[Total Execution Count] = 1 THEN 1 ELSE CONVERT(MONEY,s.[Total Execution Count])/@DaysOldestCachedQuery END) ) 
 		+ ' executions/day; ' +  CONVERT([VARCHAR](15),([Avg CPU Time in MS]/1000))
 		+ ' s(avg) *[DailyGB; DailyExecutions; AverageTime(s)]' [Summary]
-		, LEFT('/*' + ISNULL(O.type_desc COLLATE DATABASE_DEFAULT,'') + '; '+ ISNULL(O.name COLLATE DATABASE_DEFAULT,'') + ' [' + ISNULL(DBs.name COLLATE DATABASE_DEFAULT,'') + '].[' + ISNULL(SC.name COLLATE DATABASE_DEFAULT,'') + '] > */' + ISNULL(left(replace(replace(replace(replace(CONVERT([NVARCHAR] (3600),st.text COLLATE DATABASE_DEFAULT), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800),''),3850) [Details]  
+		, LEFT('/*' + ISNULL(O.type_desc COLLATE DATABASE_DEFAULT,'') + '; '+ ISNULL(O.name COLLATE DATABASE_DEFAULT,'') + ' [' + ISNULL(DBs.name COLLATE DATABASE_DEFAULT,'') + '].[' + ISNULL(SC.name COLLATE DATABASE_DEFAULT,'') + '] > */' + ISNULL(left(replace(replace(replace(replace(CONVERT([NVARCHAR] (3600),st.text COLLATE DATABASE_DEFAULT), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800),''),3850) [Details]
 	FROM
+	/* Perf 2026-07-02: TOP (35) ORDER BY RankIO applied to the aggregate BEFORE the plan/text DMV
+	   APPLYs below, so dm_exec_query_plan/dm_exec_sql_text run for ~35 rows not every plan_handle.
+	   @TotalIODailyWorkload (SUM over the full table, above) is unaffected. */
 	(
+		SELECT TOP (35) * FROM
+		(
 		SELECT
 			CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)  [Total Elapsed Time in S]
 			, RANK() OVER(ORDER BY((SUM(qs.total_physical_reads) + SUM(qs.total_logical_reads) + SUM(qs.total_logical_writes))) DESC) [RankIO]
@@ -9344,8 +9472,12 @@ SET @CustomErrorText = 'Daily workload'
 		
 		FROM
 			#dadatafor_exec_query_stats qs
-		GROUP BY qs.plan_handle 
+		WHERE qs.plan_handle IN (SELECT rp.plan_handle FROM #sp_triage_readable_plan AS rp)
+		GROUP BY qs.plan_handle
 		--HAVING CONVERT(MONEY,(SUM(qs.total_elapsed_time) / 1000000.0)) > 1
+		) sAgg
+		WHERE sAgg.[RankIO] <= 35
+		ORDER BY sAgg.[RankIO] ASC
 		) s
 	OUTER APPLY
 		[sys].dm_exec_query_plan(s.[Plan Handle]) AS qp
@@ -9358,14 +9490,85 @@ SET @CustomErrorText = 'Daily workload'
 	WHERE [RankIO] <= 35
 	ORDER BY [RankIO]  ASC
 	OPTION (RECOMPILE);
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Daily workload', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage  = ERROR_MESSAGE()
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Daily workload calculated',0,1) WITH NOWAIT;
 	END
+
+			/*----------------------------------------
+			--Top Procs by I/O  (SectionID 100 - clustered with the 99 workload section)  [added 2026-07-02]
+			--
+			-- Attribution for the "Total PROC I/O per day" summary line: which stored procs actually
+			-- drive the cached I/O workload. dm_exec_procedure_stats holds per-proc aggregates directly
+			-- (keyed by database_id/object_id), so no plan/text DMV APPLY is needed - proc name comes
+			-- from OBJECT_NAME. Ranked by the same I/O metric (phys+logical reads + logical writes) as
+			-- the query report, capped at TOP(@TopQueries). Valid on box / Azure SQL DB / MI. TRY/CATCH
+			-- so it degrades to an empty section rather than failing the run.
+			----------------------------------------*/
+	SET @CustomErrorText = 'Top procs by I/O'
+	BEGIN TRY
+		INSERT #output_sqldba_org_sp_triage (
+			[SectionID], [Section], [Summary], [Details]
+		)
+		SELECT 100, 'Top Procs by I/O (dm_exec_procedure_stats)','------','------'
+
+		INSERT #output_sqldba_org_sp_triage (
+			SectionID, Section, Summary, Details
+		)
+		SELECT 100
+			, '[DB]:' + ISNULL(DB_NAME(ps.database_id),'')
+			  + '; [Proc]:' + ISNULL(OBJECT_NAME(ps.object_id, ps.database_id),'(cross-db/unresolved)')
+			  + '; [RankIO]:' + CONVERT([VARCHAR](20), ps.[RankIO])
+			  + '; [I/O GB]:' + CONVERT([VARCHAR](20), ps.[I/O GB])
+			  + '; [I/O GB/day]:' + CONVERT([VARCHAR](20), CONVERT(MONEY, ps.[I/O GB] / @DaysOldestCachedQuery))
+			, '[Executions]:' + CONVERT([VARCHAR](20), ps.execution_count)
+			  + '; [Total Elapsed S]:' + CONVERT([VARCHAR](20), CONVERT(MONEY, ps.total_elapsed_time/1000000.0))
+			  + '; [Total CPU S]:' + CONVERT([VARCHAR](20), CONVERT(MONEY, ps.total_worker_time/1000000.0))
+			  + '; [Avg CPU MS]:' + CONVERT([VARCHAR](20), CONVERT(MONEY, ps.total_worker_time/NULLIF(ps.execution_count,0)/1000.0))
+			, '[Total physical Reads]:' + CONVERT([VARCHAR](20), ps.total_physical_reads)
+			  + '; [Total Logical Reads]:' + CONVERT([VARCHAR](20), ps.total_logical_reads)
+			  + '; [Total Logical Writes]:' + CONVERT([VARCHAR](20), ps.total_logical_writes)
+			  + '; [Last Execution Time]:' + CONVERT([VARCHAR](20), ps.last_execution_time, 120)
+		FROM
+		(
+			SELECT TOP (@TopQueries)
+				database_id, object_id, execution_count, total_elapsed_time, total_worker_time
+				, total_physical_reads, total_logical_reads, total_logical_writes, last_execution_time
+				, (total_physical_reads + total_logical_reads + total_logical_writes) [Pages]
+				, CONVERT(MONEY, total_physical_reads + total_logical_reads + total_logical_writes) * 8 /1024/1024 [I/O GB]
+				, RANK() OVER(ORDER BY (total_physical_reads + total_logical_reads + total_logical_writes) DESC) [RankIO]
+			FROM [sys].dm_exec_procedure_stats
+			WHERE database_id IN (SELECT r.database_id FROM #sp_triage_readable_db AS r)
+			ORDER BY (total_physical_reads + total_logical_reads + total_logical_writes) DESC
+		) ps
+		ORDER BY ps.[RankIO] ASC
+		OPTION (RECOMPILE);
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Top procs by I/O', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		SELECT @errMessage = ERROR_MESSAGE(); RAISERROR (@errMessage,0,1) WITH NOWAIT;
+		RAISERROR (N'Error with top procs by I/O (dm_exec_procedure_stats)',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+		RAISERROR (@CustomErrorText,0,1) WITH NOWAIT;
+	END CATCH
+
+		IF @Debug = 1
+		BEGIN
+			SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+			SET @DebugTime = GETDATE()
+			IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT;
+			RAISERROR (N'Top procs by I/O completed',0,1) WITH NOWAIT;
+		END
 
 
 			/*----------------------------------------
@@ -9460,6 +9663,7 @@ INSERT #output_sqldba_org_sp_triage (SectionID, Section,Summary,Details,Severity
 END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Password checks', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error checking password issues',0,1) WITH NOWAIT;
@@ -9469,7 +9673,7 @@ END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done checking password issues',0,1) WITH NOWAIT;
@@ -9512,6 +9716,7 @@ BEGIN
 END
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Deprecated features', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with reading or finding Depreacted features',0,1) WITH NOWAIT;
@@ -9521,7 +9726,7 @@ END CATCH
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking for Deprecated Features',0,1) WITH NOWAIT;
@@ -9555,6 +9760,7 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'FK no indexes', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with FKs with no indexes',0,1) WITH NOWAIT;
@@ -9563,7 +9769,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at FKs with no indexes',0,1) WITH NOWAIT;
@@ -9794,6 +10000,7 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Perfmon counters', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with Perfmon Counters',0,1) WITH NOWAIT;
@@ -9802,7 +10009,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at Perfmon Counters.. they are amazing!',0,1) WITH NOWAIT;
@@ -9814,7 +10021,7 @@ END CATCH
 	----------------------------------------*/
 BEGIN TRY
 	SET @CustomErrorText = 'Batch averages from perfmon'
-	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline*/
+	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline */
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
@@ -9864,6 +10071,7 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Batch averages from perfmon', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with Batch averages from perfmon',0,1) WITH NOWAIT;
@@ -9872,18 +10080,1651 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at Batch averages from perfmon',0,1) WITH NOWAIT;
 	END
 
 	/*----------------------------------------
+	--Performance counter summaries: 120 since start, 121 right now (in-run sample), 122 since the last run, 123 batch response time
+	----------------------------------------*/
+/* PERFORMANCE COUNTER SUMMARIES (2026-10-21/22). The first part built
+   the catalog, the snapshots, the rules and sections 120 (since start) and 121 (right now). The second part added the history read
+   and its segmentation, section 122 (since the last run) and section 123 (batch response-time profile). The third part makes the
+   history read two-phase and sampled, and adds normal ranges, trends, first-seen dates and R14 (HISTORY f-k below).
+   INVARIANTS:
+   1. Every number is computed by its counter KIND, and the live cntr_type is checked against the family the catalog expects
+      (#pcs_catalog.ExpectTypes / DenExpectTypes; a ratio or average base must be 1073939712):
+        rate    = 272696576 or 272696320, cumulative: delta / seconds.
+        count   = cumulative, read as "how many in the window": delta. Log Growths, Log Shrinks, Deprecated Features Usage and
+                  the Batch Resp Statistics buckets are 65792 but cumulative, so the catalog marks them by hand; Number of
+                  Deadlocks/sec and Lock Timeouts are rate types read as counts because their rules ask "any in the window".
+        ratio   = 537003264 with its base: value / base x 100 at the reading; base 0 = no data. Section 120 only.
+        average = 1073874176 with its base: delta value / delta base; a base delta of 0 = no data.
+        gauge   = 65792 point-in-time reading; with a denominator gauge, reading / denominator x Scale.
+        per     = delta(numerator) / delta(denominator) x Scale, both cumulative, over the SAME window; a denominator delta
+                  of 0 = no data.
+      A live cntr_type outside the family gives a "could not be computed" row naming the type. Nothing is guessed.
+   2. Every row names its window: [Window] and [WindowSeconds] in Details, and the window in the sentence.
+   3. Nothing is differenced across a restart. "Since start" divides by UptimeSeconds = (ms_ticks -
+      sqlserver_start_time_ms_ticks) / 1000 from sys.dm_os_sys_info (clock- and DST-proof). A cumulative value that goes DOWN
+      inside a window is a reset: that pair gives no value.
+   4. Sections 104 and 105 are not edited. The three SCREEN selects at the end hide SectionID 104; the export table still
+      receives every 104 row in its old shape.
+   5. SQL Server 2008 syntax only in this block: no TRY_CONVERT/TRY_CAST, IIF, CONCAT, FORMAT, LAG/LEAD, PERCENTILE_*,
+      STRING_AGG, THROW. Lists are built with FOR XML PATH.
+   6. Every Summary sentence and every threshold lives in #pcs_rules below and nowhere else.
+   7. No SELECT here sends the client a result set: every SELECT feeds an INSERT or a variable.
+   DETAILS FORMAT (machine-readable, for the app and for the history read of later runs): a run of [Key]:value; pairs, in any
+   order, each ending in ';'. Numbers use '.' decimals and no thousands separators (CONVERT, never FORMAT). A database,
+   node or feature name inside Details is escaped: '%' -> '%25', ';' -> '%3B', ',' -> '%2C', so ';' always ends a pair and
+   ',' always separates list items. Keys: [Metric] catalog key; [Kind]; [Value]; [Unit]; [Window]; [WindowSeconds];
+   [CntrType] the live type; [Status] ok|nodata|reset|type|missing; [Entity]; [Rule] and [Threshold] when a rule fired;
+   [Numerator], [Denominator], [Scale] for per; [Base] for ratio and average; [Readings] first,last for a gauge in the
+   sample; [Reason] when Status is not ok; roll-up rows: [Entities], [NonZero], [Zero], [Hits], [Max], [MaxAt],
+   [NotComputed], [NonZeroNames], [ZeroNames] (names lists cut at 1500 characters, then ",...(N in all)").
+   Header of 120: [sqlserver_start_time] (style 120), [UptimeSeconds], [WindowSeconds]. These make a later run's history
+   exact: two runs in one segment are UptimeSeconds apart, never local-clock apart. Then the history basis: [History]
+   read|absent|cap|error, [HistoryRuns], [HistoryRunsRead] (runs whose counters were read), [HistoryDays],
+   [RestartsSeenAtLeast], [HistorySegments], [HistoryTableRows], [HistoryTableMB], [HistoryRowsRead], [HistoryReadMs].
+   History keys on a metric row of 120: [Normal7d], [Normal30d], [Normal90d] (low,high,N or thin,N),
+   [NormalShown] 30d|90d|thin, [NormalOut] below|above with [NormalRule]:R_NORM30, [Trend] rising|falling|steady|thin with
+   [TrendWindow], [TrendPoints], [TrendFirst], [TrendSecond], [FirstSeen] (a run's evaldate, 'now' or 'none'). Roll-up
+   rows: [FirstSeen] as name:evaldate,... for Deprecated features; the log-growth trend keys on Log growths. R14 rows:
+   [Rule]:R14, [Runs], [Days], [FirstRun], [LastRun], [Evidence] (evaldate:value,... cut at 1500 characters).
+   Header of 121: [SampleSeconds] (measured), [Requested], [From], [To], [WindowSeconds].
+   Header of 122: [Window]:lastrun, [LastRun] (its evaldate), [LastRunStart], [Elapsed] uptime|clock, [WindowSeconds]; a
+   skipped 122 is its header alone with [Status]:skip and [Reason] none|restart|down|absent|cap|error.
+   Rows of 123: [Metric] BATCH_BANDS | BATCH_TAIL | BATCH_MEDIAN_P95 | BATCH_TAIL_CHANGE, [Window], [WindowSeconds], [Batches],
+   [ElapsedMs], [CountPct] and [TimePct] (five bands, in band order), [Buckets] (all 17: low-high:batches:ms, high empty
+   for the last), [Median] and [P95] (low-high in ms: a bucket RANGE, never an exact time), [TailCountPct], [TailTimePct].
+   HISTORY (read in two phases):
+   a. The export table @ExportDBName.@ExportSchema.@ExportTableName (already bracketed at the top of the proc: concatenated
+      as-is, never QUOTENAME'd again, never SET here) is read whatever @Export is. Absent table = no history, said. Before
+      reading, ONE metadata read of its rows and reserved MB (sys.dm_db_partition_stats); above HIST_MAXROWS rows (#pcs_rules)
+      history is not read, and the reason is said. Both reads are INSERT #pcs_* ... EXEC sp_executesql, so no dynamic SELECT
+      reaches the client. A read error = a could-not-run row and no history, said.
+      PHASE 1 lists the runs from cheap predicates only: this SQLInstance, evaldate in the last 90 days and before this run's,
+      SectionID 2 (Uptime:), 120 (this version's header) and the one 104 row of Batch Requests/sec (tested on the last 32
+      characters of Section, never a leading-wildcard scan of the whole text). PHASE 2 picks at most HIST_MAXRUNS runs that
+      stored counters (every run of the last HIST_RECENTRUNS.Threshold2 days up to HIST_RECENTRUNS.Threshold of them, newest
+      first, so the latest run is always read; the rest spread evenly by rank over the older runs) and reads only SectionID 104
+      rows of those evaldates, by equality on a VALUES list built from the validated run dates. The counter rows are parsed
+      with CHARINDEX and matched to the catalog by equality; Deprecated Features rows at 0 are dropped there.
+      Every sentence that rests on history says how many runs were read ("N of M runs read").
+   b. A run's start is EXACT from a 120 header ([sqlserver_start_time], [UptimeSeconds]); else ESTIMATED as evaldate minus
+      its legacy Uptime: days (hour-grained, up to ~67 min out); Uptime:0.10 means "under an hour" and is UNKNOWN.
+   c. SEGMENTS: consecutive runs A, B share a segment only when both starts are known and agree within @pcs_Tol minutes,
+      B's start is before A's run (by @pcs_Tol minutes when B's start is an estimate), Batch Requests/sec (instance '') did
+      not go down, and, when both are exact, B's UptimeSeconds is not below A's. Otherwise B starts a new segment
+      (invariant 3: a restart that cannot be ruled out is a restart). "Restarts seen" counts the boundaries that ARE
+      restarts (a start that moved, counters that went down), never an unknown start: hence "at least".
+   d. 122 compares this run with the LAST run that stored counters, only when that run's evaldate is at or after this
+      run's sqlserver_start_time and Batch Requests/sec did not go down. The elapsed time is the difference of the two
+      UptimeSeconds when the last run wrote them, else the clock from its evaldate. Within the window any series that went
+      down is a reset and gives no value; a series absent from the last run is no data, not zero.
+   e. 123 bands the Batch Resp Statistics buckets (cntr_type 65792, cumulative since start: kind count). Its
+      tail change compares the time share of batches of 1 s or more SINCE the last run with the share UP TO the last run.
+   ROWS: one header row per section; a metric over one instance gives one row; per NUMA node one row per node; per database,
+   per availability database and per deprecated feature, a row ONLY for an entity that hits a rule, plus ONE roll-up row
+   per metric; one "not available on this server" row per area whose counters are missing; one "not an AG replica" row
+   when the AG test fails. Severity is NULL (information) unless a #pcs_rules threshold with a severity fires.
+   Section 122 is the window 'lastrun' (FromSnap 3 = the last run's 104 rows, ToSnap 1); gauges and ratios are readings,
+   not windows, so 122 carries the cumulative kinds only. A rule judges 122 when ',lastrun,' is in its Windows.
+   f. POINTS: one value per (metric, entity) per run read, by the metric's kind, from that run's own
+      cumulative values: a rate = value / that run's uptime seconds; a per, ratio or average = its cumulative numerator over
+      its cumulative denominator or base; a gauge = the reading. The uptime of a run is its exact [UptimeSeconds]; else, when
+      a run of the SAME segment carries an exact start, the clock from that start; else its legacy Uptime: days; an unknown
+      start gives no rate point. So a point's window never leaves its own segment. Counts have no normal: a count since
+      start grows with uptime. "Now" (section 120) is the same quantity for this run, so it compares like with like.
+   g. NORMAL RANGES: per (metric, entity) over the last 7, 30 and 90 days of points, the 10th to 90th percentile by nearest
+      rank (ROW_NUMBER; rank = CEILING(p x N)), only with at least NORM_MINPOINTS points; fewer = "history too thin", said
+      with the count. Section 120 shows the 30-day range when it has the points, else the 90-day range; Details carry all
+      three ([Normal7d]:low,high,N or thin,N). R_NORM30: every threshold rule's metric ALSO fires a Warning when now sits
+      outside its 30-day range on the rule's own side (below for a '<' rule, above for a '>' rule).
+   h. TRENDS use ADJACENT PAIRS of runs read, only inside one segment (invariant 3), or per-run readings for a gauge: PLE
+      (readings), log growths per week (all databases, a database that went down in a pair is skipped) and the long-tail
+      share of section 123. The points of the window (30 days when it has NORM_MINPOINTS points, else 90) are split in time
+      order into a first and a second half (the middle point dropped when odd); a change of at most TREND_STEADY percent of
+      the first half is steady, else rising or falling.
+   i. FIRST SEEN: the earliest run read with a value above 0 (Memory Grants Pending, Lock Timeouts, each Deprecated Feature);
+      none in history but above 0 now = first seen in this run.
+   j. R14: a database whose every observation (each run read, then now) shows no transaction started since the previous
+      observation of the same segment, or since start for the first observation of a segment, across at least R14.Threshold
+      observations spanning at least R14.Threshold2 days. Information only.
+   k. Everything in f-j has its own TRY: a failure there is a could-not-run row and sections 120-123 still write. */
+DECLARE @pcs_Ready BIT = 0;
+DECLARE @pcs_Step NVARCHAR(200);
+DECLARE @pcs_Sec INT;
+DECLARE @pcs_StartTime DATETIME;
+DECLARE @pcs_UptimeSec BIGINT;
+DECLARE @pcs_SampleReq INT;
+DECLARE @pcs_Delay CHAR(8);
+DECLARE @pcs_Snap1At DATETIME;
+DECLARE @pcs_Snap2At DATETIME;
+DECLARE @pcs_SampleSec DECIMAL(19,3) = 0;
+DECLARE @pcs_HadrEnabled INT = 0;
+DECLARE @pcs_IsAgReplica BIT = 0;
+DECLARE @pcs_RateTypes VARCHAR(60) = ',272696576,272696320,';
+DECLARE @pcs_RawTypes VARCHAR(60) = ',65792,';
+/* History. @pcs_HistState: read | absent | cap | error. @pcs_LastState: ok | none | restart | down | hist. */
+DECLARE @pcs_Tol INT = 70; /* minutes: the legacy Uptime: is hour-grained */
+DECLARE @pcs_HistState VARCHAR(10) = 'error';
+DECLARE @pcs_HistReason NVARCHAR(400) = N'the history step did not run';
+DECLARE @pcs_HistTable NVARCHAR(400);
+DECLARE @pcs_HistInst NVARCHAR(505);
+DECLARE @pcs_HistCut NVARCHAR(20);
+DECLARE @pcs_HistRows BIGINT;
+DECLARE @pcs_HistMB DECIMAL(19,1);
+DECLARE @pcs_HistMax BIGINT;
+DECLARE @pcs_HistSql NVARCHAR(MAX);
+DECLARE @pcs_HistT0 DATETIME;
+DECLARE @pcs_HistReadMs INT;
+DECLARE @pcs_HistRead INT = 0;
+DECLARE @pcs_Runs INT = 0;
+DECLARE @pcs_Segs INT = 0;
+DECLARE @pcs_Restarts INT = 0;
+DECLARE @pcs_HistDays DECIMAL(19,1) = 0;
+DECLARE @pcs_HistSentence NVARCHAR(600);
+DECLARE @pcs_LastState VARCHAR(10) = 'hist';
+DECLARE @pcs_LastEvalText NVARCHAR(20);
+DECLARE @pcs_LastEval DATETIME;
+DECLARE @pcs_LastStart DATETIME;
+DECLARE @pcs_LastUptimeSec BIGINT;
+DECLARE @pcs_LastBatches BIGINT;
+DECLARE @pcs_NowBatches BIGINT;
+DECLARE @pcs_PrevEval DATETIME;
+DECLARE @pcs_LastSec DECIMAL(19,3) = 0;
+DECLARE @pcs_LastHeader NVARCHAR(1000);
+DECLARE @pcs_LastDetails NVARCHAR(1000);
+DECLARE @pcs_i INT;
+DECLARE @pcs_Msg NVARCHAR(400);
+/* The sampled read, normals, trends, first seen, R14. */
+DECLARE @pcs_MaxRuns INT;
+DECLARE @pcs_RecentMax INT;
+DECLARE @pcs_RecentDays INT;
+DECLARE @pcs_MinPts INT;
+DECLARE @pcs_Steady DECIMAL(19,4);
+DECLARE @pcs_RunsRead INT = 0;
+DECLARE @pcs_M2 INT;
+DECLARE @pcs_K2 INT;
+DECLARE @pcs_PickList NVARCHAR(MAX);
+DECLARE @pcs_P1Ms INT;
+DECLARE @pcs_P2Ms INT;
+DECLARE @pcs_P1Rows INT = 0;
+DECLARE @pcs_NowSeg INT;
+DECLARE @pcs_TailTrendSum NVARCHAR(1000);
+DECLARE @pcs_TailTrendDet NVARCHAR(1000);
+
+CREATE TABLE #pcs_rules (
+	RuleId VARCHAR(20) NOT NULL /* R1..R15 (a/b/c = the clauses of one rule); T_* = a sentence that is not a rule; HIST_* = a history setting */
+	, Stage VARCHAR(4) NOT NULL /* the part of the analysis that evaluates the rule (S1, S2 or S3) */
+	, Status VARCHAR(10) NOT NULL /* APPROVED (Adrian ruled) or DRAFT (awaits a ruling) */
+	, Area NVARCHAR(60) NULL
+	, MetricKeys VARCHAR(200) NULL /* ',KEY,KEY,': the #pcs_catalog metrics the rule judges */
+	, Windows VARCHAR(60) NULL /* ',start,sample,lastrun,': the windows it is judged in */
+	, Op CHAR(1) NULL /* '>' or '<' against Threshold; NULL = not a threshold rule */
+	, Threshold DECIMAL(19,4) NULL
+	, Threshold2 DECIMAL(19,4) NULL /* the second number of a two-number rule (R14: days) */
+	, Normalise VARCHAR(10) NULL /* 'week': count x 604800 / MAX(window seconds, 604800), so a window shorter than a week compares its whole count */
+	, UseReading VARCHAR(10) NULL /* 'max': in the sample window, a gauge with no denominator is judged by the higher of its two readings */
+	, MinUptimeSeconds BIGINT NULL
+	, Severity NVARCHAR(5) NULL /* NULL = information */
+	, SeverityInSample NVARCHAR(5) NULL /* replaces Severity in the sample window when set */
+	, Sentence NVARCHAR(600) NOT NULL
+);
+CREATE TABLE #pcs_catalog (
+	MetricKey VARCHAR(40) NOT NULL
+	, SortOrder INT NOT NULL
+	, Area NVARCHAR(60) NOT NULL /* the existing sp_triage topic the metric informs */
+	, Label NVARCHAR(200) NOT NULL
+	, Kind VARCHAR(10) NOT NULL /* rate | count | ratio | average | gauge | per (invariant 1) */
+	, ObjSuffix NVARCHAR(128) NOT NULL /* object_name after its FIRST colon: 'Buffer Manager' matches SQLServer:Buffer Manager and MSSQL$X:Buffer Manager */
+	, CounterName NVARCHAR(128) NOT NULL
+	, InstScope VARCHAR(10) NOT NULL /* exact (InstName) | pernode | perdb | perinst; per-entity scopes skip _Total and mssqlsystemresource */
+	, InstName NVARCHAR(128) NULL
+	, BaseCounter NVARCHAR(128) NULL /* ratio and average: the base counter, same object and instance */
+	, DenObjSuffix NVARCHAR(128) NULL /* per, and a gauge with a denominator */
+	, DenCounter NVARCHAR(128) NULL
+	, DenInstName NVARCHAR(128) NULL /* NULL = the numerator's own instance */
+	, Scale DECIMAL(19,4) NOT NULL
+	, ExpectTypes VARCHAR(60) NOT NULL /* ',type,': the live cntr_type family of the numerator */
+	, DenExpectTypes VARCHAR(60) NULL
+	, Unit NVARCHAR(60) NOT NULL
+	, EntityNoun NVARCHAR(60) NULL /* per-entity scopes: what the roll-up counts */
+	, AgOnly BIT NOT NULL /* 1 = read only when the AG test passes */
+);
+CREATE TABLE #pcs_want (obj NVARCHAR(128) NOT NULL, counter NVARCHAR(128) NOT NULL);
+CREATE TABLE #pcs_snap (snap TINYINT NOT NULL, taken_at DATETIME NOT NULL, obj NVARCHAR(128) NOT NULL, counter NVARCHAR(128) NOT NULL
+	, inst NVARCHAR(128) NOT NULL, cntr_type INT NOT NULL, value BIGINT NOT NULL);
+CREATE TABLE #pcs_win (Win VARCHAR(10) NOT NULL, SectionID INT NOT NULL, FromSnap TINYINT NULL /* NULL = zero at sqlserver_start_time */
+	, ToSnap TINYINT NULL, SampleOff BIT NOT NULL, Seconds DECIMAL(19,3) NOT NULL, SecondsText VARCHAR(30) NOT NULL, WindowText NVARCHAR(200) NOT NULL
+	, Title NVARCHAR(200) NOT NULL, HeaderSummary NVARCHAR(1000) NULL, HeaderDetails NVARCHAR(1000) NULL);
+CREATE TABLE #pcs_val (Win VARCHAR(10) NOT NULL, MetricKey VARCHAR(40) NOT NULL, Entity NVARCHAR(128) NULL
+	, NumTo BIGINT NULL, NumFrom BIGINT NULL, NumType INT NULL, BaseTo BIGINT NULL, BaseFrom BIGINT NULL, BaseType INT NULL
+	, DenTo BIGINT NULL, DenFrom BIGINT NULL, DenType INT NULL
+	, StatusCode VARCHAR(20) NULL, Status VARCHAR(10) NULL, Reason NVARCHAR(400) NULL
+	, Value DECIMAL(38,6) NULL, ShownValue DECIMAL(38,6) NULL, ValueText VARCHAR(50) NULL
+	, FiredRule VARCHAR(12) NULL, Severity NVARCHAR(5) NULL, WindowText NVARCHAR(200) NULL, WindowSecondsText VARCHAR(30) NULL
+	/* section 120 only: the history clause appended to the Summary and the keys appended to the Details */
+	, NormOut VARCHAR(5) NULL, HistSummary NVARCHAR(1500) NULL, HistDetails NVARCHAR(1500) NULL);
+/* History (two phases): phase 1 rows (run list), phase 2 rows (counters of the runs read), the parsed
+   counter rows, one row per run. */
+CREATE TABLE #pcs_hrun (evaldate NVARCHAR(50) NULL, SectionID INT NULL, Section NVARCHAR(4000) NULL, Summary NVARCHAR(4000) NULL, Details NVARCHAR(4000) NULL);
+CREATE TABLE #pcs_hist (evaldate NVARCHAR(50) NULL, SectionID INT NULL, Section NVARCHAR(4000) NULL, Summary NVARCHAR(4000) NULL, Details NVARCHAR(4000) NULL);
+CREATE TABLE #pcs_hrow (EvalText NVARCHAR(20) NOT NULL, obj NVARCHAR(128) NOT NULL, counter NVARCHAR(128) NOT NULL, inst NVARCHAR(128) NOT NULL, value BIGINT NOT NULL);
+CREATE INDEX pcs_hrow_key ON #pcs_hrow (EvalText, obj, counter, inst);
+CREATE TABLE #pcs_runs (RunNo INT NOT NULL, EvalText NVARCHAR(20) NOT NULL, EvalDate DATETIME NOT NULL, UptimeDays DECIMAL(23,2) NULL
+	, UptimeSec BIGINT NULL, StartExact DATETIME NULL, StartBest DATETIME NULL, StartKind VARCHAR(10) NULL, Batches BIGINT NULL
+	, HasCounters BIT NOT NULL, SegReason VARCHAR(10) NULL /* NULL = same segment as the run before; first | unknown | counters | restart */
+	, Seg INT NULL
+	, Picked BIT NOT NULL DEFAULT 0 /* 1 = its counters were read in phase 2 */
+	, PtSec BIGINT NULL /* (HISTORY f): the uptime seconds a rate point divides by; NULL = no rate point */);
+/* Points (HISTORY f), normals (g), trend points and results (h), first seen (i), R14 observations (j). */
+CREATE TABLE #pcs_pt (MetricKey VARCHAR(40) NOT NULL, Entity NVARCHAR(128) NOT NULL, RunNo INT NOT NULL, EvalDate DATETIME NOT NULL, Value FLOAT NOT NULL);
+CREATE TABLE #pcs_norm (MetricKey VARCHAR(40) NOT NULL, Entity NVARCHAR(128) NOT NULL, Days INT NOT NULL, N INT NOT NULL, Lo FLOAT NULL, Hi FLOAT NULL
+	, LoText VARCHAR(50) NULL, HiText VARCHAR(50) NULL, KeyText VARCHAR(120) NULL);
+CREATE TABLE #pcs_pair (A NVARCHAR(20) NOT NULL, B NVARCHAR(20) NOT NULL, BDate DATETIME NOT NULL, Sec BIGINT NOT NULL);
+CREATE TABLE #pcs_tpt (Trend VARCHAR(20) NOT NULL, EvalDate DATETIME NOT NULL, Value FLOAT NOT NULL);
+CREATE TABLE #pcs_trend (Trend VARCHAR(20) NOT NULL, Days INT NULL, N INT NOT NULL, FirstMean FLOAT NULL, SecondMean FLOAT NULL, Direction VARCHAR(10) NOT NULL
+	, SumText NVARCHAR(1000) NULL, DetText VARCHAR(400) NULL);
+CREATE TABLE #pcs_first (MetricKey VARCHAR(40) NOT NULL, Entity NVARCHAR(128) NOT NULL, FirstText NVARCHAR(20) NOT NULL);
+CREATE TABLE #pcs_rollx (Win VARCHAR(10) NOT NULL, MetricKey VARCHAR(40) NOT NULL, XSum NVARCHAR(1500) NULL, XDet NVARCHAR(2000) NULL);
+CREATE TABLE #pcs_obs (Entity NVARCHAR(128) NOT NULL, EvalDate DATETIME NOT NULL, EvalText NVARCHAR(20) NOT NULL, Seg INT NOT NULL, Value BIGINT NOT NULL, Ord INT NULL, Ok INT NULL);
+CREATE TABLE #pcs_r14 (Entity NVARCHAR(128) NOT NULL, N INT NOT NULL, Days DECIMAL(19,1) NOT NULL, FirstText NVARCHAR(20) NOT NULL, LastText NVARCHAR(20) NOT NULL, Evidence NVARCHAR(2000) NULL);
+/* Section 123: bucket deltas per window ('prior' = up to the last run), then one row of figures per window. */
+CREATE TABLE #pcs_brs (Win VARCHAR(10) NOT NULL, LowMs BIGINT NOT NULL, HighMs BIGINT NULL, Band TINYINT NOT NULL
+	, CntTo BIGINT NULL, CntFrom BIGINT NULL, MsTo BIGINT NULL, MsFrom BIGINT NULL, TypeTo INT NULL);
+CREATE TABLE #pcs_brw (Win VARCHAR(10) NOT NULL, Ord INT NOT NULL, WinLabel NVARCHAR(40) NOT NULL, WindowText NVARCHAR(200) NULL
+	, SecondsText VARCHAR(30) NULL, Status VARCHAR(10) NULL, Reason NVARCHAR(400) NULL, N BIGINT NULL, T BIGINT NULL
+	, CountPct NVARCHAR(200) NULL, TimePct NVARCHAR(200) NULL, CountList VARCHAR(100) NULL, TimeList VARCHAR(100) NULL
+	, TailN BIGINT NULL, TailCP DECIMAL(38,1) NULL, TailTP DECIMAL(38,1) NULL
+	, MedLow BIGINT NULL, MedHigh BIGINT NULL, P95Low BIGINT NULL, P95High BIGINT NULL, MedText NVARCHAR(80) NULL, P95Text NVARCHAR(80) NULL
+	, Buckets VARCHAR(2000) NULL);
+
+BEGIN TRY
+	SET @CustomErrorText = 'Performance counters: snapshots'
+	/* THE RULES. Thresholds R1-R15 APPROVED by Adrian 2026-10-21; the verdict
+	   sentences approved in advance the same evening; each sentence is checked to be true to
+	   its number. HIST_MAXROWS is a DRAFT (overrulable). Every sentence
+	   in sections 120-123 comes from this block: a ruling on wording or on a number is a one-place edit here.
+	   Tokens: {Subject} label with entity, {Entity}, {Label}, {Value}, {Unit}, {Window}, {Threshold}, {Reason}, and the
+	   header, roll-up and history tokens named in each sentence. Each rule ALSO fires as a Warning when "now" sits outside
+	   the instance's own 30-day normal range once 5 history points exist. */
+	INSERT #pcs_rules (RuleId, Stage, Status, Area, MetricKeys, Windows, Op, Threshold, Threshold2, Normalise, UseReading, MinUptimeSeconds, Severity, SeverityInSample, Sentence)
+	VALUES
+	  ('R1', 'S1', 'APPROVED', N'Memory', ',PLE,PLE_NODE,', ',start,', '<', 300, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'{Subject} is {Value} s ({Window}), below {Threshold} s: pages leave the buffer pool quickly. This is the lighter tier; section 24 flags below 100 s more heavily.')
+	, ('R2', 'S1', 'APPROVED', N'Memory', ',GRANTS_PENDING,', ',start,sample,', '>', 0, NULL, NULL, 'max', NULL, @Result_Warning, @Result_Bad
+		, N'Memory grants pending is {Value} ({Window}), above {Threshold}: queries are waiting for memory before they can start.')
+	, ('R3a', 'S1', 'APPROVED', N'Memory', ',FREE_LIST_STALLS,', ',start,sample,lastrun,', '>', 2, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Free list stalls run at {Value} per second ({Window}), above {Threshold}: requests waited for a free buffer page.')
+	, ('R3b', 'S1', 'APPROVED', N'Memory', ',LAZY_WRITES,', ',start,sample,lastrun,', '>', 20, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Lazy writes run at {Value} per second ({Window}), above {Threshold}: the buffer pool is writing pages out to make room.')
+	, ('R4', 'S1', 'APPROVED', N'Memory', ',TOTAL_PCT_TARGET,', ',start,', '<', 90, NULL, NULL, NULL, 86400, NULL, NULL
+		, N'Total server memory is {Value}% of target ({Window}), below {Threshold}% after more than a day of uptime: SQL Server has not grown to the memory it may use.')
+	, ('R5a', 'S1', 'APPROVED', N'Plan cache / ad hoc', ',COMPILES_PER100,', ',start,sample,lastrun,', '>', 10, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Compilations are {Value} per 100 batches ({Window}), above {Threshold}: many plans are compiled rather than reused.')
+	, ('R5b', 'S1', 'APPROVED', N'Plan cache / ad hoc', ',RECOMPILES_PER100,', ',start,sample,lastrun,', '>', 10, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Re-compilations are {Value} per 100 compilations ({Window}), above {Threshold}.')
+	, ('R6', 'S1', 'APPROVED', N'Heaps', ',FWD_PER100,', ',start,sample,lastrun,', '>', 10, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Forwarded records are {Value} per 100 batches ({Window}), above {Threshold}: heap reads are following forwarding pointers.')
+	, ('R7a', 'S1', 'APPROVED', N'Indexes', ',SEARCH_PER_SCAN,', ',start,sample,lastrun,', '<', 1000, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Index searches are {Value} per full scan ({Window}), fewer than {Threshold}: full scans are a large share of data access.')
+	, ('R7b', 'S1', 'APPROVED', N'Indexes', ',SPLITS_PER100,', ',start,sample,lastrun,', '>', 20, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Page splits are {Value} per 100 batches ({Window}), above {Threshold}.')
+	, ('R8a', 'S1', 'APPROVED', N'Blocking', ',DEADLOCKS,', ',start,sample,lastrun,', '>', 0, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'{Value} deadlocks ({Window}).')
+	, ('R8b', 'S1', 'APPROVED', N'Blocking', ',LOCK_TIMEOUTS,', ',start,sample,lastrun,', '>', 0, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'{Value} lock timeouts ({Window}).')
+	, ('R8c', 'S1', 'APPROVED', N'Blocking', ',BLOCKED,', ',start,', '>', 0, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'{Value} processes are blocked ({Window}).')
+	, ('R8d', 'S1', 'APPROVED', N'Blocking', ',AVG_LOCK_WAIT,', ',start,sample,lastrun,', '>', 500, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'The average lock wait is {Value} ms ({Window}), above {Threshold} ms.')
+	, ('R9', 'S1', 'APPROVED', N'Connection pooling', ',LOGINS_PER100,', ',start,sample,lastrun,', '>', 2, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Logins are {Value} per 100 batches ({Window}), above {Threshold}: connections do not look pooled.')
+	, ('R10a', 'S1', 'APPROVED', N'Autogrowth / maintenance', ',LOG_SHRINKS,', ',start,sample,lastrun,', '>', 0, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Database {Entity}: {Value} log shrinks ({Window}).')
+	, ('R10b', 'S1', 'APPROVED', N'Autogrowth / maintenance', ',LOG_GROWTHS,', ',start,lastrun,', '>', 10, NULL, 'week', NULL, NULL, @Result_Warning, NULL
+		, N'Database {Entity}: {Value} log growths ({Window}), above {Threshold} per week.')
+	, ('R10c', 'S1', 'APPROVED', N'Autogrowth / maintenance', ',LOG_PCT_USED,', ',start,', '>', 80, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Database {Entity}: the log is {Value}% used ({Window}), above {Threshold}%.')
+	, ('R11', 'S1', 'APPROVED', N'Deprecated features', ',DEPRECATED,', ',start,lastrun,', '>', 0, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Deprecated feature {Entity} was used {Value} times ({Window}).')
+	, ('R12a', 'S1', 'APPROVED', N'AG lag', ',AG_SEND_Q,', ',start,', '>', 102400, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Availability database {Entity}: the log send queue is {Value} KB ({Window}), above {Threshold} KB.')
+	, ('R12b', 'S1', 'APPROVED', N'AG lag', ',AG_RECOVERY_Q,', ',start,', '>', 102400, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Availability database {Entity}: the recovery queue is {Value} KB ({Window}), above {Threshold} KB.')
+	, ('R12c', 'S1', 'APPROVED', N'AG lag', ',AG_DELAY_PER_TXN,', ',start,sample,lastrun,', '>', 10, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Availability database {Entity}: transaction delay is {Value} ms per mirrored transaction ({Window}), above {Threshold} ms. This is read on the primary replica.')
+	, ('R13a', 'S1', 'APPROVED', N'tempdb', ',LONGEST_TXN,', ',start,', '>', 3600, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'The longest running transaction has run {Value} s ({Window}), above {Threshold} s.')
+	, ('R13b', 'S1', 'APPROVED', N'tempdb', ',VERSION_STORE,', ',start,', '>', 10485760, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'The version store is {Value} KB ({Window}), above {Threshold} KB.')
+	, ('R14', 'S3', 'APPROVED', N'Database usage', ',DB_TXN,', NULL, NULL, 5, 14, NULL, NULL, NULL, NULL, NULL
+		, N'Database {Entity}: no transactions started across {Runs} runs over {Days} days (read-only use is not counted by this counter).')
+	, ('R15a', 'S2', 'APPROVED', N'Batch response time', NULL, NULL, '>', 50, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Batches of 1 s or more take {Value}% of elapsed time ({Window}), above {Threshold}%.')
+	, ('R15b', 'S2', 'APPROVED', N'Batch response time', NULL, NULL, '>', 10, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'The share of elapsed time in batches of 1 s or more rose {Value} points since the last run, above {Threshold}.')
+	, ('HIST_MAXROWS', 'S2', 'DRAFT', NULL, NULL, NULL, '>', 5000000, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'History not read: the export table holds {Rows} rows, above the {Threshold}-row cap.')
+	/* Settings and sentences. HIST_MAXRUNS, HIST_RECENTRUNS and TREND_STEADY are DRAFTS,
+	   overrulable here; NORM_MINPOINTS and R_NORM30 are as Adrian approved them. */
+	, ('HIST_MAXRUNS', 'S3', 'DRAFT', NULL, NULL, NULL, NULL, 40, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'At most {Threshold} runs have their counters read; the latest run is always one of them.')
+	, ('HIST_RECENTRUNS', 'S3', 'DRAFT', NULL, NULL, NULL, NULL, 10, 7, NULL, NULL, NULL, NULL, NULL
+		, N'Every run of the last {Threshold2} days is read, up to {Threshold} of them; the other runs read are spread evenly over the older history.')
+	, ('NORM_MINPOINTS', 'S3', 'APPROVED', NULL, NULL, NULL, '<', 5, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'History too thin for a normal range: {Points} runs with this counter in the last 90 days, {Threshold} needed ({Read} of {Runs} runs read).')
+	, ('TREND_STEADY', 'S3', 'DRAFT', NULL, NULL, NULL, '>', 10, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'A change of at most {Threshold}% between the first and the second half of the window is steady.')
+	, ('R_NORM30', 'S3', 'APPROVED', NULL, NULL, ',start,', NULL, NULL, NULL, NULL, NULL, NULL, @Result_Warning, NULL
+		, N'Now {Side} its own 30-day normal of {Low} to {High} {Unit} (10th to 90th percentile of {Points} runs).')
+	, ('T_NORM', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Normal over the last {Days} days: {Low} to {High} {Unit} (10th to 90th percentile of {Points} runs).')
+	, ('T_TREND_PLE', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Trend over the last {Days} days: {Direction}, from {First} s to {Second} s on average ({Points} runs, first half against second half).')
+	, ('T_TREND_LOG', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Log growths per week, all databases, over the last {Days} days: {Direction}, from {First} to {Second} a week on average ({Points} pairs of runs, first half against second half).')
+	, ('T_TREND_TAIL', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Between runs over the last {Days} days, the share of elapsed time in batches of 1 s or more is {Direction}: from {First}% to {Second}% on average ({Points} pairs of runs, first half against second half).')
+	, ('T_TREND_THIN_RUNS', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Trend: history too thin, {Points} runs in the last 90 days, {Threshold} needed.')
+	, ('T_TREND_THIN_PAIRS', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Trend: history too thin, {Points} pairs of runs read with no restart between them in the last 90 days, {Threshold} needed.')
+	, ('T_FIRST', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'First seen above 0 in the run at {First}, the earliest of the {Read} runs read in which it was above 0.')
+	, ('T_FIRST_NOW', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Not above 0 in any of the {Read} runs read: first seen in this run.')
+	, ('T_FIRST_LIST', 'S3', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'First seen above 0 (in the {Read} runs read, or now): {List}.')
+	, ('T_HDR_120', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Counters since SQL Server started at {Start}, {Days} days ago. {History}')
+	, ('T_HDR_121', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Counters over a {Seconds} s sample taken during this run, from {From} to {To}.')
+	, ('T_OFF_121', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'The in-run sample is off (@PerfCounterSampleSeconds is 0 or NULL), so there are no right-now rates.')
+	, ('T_NA', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Not available on this server: {Labels}.')
+	, ('T_NOTAG', 'S1', 'APPROVED', N'AG lag', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Not an AG replica: HADR is off or no availability database is hosted here, so the AG lag counters do not apply.')
+	, ('T_INFO', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{Subject}: {Value} {Unit} ({Window}).')
+	, ('T_TYPE', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{Subject} could not be computed: {Reason}.')
+	, ('T_NODATA', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{Subject}: no data ({Window}): {Reason}.')
+	, ('T_RESET', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{Subject}: the counter went down during the window ({Window}), so it was reset; no value for this window.')
+	, ('T_ROLLUP', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{Label} ({Window}): {N} {Entities}; {NZ} above zero, {Zero} at zero; highest {Max} {Unit} ({MaxAt}); {Hits} hit a rule.')
+	, ('T_ROLLUP0', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{Label} ({Window}): no {Entities} report this counter.')
+	, ('T_ROLLUPZ', 'S1', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{Label} ({Window}): {N} {Entities}, all at zero.')
+	, ('T_HIST', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'History: {Runs} runs over {HistDays} days, at least {Restarts} restarts; {Read} of {Runs} runs read.')
+	, ('T_HIST_NONE', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'History: no earlier run of this instance in the last 90 days.')
+	, ('T_HIST_ABSENT', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'History: none, the export table {Table} does not exist.')
+	, ('T_HIST_ERROR', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'History: could not be read: {Reason}.')
+	, ('T_HDR_122', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Counters since the last run at {Last}, {Days} days ago: {Seconds} s, measured {How}.')
+	, ('T_SKIP_122_NONE', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'No comparison with the last run: no earlier run of this instance stored performance counters in the last 90 days.')
+	, ('T_SKIP_122_RESTART', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'SQL Server started at {Start}; the last run at {Last} belongs to an earlier start: counters reset, no comparison.')
+	, ('T_SKIP_122_DOWN', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Batch requests went down since the last run at {Last} although SQL Server did not restart: the counters were reset, no comparison.')
+	, ('T_SKIP_122_HIST', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'No comparison with the last run. {History}')
+	, ('T_HDR_123', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Batch response time in five bands, from the Batch Resp Statistics counters, for each window below. Medians and 95th percentiles are bucket ranges, never exact times.')
+	, ('T_BANDS', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'{N} batches completed ({Window}). Share of batches: {CountPct}. Share of elapsed time: {TimePct}.')
+	, ('T_TAIL', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'Batches of 1 s or more are {CountPct}% of the count but {TimePct}% of the elapsed time ({Window}).')
+	, ('T_TAIL0', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'No batch took 1 s or more ({Window}).')
+	, ('T_MEDP95', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'The median batch took {Median} and the 95th percentile {P95} ({Window}). These are bucket ranges, not exact times.')
+	, ('T_TAILCHG', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'The share of elapsed time in batches of 1 s or more was {Before}% up to the last run and {After}% since ({Window}): a change of {Value} points.')
+	, ('T_TAILCHG0', 'S2', 'APPROVED', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+		, N'No tail change since the last run: {Reason}.');
+
+	/* THE CATALOG: one row per metric. Counter names were read live on SQL 2017, 2022
+	   and 2025. Area names the existing sp_triage topic each metric informs. */
+	INSERT #pcs_catalog (MetricKey, SortOrder, Area, Label, Kind, ObjSuffix, CounterName, InstScope, InstName, BaseCounter, DenObjSuffix, DenCounter, DenInstName, Scale, ExpectTypes, DenExpectTypes, Unit, EntityNoun, AgOnly)
+	VALUES
+	  ('BATCHES', 10, N'Workload', N'Batch requests', 'rate', N'SQL Statistics', N'Batch Requests/sec', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'per second', NULL, 0)
+	, ('FWD_PER100', 20, N'Heaps', N'Forwarded records', 'per', N'Access Methods', N'Forwarded Records/sec', 'exact', N'', NULL, N'SQL Statistics', N'Batch Requests/sec', N'', 100, @pcs_RateTypes, @pcs_RateTypes, N'per 100 batches', NULL, 0)
+	, ('SEARCH_PER_SCAN', 30, N'Indexes', N'Index searches', 'per', N'Access Methods', N'Index Searches/sec', 'exact', N'', NULL, N'Access Methods', N'Full Scans/sec', N'', 1, @pcs_RateTypes, @pcs_RateTypes, N'per full scan', NULL, 0)
+	, ('SPLITS_PER100', 40, N'Indexes', N'Page splits', 'per', N'Access Methods', N'Page Splits/sec', 'exact', N'', NULL, N'SQL Statistics', N'Batch Requests/sec', N'', 100, @pcs_RateTypes, @pcs_RateTypes, N'per 100 batches', NULL, 0)
+	, ('COMPILES_PER100', 50, N'Plan cache / ad hoc', N'Compilations', 'per', N'SQL Statistics', N'SQL Compilations/sec', 'exact', N'', NULL, N'SQL Statistics', N'Batch Requests/sec', N'', 100, @pcs_RateTypes, @pcs_RateTypes, N'per 100 batches', NULL, 0)
+	, ('RECOMPILES_PER100', 60, N'Plan cache / ad hoc', N'Re-compilations', 'per', N'SQL Statistics', N'SQL Re-Compilations/sec', 'exact', N'', NULL, N'SQL Statistics', N'SQL Compilations/sec', N'', 100, @pcs_RateTypes, @pcs_RateTypes, N'per 100 compilations', NULL, 0)
+	, ('PLAN_HIT', 70, N'Plan cache / ad hoc', N'Plan cache hit ratio', 'ratio', N'Plan Cache', N'Cache Hit Ratio', 'exact', N'_Total', N'Cache Hit Ratio Base', NULL, NULL, NULL, 1, ',537003264,', NULL, N'%', NULL, 0)
+	, ('PLE', 80, N'Memory', N'Page life expectancy', 'gauge', N'Buffer Manager', N'Page life expectancy', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N's', NULL, 0)
+	, ('PLE_NODE', 90, N'Memory', N'Page life expectancy', 'gauge', N'Buffer Node', N'Page life expectancy', 'pernode', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N's', N'nodes', 0)
+	, ('LAZY_WRITES', 100, N'Memory', N'Lazy writes', 'rate', N'Buffer Manager', N'Lazy writes/sec', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'per second', NULL, 0)
+	, ('FREE_LIST_STALLS', 110, N'Memory', N'Free list stalls', 'rate', N'Buffer Manager', N'Free list stalls/sec', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'per second', NULL, 0)
+	, ('BUFFER_HIT', 120, N'Memory', N'Buffer cache hit ratio', 'ratio', N'Buffer Manager', N'Buffer cache hit ratio', 'exact', N'', N'Buffer cache hit ratio base', NULL, NULL, NULL, 1, ',537003264,', NULL, N'%', NULL, 0)
+	, ('GRANTS_PENDING', 130, N'Memory', N'Memory grants pending', 'gauge', N'Memory Manager', N'Memory Grants Pending', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'requests', NULL, 0)
+	, ('TARGET_MEM', 140, N'Memory', N'Target server memory', 'gauge', N'Memory Manager', N'Target Server Memory (KB)', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'KB', NULL, 0)
+	, ('TOTAL_MEM', 150, N'Memory', N'Total server memory', 'gauge', N'Memory Manager', N'Total Server Memory (KB)', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'KB', NULL, 0)
+	, ('TOTAL_PCT_TARGET', 160, N'Memory', N'Total server memory against target', 'gauge', N'Memory Manager', N'Total Server Memory (KB)', 'exact', N'', NULL, N'Memory Manager', N'Target Server Memory (KB)', N'', 100, @pcs_RawTypes, @pcs_RawTypes, N'% of target', NULL, 0)
+	, ('LOCK_WAITS', 170, N'Blocking', N'Lock waits', 'rate', N'Locks', N'Lock Waits/sec', 'exact', N'_Total', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'per second', NULL, 0)
+	, ('LOCK_TIMEOUTS', 180, N'Blocking', N'Lock timeouts (timeout > 0)', 'count', N'Locks', N'Lock Timeouts (timeout > 0)/sec', 'exact', N'_Total', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'lock timeouts', NULL, 0)
+	, ('DEADLOCKS', 190, N'Blocking', N'Deadlocks', 'count', N'Locks', N'Number of Deadlocks/sec', 'exact', N'_Total', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'deadlocks', NULL, 0)
+	, ('AVG_LOCK_WAIT', 200, N'Blocking', N'Average lock wait', 'average', N'Locks', N'Average Wait Time (ms)', 'exact', N'_Total', N'Average Wait Time Base', NULL, NULL, NULL, 1, ',1073874176,', NULL, N'ms', NULL, 0)
+	, ('BLOCKED', 210, N'Blocking', N'Processes blocked', 'gauge', N'General Statistics', N'Processes blocked', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'processes', NULL, 0)
+	, ('DB_TXN', 220, N'Database usage', N'Transactions started', 'rate', N'Databases', N'Transactions/sec', 'perdb', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'per second', N'databases', 0)
+	, ('LOG_GROWTHS', 230, N'Autogrowth / maintenance', N'Log growths', 'count', N'Databases', N'Log Growths', 'perdb', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'log growths', N'databases', 0)
+	, ('LOG_SHRINKS', 240, N'Autogrowth / maintenance', N'Log shrinks', 'count', N'Databases', N'Log Shrinks', 'perdb', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'log shrinks', N'databases', 0)
+	, ('LOG_PCT_USED', 250, N'Autogrowth / maintenance', N'Percent log used', 'gauge', N'Databases', N'Percent Log Used', 'perdb', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'%', N'databases', 0)
+	, ('DEPRECATED', 260, N'Deprecated features', N'Deprecated feature use', 'count', N'Deprecated Features', N'Usage', 'perinst', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'uses', N'features', 0)
+	, ('AG_SEND_Q', 270, N'AG lag', N'Log send queue', 'gauge', N'Database Replica', N'Log Send Queue', 'perdb', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'KB', N'availability databases', 1)
+	, ('AG_RECOVERY_Q', 280, N'AG lag', N'Recovery queue', 'gauge', N'Database Replica', N'Recovery Queue', 'perdb', NULL, NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'KB', N'availability databases', 1)
+	, ('AG_DELAY_PER_TXN', 290, N'AG lag', N'Transaction delay', 'per', N'Database Replica', N'Transaction Delay', 'perdb', NULL, NULL, N'Database Replica', N'Mirrored Write Transactions/sec', NULL, 1, @pcs_RateTypes, @pcs_RateTypes, N'ms per mirrored transaction', N'availability databases', 1)
+	, ('VERSION_STORE', 300, N'tempdb', N'Version store size', 'gauge', N'Transactions', N'Version Store Size (KB)', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'KB', NULL, 0)
+	, ('LONGEST_TXN', 310, N'tempdb', N'Longest transaction running time', 'gauge', N'Transactions', N'Longest Transaction Running Time', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N's', NULL, 0)
+	, ('WORKFILES', 320, N'tempdb', N'Workfiles created', 'rate', N'Access Methods', N'Workfiles Created/sec', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'per second', NULL, 0)
+	, ('WORKTABLES', 330, N'tempdb', N'Worktables created', 'rate', N'Access Methods', N'Worktables Created/sec', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RateTypes, NULL, N'per second', NULL, 0)
+	, ('LOGINS_PER100', 340, N'Connection pooling', N'Logins', 'per', N'General Statistics', N'Logins/sec', 'exact', N'', NULL, N'SQL Statistics', N'Batch Requests/sec', N'', 100, @pcs_RateTypes, @pcs_RateTypes, N'per 100 batches', NULL, 0)
+	, ('USER_CONN', 350, N'Connection pooling', N'User connections', 'gauge', N'General Statistics', N'User Connections', 'exact', N'', NULL, NULL, NULL, NULL, 1, @pcs_RawTypes, NULL, N'connections', NULL, 0);
+
+	INSERT #pcs_want (obj, counter)
+	SELECT ObjSuffix, CounterName FROM #pcs_catalog
+	UNION SELECT ObjSuffix, BaseCounter FROM #pcs_catalog WHERE BaseCounter IS NOT NULL
+	UNION SELECT DenObjSuffix, DenCounter FROM #pcs_catalog WHERE DenCounter IS NOT NULL;
+
+	/* The start time and the uptime in seconds from ONE read (ms_ticks: clock- and DST-proof, invariant 3). */
+	SELECT @pcs_StartTime = sqlserver_start_time
+		, @pcs_UptimeSec = (ms_ticks - sqlserver_start_time_ms_ticks) / 1000
+	FROM sys.dm_os_sys_info;
+
+	/* @PerfCounterSampleSeconds: 0 or NULL = off; otherwise clamped to 1..300. */
+	SET @pcs_SampleReq = CASE WHEN ISNULL(@PerfCounterSampleSeconds, 0) <= 0 THEN 0 WHEN @PerfCounterSampleSeconds > 300 THEN 300 ELSE @PerfCounterSampleSeconds END;
+
+	/* Snapshot 1. Each base and denominator is read by the SAME statement as its counter. The Batch Resp
+	   Statistics rows are kept for section 123. */
+	SET @pcs_Snap1At = GETDATE();
+	INSERT #pcs_snap (snap, taken_at, obj, counter, inst, cntr_type, value)
+	SELECT 1, @pcs_Snap1At, s.obj, s.counter, s.inst, s.cntr_type, s.cntr_value
+	FROM (
+		SELECT LTRIM(RTRIM(SUBSTRING(pc.[object_name], CHARINDEX(':', pc.[object_name]) + 1, 256))) COLLATE DATABASE_DEFAULT AS obj
+		, RTRIM(pc.counter_name) COLLATE DATABASE_DEFAULT AS counter
+		, RTRIM(pc.instance_name) COLLATE DATABASE_DEFAULT AS inst
+		, pc.cntr_type
+		, pc.cntr_value
+		FROM [sys].dm_os_performance_counters pc
+	) s
+	WHERE EXISTS (SELECT 1 FROM #pcs_want w WHERE w.obj = s.obj AND w.counter = s.counter)
+		OR (s.obj = N'Batch Resp Statistics' AND s.inst IN (N'Elapsed Time:Requests', N'Elapsed Time:Total(ms)'));
+
+	IF @pcs_SampleReq > 0
+	BEGIN
+		SET @pcs_Delay = CONVERT(CHAR(8), DATEADD(SECOND, @pcs_SampleReq, 0), 108);
+		IF @Debug = 1 RAISERROR (N'Performance counters: sampling for %d s',0,1,@pcs_SampleReq) WITH NOWAIT;
+		WAITFOR DELAY @pcs_Delay;
+		SET @pcs_Snap2At = GETDATE();
+		INSERT #pcs_snap (snap, taken_at, obj, counter, inst, cntr_type, value)
+		SELECT 2, @pcs_Snap2At, s.obj, s.counter, s.inst, s.cntr_type, s.cntr_value
+		FROM (
+			SELECT LTRIM(RTRIM(SUBSTRING(pc.[object_name], CHARINDEX(':', pc.[object_name]) + 1, 256))) COLLATE DATABASE_DEFAULT AS obj
+			, RTRIM(pc.counter_name) COLLATE DATABASE_DEFAULT AS counter
+			, RTRIM(pc.instance_name) COLLATE DATABASE_DEFAULT AS inst
+			, pc.cntr_type
+			, pc.cntr_value
+			FROM [sys].dm_os_performance_counters pc
+		) s
+		WHERE EXISTS (SELECT 1 FROM #pcs_want w WHERE w.obj = s.obj AND w.counter = s.counter)
+			OR (s.obj = N'Batch Resp Statistics' AND s.inst IN (N'Elapsed Time:Requests', N'Elapsed Time:Total(ms)'));
+		SET @pcs_SampleSec = DATEDIFF(MILLISECOND, @pcs_Snap1At, @pcs_Snap2At) / 1000.0;
+	END
+
+	/* An AG replica is HADR enabled AND has a Database Replica row other than _Total. SQL 2017/2022 expose
+	   Database Replica _Total with no AG, so the counter existing proves nothing. */
+	SET @pcs_HadrEnabled = ISNULL(CONVERT(INT, SERVERPROPERTY('IsHadrEnabled')), 0);
+	IF @pcs_HadrEnabled = 1 AND EXISTS (SELECT 1 FROM #pcs_snap WHERE snap = 1 AND obj = N'Database Replica' AND inst <> N'_Total')
+		SET @pcs_IsAgReplica = 1;
+
+	/* HISTORY (the HISTORY notes in the header comment). Its own TRY: a failure here is a could-not-run row and
+	   "history could not be read" in 120 and 122, never the loss of 120 and 121. */
+	BEGIN TRY
+		SET @pcs_HistTable = @ExportDBName + N'.' + @ExportSchema + N'.' + @ExportTableName;
+		SET @pcs_HistInst = REPLACE(@ThisServer, N'~', N':');
+		SET @pcs_HistCut = CONVERT(NVARCHAR(20), DATEADD(DAY, -90, GETDATE()), 120);
+		SET @pcs_HistMax = (SELECT CONVERT(BIGINT, Threshold) FROM #pcs_rules WHERE RuleId = 'HIST_MAXROWS');
+		SELECT @pcs_MaxRuns = MAX(CASE WHEN RuleId = 'HIST_MAXRUNS' THEN CONVERT(INT, Threshold) END)
+			, @pcs_RecentMax = MAX(CASE WHEN RuleId = 'HIST_RECENTRUNS' THEN CONVERT(INT, Threshold) END)
+			, @pcs_RecentDays = MAX(CASE WHEN RuleId = 'HIST_RECENTRUNS' THEN CONVERT(INT, Threshold2) END)
+		FROM #pcs_rules;
+		IF OBJECT_ID(@pcs_HistTable) IS NULL
+			SET @pcs_HistState = 'absent';
+		ELSE
+		BEGIN
+			/* One metadata read before the scan. */
+			SET @pcs_HistSql = N'SELECT @r = SUM(CASE WHEN ps.index_id IN (0, 1) THEN ps.row_count ELSE 0 END), @mb = SUM(ps.reserved_page_count) * 8 / 1024.0 FROM '
+				+ @ExportDBName + N'.sys.dm_db_partition_stats ps WHERE ps.[object_id] = OBJECT_ID(@t);';
+			EXEC sp_executesql @pcs_HistSql, N'@t NVARCHAR(400), @r BIGINT OUTPUT, @mb DECIMAL(19,1) OUTPUT', @t = @pcs_HistTable, @r = @pcs_HistRows OUTPUT, @mb = @pcs_HistMB OUTPUT;
+			IF ISNULL(@pcs_HistRows, 0) > @pcs_HistMax
+				SET @pcs_HistState = 'cap';
+			ELSE
+			BEGIN
+				/* PHASE 1 (HISTORY a): the run list from cheap predicates. The Batch Requests/sec row is found on the last 32
+				   characters of Section (the 104 writer strips double spaces, so at most one trailing space is left): no
+				   leading-wildcard test over the whole text of every row, which is what made the earlier read cost 25.7 s at
+				   1,000,000 rows. */
+				SET @pcs_HistSql = N'SELECT h.evaldate, h.SectionID, h.Section, h.Summary, h.Details FROM ' + @pcs_HistTable
+					+ N' h WHERE h.SQLInstance = @inst AND h.evaldate >= @cut AND h.evaldate < @now AND h.SectionID IN (2, 104, 120)'
+					+ N' AND ((h.SectionID = 2 AND h.Summary LIKE N''Uptime:%'')'
+					+ N' OR (h.SectionID = 120 AND h.Details LIKE N''[[]sqlserver[_]start[_]time]:%'')'
+					+ N' OR (h.SectionID = 104 AND h.Summary = N'''' AND RIGHT(h.Section, 32) LIKE N''%,[[]Counter]:Batch Requests/sec%''));';
+				SET @pcs_HistT0 = GETDATE();
+				INSERT #pcs_hrun (evaldate, SectionID, Section, Summary, Details)
+				EXEC sp_executesql @pcs_HistSql, N'@inst NVARCHAR(505), @cut NVARCHAR(20), @now NVARCHAR(20)', @inst = @pcs_HistInst, @cut = @pcs_HistCut, @now = @evaldate;
+				SET @pcs_P1Rows = @@ROWCOUNT;
+				SET @pcs_P1Ms = DATEDIFF(MILLISECOND, @pcs_HistT0, GETDATE());
+
+				/* Runs: one per style-120 evaldate. The date is built from its digits (never a language-dependent parse). */
+				INSERT #pcs_runs (RunNo, EvalText, EvalDate, HasCounters)
+				SELECT ROW_NUMBER() OVER (ORDER BY e.E), e.E
+					, DATEADD(SECOND, CONVERT(INT, SUBSTRING(e.E, 12, 2)) * 3600 + CONVERT(INT, SUBSTRING(e.E, 15, 2)) * 60 + CONVERT(INT, SUBSTRING(e.E, 18, 2))
+						, DATEADD(DAY, CONVERT(INT, SUBSTRING(e.E, 9, 2)) - 1, DATEADD(MONTH, CONVERT(INT, SUBSTRING(e.E, 6, 2)) - 1, DATEADD(YEAR, CONVERT(INT, LEFT(e.E, 4)) - 1900, CONVERT(DATETIME, 0)))))
+					, 0
+				FROM (SELECT DISTINCT CASE WHEN h.evaldate LIKE N'[12][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9]' THEN LEFT(h.evaldate, 19) END AS E
+					FROM #pcs_hrun h) e
+				WHERE e.E IS NOT NULL;
+
+				/* Legacy Uptime: (days, 2 decimals), from the section 2 row. */
+				UPDATE r SET UptimeDays = u.D
+				FROM #pcs_runs r
+				JOIN (
+					SELECT LEFT(h.evaldate, 20) AS E
+						, MAX(CASE WHEN LEN(t.T) BETWEEN 1 AND 20 AND t.T NOT LIKE N'%[^0-9.]%' AND t.T NOT LIKE N'%.%.%' AND t.T LIKE N'%[0-9]%' THEN CONVERT(DECIMAL(23,2), t.T) END) AS D
+					FROM #pcs_hrun h
+					CROSS APPLY (SELECT CASE WHEN h.Summary LIKE N'Uptime:%' THEN LTRIM(RTRIM(SUBSTRING(h.Summary, 8, CHARINDEX(N';', h.Summary + N';') - 8))) END AS T) t
+					WHERE h.SectionID = 2 AND h.Summary LIKE N'Uptime:%'
+					GROUP BY LEFT(h.evaldate, 20)
+				) u ON u.E = r.EvalText;
+
+				/* This version's 120 header: the exact start and UptimeSeconds. */
+				UPDATE r SET StartExact = x.S, UptimeSec = x.U
+				FROM #pcs_runs r
+				JOIN (
+					SELECT LEFT(h.evaldate, 20) AS E
+						, MAX(CASE WHEN a.ST LIKE N'[12][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9]'
+							THEN DATEADD(SECOND, CONVERT(INT, SUBSTRING(a.ST, 12, 2)) * 3600 + CONVERT(INT, SUBSTRING(a.ST, 15, 2)) * 60 + CONVERT(INT, SUBSTRING(a.ST, 18, 2))
+								, DATEADD(DAY, CONVERT(INT, SUBSTRING(a.ST, 9, 2)) - 1, DATEADD(MONTH, CONVERT(INT, SUBSTRING(a.ST, 6, 2)) - 1, DATEADD(YEAR, CONVERT(INT, LEFT(a.ST, 4)) - 1900, CONVERT(DATETIME, 0)))))
+							END) AS S
+						, MAX(CASE WHEN LEN(b.UT) BETWEEN 1 AND 18 AND b.UT NOT LIKE N'%[^0-9]%' THEN CONVERT(BIGINT, b.UT) END) AS U
+					FROM #pcs_hrun h
+					CROSS APPLY (SELECT SUBSTRING(h.Details, 24, 19) AS ST, CHARINDEX(N';[UptimeSeconds]:', h.Details) AS UP) a
+					CROSS APPLY (SELECT CASE WHEN a.UP > 0 THEN SUBSTRING(h.Details, a.UP + 17, CHARINDEX(N';', h.Details + N';', a.UP + 17) - a.UP - 17) END AS UT) b
+					WHERE h.SectionID = 120 AND h.Details LIKE N'[[]sqlserver[_]start[_]time]:%'
+					GROUP BY LEFT(h.evaldate, 20)
+				) x ON x.E = r.EvalText
+				WHERE x.S IS NOT NULL AND x.U IS NOT NULL;
+
+				/* Batch Requests/sec of each run (the segment counter test), parsed like every counter row. */
+				UPDATE r SET Batches = bq.V
+				FROM #pcs_runs r
+				JOIN (
+					SELECT LEFT(h.evaldate, 20) AS E, MAX(CONVERT(BIGINT, d.D)) AS V
+					FROM #pcs_hrun h
+					CROSS APPLY (SELECT CASE WHEN LEFT(h.Section, 9) = N'[Object]:' THEN SUBSTRING(h.Section, 10, 4000) ELSE h.Section END AS S
+						, LTRIM(RTRIM(ISNULL(h.Details, N''))) AS D) a
+					CROSS APPLY (SELECT CHARINDEX(N',[Counter]:', a.S) AS K) k
+					CROSS APPLY (SELECT CASE WHEN k.K > 0 THEN LEFT(a.S, k.K - 1) ELSE N'' END AS ObjPart
+						, CASE WHEN k.K > 0 THEN SUBSTRING(a.S, k.K + 11, 4000) ELSE N'' END AS CntPart) o
+					CROSS APPLY (SELECT CASE WHEN LEN(a.D) BETWEEN 1 AND 18 AND a.D NOT LIKE N'%[^0-9]%' THEN a.D END AS D) d
+					WHERE h.SectionID = 104 AND k.K > 0 AND d.D IS NOT NULL
+						AND LTRIM(RTRIM(SUBSTRING(o.ObjPart, CHARINDEX(N':', o.ObjPart) + 1, 4000))) = N'SQL Statistics'
+						AND LTRIM(RTRIM(o.CntPart)) = N'Batch Requests/sec'
+					GROUP BY LEFT(h.evaldate, 20)
+				) bq ON bq.E = r.EvalText;
+
+				UPDATE r SET StartBest = CASE WHEN r.StartExact IS NOT NULL THEN r.StartExact
+						WHEN r.UptimeDays IS NOT NULL AND r.UptimeDays <> 0.10 THEN DATEADD(MINUTE, 0 - CONVERT(INT, ROUND(r.UptimeDays * 1440, 0)), r.EvalDate) END
+					, StartKind = CASE WHEN r.StartExact IS NOT NULL THEN 'exact' WHEN r.UptimeDays IS NOT NULL AND r.UptimeDays <> 0.10 THEN 'estimate' ELSE 'unknown' END
+				FROM #pcs_runs r;
+
+				/* SEGMENTS (header note c). SegReason NULL = same segment as the run before. */
+				UPDATE b SET SegReason = CASE
+						WHEN a.RunNo IS NULL THEN 'first'
+						WHEN a.StartBest IS NULL OR b.StartBest IS NULL THEN 'unknown'
+						WHEN a.Batches IS NOT NULL AND b.Batches IS NOT NULL AND b.Batches < a.Batches THEN 'counters'
+						WHEN a.StartKind = 'exact' AND b.StartKind = 'exact' AND b.UptimeSec < a.UptimeSec THEN 'restart'
+						WHEN ABS(DATEDIFF(SECOND, a.StartBest, b.StartBest)) > @pcs_Tol * 60 THEN 'restart'
+						WHEN b.StartBest >= DATEADD(MINUTE, 0 - CASE WHEN b.StartKind = 'exact' THEN 0 ELSE @pcs_Tol END, a.EvalDate) THEN 'restart'
+						END
+				FROM #pcs_runs b
+				LEFT JOIN #pcs_runs a ON a.RunNo = b.RunNo - 1;
+				UPDATE r SET Seg = (SELECT COUNT(*) FROM #pcs_runs r2 WHERE r2.RunNo <= r.RunNo AND r2.SegReason IS NOT NULL)
+				FROM #pcs_runs r;
+
+				SELECT @pcs_Runs = COUNT(*), @pcs_Segs = ISNULL(MAX(Seg), 0)
+					, @pcs_Restarts = SUM(CASE WHEN SegReason IN ('counters', 'restart') THEN 1 ELSE 0 END)
+					, @pcs_HistDays = ISNULL(CONVERT(DECIMAL(19,1), DATEDIFF(MINUTE, MIN(EvalDate), GETDATE()) / 1440.0), 0)
+					, @pcs_PrevEval = MAX(EvalDate)
+				FROM #pcs_runs;
+				SET @pcs_Restarts = ISNULL(@pcs_Restarts, 0);
+				/* This run against the run before it: a restart when that run is older than this start. */
+				IF @pcs_PrevEval < @pcs_StartTime SET @pcs_Restarts = @pcs_Restarts + 1;
+
+				/* PHASE 2 (HISTORY a): pick the runs to read. Candidates are the runs whose Batch Requests/sec row was found.
+				   First every run of the last @pcs_RecentDays days, newest first, up to @pcs_RecentMax (so the latest run is
+				   always read); then the other candidates spread evenly by rank: of M older runs, K are read, rank
+				   1 + ROUND(j x (M - 1) / (K - 1)) for j = 0 .. K - 1 (the oldest and the newest of them always among them). */
+				UPDATE r SET Picked = 1
+				FROM #pcs_runs r
+				WHERE r.RunNo IN (SELECT TOP (@pcs_RecentMax) x.RunNo FROM #pcs_runs x
+					WHERE x.Batches IS NOT NULL AND x.EvalDate >= DATEADD(DAY, 0 - @pcs_RecentDays, GETDATE()) ORDER BY x.RunNo DESC);
+				SET @pcs_M2 = (SELECT COUNT(*) FROM #pcs_runs WHERE Batches IS NOT NULL AND Picked = 0);
+				SET @pcs_K2 = @pcs_MaxRuns - (SELECT COUNT(*) FROM #pcs_runs WHERE Picked = 1);
+				IF @pcs_K2 >= @pcs_M2
+				BEGIN
+					UPDATE #pcs_runs SET Picked = 1 WHERE Batches IS NOT NULL;
+				END
+				ELSE IF @pcs_K2 = 1
+				BEGIN
+					UPDATE #pcs_runs SET Picked = 1 WHERE RunNo = (SELECT MAX(RunNo) FROM #pcs_runs WHERE Batches IS NOT NULL AND Picked = 0);
+				END
+				ELSE IF @pcs_K2 > 1
+				BEGIN
+					UPDATE r SET Picked = 1
+					FROM #pcs_runs r
+					JOIN (SELECT x.RunNo, ROW_NUMBER() OVER (ORDER BY x.RunNo) AS rn FROM #pcs_runs x WHERE x.Batches IS NOT NULL AND x.Picked = 0) o ON o.RunNo = r.RunNo
+					CROSS APPLY (SELECT ((o.rn - 1) * (@pcs_K2 - 1) * 2 + (@pcs_M2 - 1)) / (2 * (@pcs_M2 - 1)) AS j) jj
+					WHERE 1 + (jj.j * (@pcs_M2 - 1) * 2 + (@pcs_K2 - 1)) / (2 * (@pcs_K2 - 1)) = o.rn;
+				END
+				/* The picked evaldates, as a VALUES list: each EvalText passed the digit pattern above, so it holds no quote. */
+				SET @pcs_PickList = STUFF((SELECT N',(N''' + r.EvalText + N''')' FROM #pcs_runs r WHERE r.Picked = 1 ORDER BY r.RunNo
+					FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N'');
+				IF @pcs_PickList IS NULL SET @pcs_PickList = N'(N'''')';
+				SET @pcs_HistSql = N'SELECT h.evaldate, h.SectionID, h.Section, h.Summary, h.Details FROM ' + @pcs_HistTable
+					+ N' h JOIN (VALUES ' + @pcs_PickList + N') p (E) ON h.evaldate = p.E WHERE h.SQLInstance = @inst AND h.SectionID = 104;';
+				SET @pcs_HistT0 = GETDATE();
+				INSERT #pcs_hist (evaldate, SectionID, Section, Summary, Details)
+				EXEC sp_executesql @pcs_HistSql, N'@inst NVARCHAR(505), @cut NVARCHAR(20), @now NVARCHAR(20)', @inst = @pcs_HistInst, @cut = @pcs_HistCut, @now = @evaldate;
+				SET @pcs_HistRead = @pcs_P1Rows + @@ROWCOUNT;
+
+				/* Counter rows, parsed: strip '[Object]:', split on ',[Counter]:', trim, take the object after
+				   its FIRST colon, then match the catalog by equality. A value that is not 1-18 digits is not read; a
+				   Deprecated Features row at 0 is dropped (as the earlier read did). Every step is CASE-guarded, so a bad row is
+				   skipped, never an error. */
+				INSERT #pcs_hrow (EvalText, obj, counter, inst, value)
+				SELECT LEFT(h.evaldate, 20), p.obj, p.counter, p.inst, MAX(CONVERT(BIGINT, d.D))
+				FROM #pcs_hist h
+				CROSS APPLY (SELECT CASE WHEN LEFT(h.Section, 9) = N'[Object]:' THEN SUBSTRING(h.Section, 10, 4000) ELSE h.Section END AS S
+					, LTRIM(RTRIM(ISNULL(h.Details, N''))) AS D) a
+				CROSS APPLY (SELECT CHARINDEX(N',[Counter]:', a.S) AS K) k
+				CROSS APPLY (SELECT CASE WHEN k.K > 0 THEN LEFT(a.S, k.K - 1) ELSE N'' END AS ObjPart
+					, CASE WHEN k.K > 0 THEN SUBSTRING(a.S, k.K + 11, 4000) ELSE N'' END AS CntPart) o
+				CROSS APPLY (SELECT LEFT(LTRIM(RTRIM(SUBSTRING(o.ObjPart, CHARINDEX(N':', o.ObjPart) + 1, 4000))), 128) AS obj
+					, LEFT(LTRIM(RTRIM(o.CntPart)), 128) AS counter
+					, LEFT(LTRIM(RTRIM(ISNULL(h.Summary, N''))), 128) AS inst) p
+				CROSS APPLY (SELECT CASE WHEN LEN(a.D) BETWEEN 1 AND 18 AND a.D NOT LIKE N'%[^0-9]%' THEN a.D END AS D) d
+				WHERE h.SectionID = 104 AND k.K > 0 AND d.D IS NOT NULL AND LEN(h.evaldate) = 19
+					AND NOT (p.obj = N'Deprecated Features' AND d.D = N'0')
+					AND (EXISTS (SELECT 1 FROM #pcs_want w WHERE w.obj = p.obj AND w.counter = p.counter)
+						OR (p.obj = N'Batch Resp Statistics' AND p.inst IN (N'Elapsed Time:Requests', N'Elapsed Time:Total(ms)')))
+				GROUP BY LEFT(h.evaldate, 20), p.obj, p.counter, p.inst;
+				SET @pcs_P2Ms = DATEDIFF(MILLISECOND, @pcs_HistT0, GETDATE());
+				SET @pcs_HistReadMs = @pcs_P1Ms + @pcs_P2Ms;
+
+				UPDATE r SET HasCounters = CASE WHEN r.Picked = 1 AND EXISTS (SELECT 1 FROM #pcs_hrow hr WHERE hr.EvalText = r.EvalText) THEN 1 ELSE 0 END
+				FROM #pcs_runs r;
+				SET @pcs_RunsRead = (SELECT COUNT(*) FROM #pcs_runs WHERE HasCounters = 1);
+
+				/* The uptime a rate point divides by (HISTORY f): exact; else the clock from an exact start of the SAME segment;
+				   else the legacy Uptime: days; an unknown start gives none. */
+				UPDATE r SET PtSec = CASE
+						WHEN r.UptimeSec IS NOT NULL THEN r.UptimeSec
+						WHEN sx.S IS NOT NULL AND sx.S < r.EvalDate THEN DATEDIFF(SECOND, sx.S, r.EvalDate)
+						WHEN r.StartKind = 'estimate' THEN CONVERT(BIGINT, r.UptimeDays * 86400) END
+				FROM #pcs_runs r
+				OUTER APPLY (SELECT MAX(x.StartExact) AS S FROM #pcs_runs x WHERE x.Seg = r.Seg) sx
+				WHERE r.HasCounters = 1;
+				SET @pcs_HistState = 'read';
+
+				IF @Debug = 1
+				BEGIN
+					SET @pcs_i = 1;
+					WHILE @pcs_i <= @pcs_Runs
+					BEGIN
+						SELECT @pcs_Msg = N'pcs history run ' + CONVERT(NVARCHAR(12), RunNo) + N' ' + EvalText + N' seg ' + CONVERT(NVARCHAR(12), Seg)
+							+ N' reason ' + ISNULL(SegReason, N'same') + N' start ' + ISNULL(CONVERT(NVARCHAR(19), StartBest, 120), N'unknown') + N' ' + StartKind
+							+ N' uptime ' + ISNULL(CONVERT(NVARCHAR(30), UptimeDays), N'-') + N' d ' + ISNULL(CONVERT(NVARCHAR(30), UptimeSec), N'-') + N' s batches '
+							+ ISNULL(CONVERT(NVARCHAR(30), Batches), N'-') + N' picked ' + CONVERT(NVARCHAR(1), Picked) + N' counters ' + CONVERT(NVARCHAR(1), HasCounters)
+							+ N' ptsec ' + ISNULL(CONVERT(NVARCHAR(30), PtSec), N'-')
+						FROM #pcs_runs WHERE RunNo = @pcs_i;
+						RAISERROR (N'%s', 0, 1, @pcs_Msg) WITH NOWAIT;
+						SET @pcs_i = @pcs_i + 1;
+					END
+					RAISERROR (N'pcs history read: phase 1 %d ms %d rows, phase 2 + parse %d ms, %d rows in all, %d of %d runs read', 0, 1
+						, @pcs_P1Ms, @pcs_P1Rows, @pcs_P2Ms, @pcs_HistRead, @pcs_RunsRead, @pcs_Runs) WITH NOWAIT;
+				END
+			END
+		END
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counters: history read', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		SET @pcs_HistState = 'error';
+		SET @pcs_HistReason = LEFT(ISNULL(ERROR_MESSAGE(), N'unknown error'), 400);
+		DELETE FROM #pcs_hrun;
+		DELETE FROM #pcs_hist;
+		DELETE FROM #pcs_hrow;
+		DELETE FROM #pcs_runs;
+		SELECT @pcs_Runs = 0, @pcs_Segs = 0, @pcs_Restarts = 0, @pcs_HistDays = 0, @pcs_RunsRead = 0;
+		RAISERROR (N'Error with Performance counters: history read',0,1) WITH NOWAIT;
+	END CATCH
+
+	/* The history basis sentence (120) and the last-run decision (122). */
+	SET @pcs_HistSentence = CASE @pcs_HistState
+		WHEN 'read' THEN (SELECT CASE WHEN @pcs_Runs = 0 THEN tn.Sentence ELSE REPLACE(REPLACE(REPLACE(REPLACE(t.Sentence, N'{Runs}', CONVERT(NVARCHAR(12), @pcs_Runs))
+				, N'{HistDays}', CONVERT(NVARCHAR(30), @pcs_HistDays)), N'{Restarts}', CONVERT(NVARCHAR(12), @pcs_Restarts)), N'{Read}', CONVERT(NVARCHAR(12), @pcs_RunsRead)) END
+			FROM #pcs_rules t JOIN #pcs_rules tn ON tn.RuleId = 'T_HIST_NONE' WHERE t.RuleId = 'T_HIST')
+		WHEN 'absent' THEN (SELECT REPLACE(Sentence, N'{Table}', @pcs_HistTable) FROM #pcs_rules WHERE RuleId = 'T_HIST_ABSENT')
+		WHEN 'cap' THEN (SELECT REPLACE(REPLACE(Sentence, N'{Rows}', CONVERT(NVARCHAR(30), @pcs_HistRows)), N'{Threshold}', CONVERT(NVARCHAR(30), @pcs_HistMax)) FROM #pcs_rules WHERE RuleId = 'HIST_MAXROWS')
+		ELSE (SELECT REPLACE(Sentence, N'{Reason}', @pcs_HistReason) FROM #pcs_rules WHERE RuleId = 'T_HIST_ERROR') END;
+
+	SET @pcs_NowBatches = (SELECT MAX(value) FROM #pcs_snap WHERE snap = 1 AND obj = N'SQL Statistics' AND counter = N'Batch Requests/sec' AND inst = N'');
+	SELECT TOP 1 @pcs_LastEvalText = EvalText, @pcs_LastEval = EvalDate, @pcs_LastStart = StartBest, @pcs_LastUptimeSec = UptimeSec, @pcs_LastBatches = Batches
+	FROM #pcs_runs
+	WHERE HasCounters = 1
+	ORDER BY RunNo DESC;
+	SET @pcs_LastState = CASE
+		WHEN @pcs_HistState <> 'read' THEN 'hist'
+		WHEN @pcs_LastEval IS NULL THEN 'none'
+		WHEN @pcs_LastEval < @pcs_StartTime OR @pcs_LastUptimeSec > @pcs_UptimeSec OR ABS(DATEDIFF(MINUTE, @pcs_LastStart, @pcs_StartTime)) > @pcs_Tol THEN 'restart' /* 2026-10-22: a stored uptime above now's, or a start that moved, is a restart (invariant 3); NULL on either side compares false */
+		WHEN @pcs_LastBatches IS NOT NULL AND @pcs_NowBatches IS NOT NULL AND @pcs_NowBatches < @pcs_LastBatches THEN 'down'
+		ELSE 'ok' END;
+	IF @pcs_LastState = 'ok'
+	BEGIN
+		SET @pcs_LastSec = CASE WHEN @pcs_LastUptimeSec IS NOT NULL THEN @pcs_UptimeSec - @pcs_LastUptimeSec ELSE DATEDIFF(SECOND, @pcs_LastEval, @pcs_Snap1At) END;
+		/* Snapshot 3: the last run's counters (its 104 rows), the 'from' side of 122. */
+		INSERT #pcs_snap (snap, taken_at, obj, counter, inst, cntr_type, value)
+		SELECT 3, @pcs_LastEval, hr.obj, hr.counter, hr.inst, 0, MAX(hr.value)
+		FROM #pcs_hrow hr
+		WHERE hr.EvalText = @pcs_LastEvalText
+		GROUP BY hr.obj, hr.counter, hr.inst;
+	END
+	SET @pcs_LastHeader = LEFT(CASE @pcs_LastState
+		WHEN 'ok' THEN (SELECT REPLACE(REPLACE(REPLACE(REPLACE(Sentence, N'{Last}', @pcs_LastEvalText)
+				, N'{Days}', CONVERT(NVARCHAR(30), CONVERT(DECIMAL(19,2), @pcs_LastSec / 86400.0))), N'{Seconds}', CONVERT(NVARCHAR(30), CONVERT(DECIMAL(19,0), @pcs_LastSec)))
+				, N'{How}', CASE WHEN @pcs_LastUptimeSec IS NOT NULL THEN N'by SQL Server uptime, exact' ELSE N'by the clock from the last run''s start time (that run stored no uptime in seconds)' END)
+			FROM #pcs_rules WHERE RuleId = 'T_HDR_122')
+		WHEN 'none' THEN (SELECT Sentence FROM #pcs_rules WHERE RuleId = 'T_SKIP_122_NONE')
+		WHEN 'restart' THEN (SELECT REPLACE(REPLACE(Sentence, N'{Start}', CONVERT(NVARCHAR(19), @pcs_StartTime, 120)), N'{Last}', @pcs_LastEvalText) FROM #pcs_rules WHERE RuleId = 'T_SKIP_122_RESTART')
+		WHEN 'down' THEN (SELECT REPLACE(Sentence, N'{Last}', @pcs_LastEvalText) FROM #pcs_rules WHERE RuleId = 'T_SKIP_122_DOWN')
+		ELSE (SELECT REPLACE(Sentence, N'{History}', ISNULL(@pcs_HistSentence, N'')) FROM #pcs_rules WHERE RuleId = 'T_SKIP_122_HIST') END, 1000);
+	SET @pcs_LastDetails = LEFT('[Window]:lastrun;[WindowSeconds]:' + CASE WHEN @pcs_LastState = 'ok' THEN CONVERT(VARCHAR(30), CONVERT(DECIMAL(19,3), @pcs_LastSec)) ELSE '0' END
+		+ CASE WHEN @pcs_LastState = 'ok' THEN ';[Status]:ok' ELSE ';[Status]:skip;[Reason]:' + CASE WHEN @pcs_LastState = 'hist' THEN @pcs_HistState ELSE @pcs_LastState END END
+		+ ';[LastRun]:' + ISNULL(@pcs_LastEvalText, '') + ';[LastRunStart]:' + ISNULL(CONVERT(VARCHAR(19), @pcs_LastStart, 120), '')
+		+ ';[Elapsed]:' + CASE WHEN @pcs_LastState <> 'ok' THEN '' WHEN @pcs_LastUptimeSec IS NOT NULL THEN 'uptime' ELSE 'clock' END
+		+ ';[sqlserver_start_time]:' + CONVERT(VARCHAR(19), @pcs_StartTime, 120) + ';[HistoryRuns]:' + CONVERT(VARCHAR(12), @pcs_Runs) + ';', 1000);
+
+	/* THE WINDOWS. Every value, rule and row below is keyed by Win. */
+	INSERT #pcs_win (Win, SectionID, FromSnap, ToSnap, SampleOff, Seconds, SecondsText, WindowText, Title)
+	VALUES ('start', 120, NULL, 1, 0, @pcs_UptimeSec, CONVERT(VARCHAR(30), @pcs_UptimeSec)
+		, N'since start, ' + CONVERT(VARCHAR(30), CONVERT(DECIMAL(19,2), @pcs_UptimeSec / 86400.0)) + N' days'
+		, N'Performance counters: since start');
+	INSERT #pcs_win (Win, SectionID, FromSnap, ToSnap, SampleOff, Seconds, SecondsText, WindowText, Title)
+	VALUES ('sample', 121, 1, 2, CASE WHEN @pcs_SampleReq > 0 THEN 0 ELSE 1 END, @pcs_SampleSec, CONVERT(VARCHAR(30), @pcs_SampleSec)
+		, CONVERT(VARCHAR(30), @pcs_SampleSec) + N' s sample'
+		, N'Performance counters: right now (' + CASE WHEN @pcs_SampleReq > 0 THEN CONVERT(VARCHAR(10), @pcs_SampleReq) + N' s sample)' ELSE N'sample off)' END);
+	/* 122: SampleOff = 1 means the window is skipped; its header then carries the reason (@pcs_LastHeader). */
+	INSERT #pcs_win (Win, SectionID, FromSnap, ToSnap, SampleOff, Seconds, SecondsText, WindowText, Title)
+	VALUES ('lastrun', 122, 3, 1, CASE WHEN @pcs_LastState = 'ok' THEN 0 ELSE 1 END, @pcs_LastSec, CONVERT(VARCHAR(30), CONVERT(DECIMAL(19,3), @pcs_LastSec))
+		, CASE WHEN @pcs_LastState = 'ok' THEN N'since the last run at ' + @pcs_LastEvalText + N', ' + CONVERT(VARCHAR(30), CONVERT(DECIMAL(19,2), @pcs_LastSec / 86400.0)) + N' days'
+			ELSE N'since the last run' END
+		, N'Performance counters: since last run');
+
+	UPDATE w SET
+		HeaderSummary = CASE
+			WHEN w.Win = 'start' THEN LEFT(REPLACE(REPLACE(REPLACE(t.Sentence, N'{Start}', CONVERT(VARCHAR(19), @pcs_StartTime, 120)), N'{Days}', CONVERT(VARCHAR(30), CONVERT(DECIMAL(19,2), @pcs_UptimeSec / 86400.0)))
+				, N'{History}', ISNULL(@pcs_HistSentence, N'')), 1000)
+			WHEN w.Win = 'lastrun' THEN @pcs_LastHeader
+			WHEN w.SampleOff = 1 THEN t.Sentence
+			ELSE REPLACE(REPLACE(REPLACE(t.Sentence, N'{Seconds}', w.SecondsText), N'{From}', CONVERT(VARCHAR(23), @pcs_Snap1At, 121)), N'{To}', CONVERT(VARCHAR(23), @pcs_Snap2At, 121)) END
+		, HeaderDetails = CASE
+			WHEN w.Win = 'start' THEN '[sqlserver_start_time]:' + CONVERT(VARCHAR(19), @pcs_StartTime, 120) + ';[UptimeSeconds]:' + CONVERT(VARCHAR(30), @pcs_UptimeSec)
+				+ ';[WindowSeconds]:' + w.SecondsText + ';[History]:' + @pcs_HistState + ';[HistoryRuns]:' + CONVERT(VARCHAR(12), @pcs_Runs) + ';[HistoryRunsRead]:' + CONVERT(VARCHAR(12), @pcs_RunsRead)
+				+ ';[HistoryDays]:' + CONVERT(VARCHAR(30), @pcs_HistDays) + ';[RestartsSeenAtLeast]:' + CONVERT(VARCHAR(12), @pcs_Restarts)
+				+ ';[HistorySegments]:' + CONVERT(VARCHAR(12), @pcs_Segs) + ';[HistoryTableRows]:' + ISNULL(CONVERT(VARCHAR(30), @pcs_HistRows), '')
+				+ ';[HistoryTableMB]:' + ISNULL(CONVERT(VARCHAR(30), @pcs_HistMB), '') + ';[HistoryRowsRead]:' + CONVERT(VARCHAR(12), @pcs_HistRead)
+				+ ';[HistoryReadMs]:' + ISNULL(CONVERT(VARCHAR(12), @pcs_HistReadMs), '') + ';'
+			WHEN w.Win = 'lastrun' THEN @pcs_LastDetails
+			WHEN w.SampleOff = 1 THEN '[SampleSeconds]:0;[Requested]:' + ISNULL(CONVERT(VARCHAR(12), @PerfCounterSampleSeconds), 'NULL') + ';[Window]:off;[WindowSeconds]:0;'
+			ELSE '[SampleSeconds]:' + w.SecondsText + ';[Requested]:' + CONVERT(VARCHAR(12), @pcs_SampleReq) + ';[From]:' + CONVERT(VARCHAR(23), @pcs_Snap1At, 121)
+				+ ';[To]:' + CONVERT(VARCHAR(23), @pcs_Snap2At, 121) + ';[WindowSeconds]:' + w.SecondsText + ';' END
+	FROM #pcs_win w
+	JOIN #pcs_rules t ON t.RuleId = CASE WHEN w.Win = 'start' THEN 'T_HDR_120' WHEN w.Win = 'lastrun' THEN 'T_HDR_122' WHEN w.SampleOff = 1 THEN 'T_OFF_121' ELSE 'T_HDR_121' END;
+
+	/* VALUES: one row per (window, metric, entity) found at the window's end snapshot. A ratio is a point reading, so it
+	   is reported in section 120 only. A metric with no counter at all is a 'missing' row (Entity NULL). */
+	INSERT #pcs_val (Win, MetricKey, Entity, NumTo, NumType)
+	SELECT w.Win, c.MetricKey, s.inst, s.value, s.cntr_type
+	FROM #pcs_win w
+	JOIN #pcs_catalog c ON (c.AgOnly = 0 OR @pcs_IsAgReplica = 1)
+	JOIN #pcs_snap s ON s.snap = w.ToSnap AND s.obj = c.ObjSuffix AND s.counter = c.CounterName
+	WHERE w.SampleOff = 0
+		AND NOT (w.Win <> 'start' AND c.Kind = 'ratio')
+		AND NOT (w.Win = 'lastrun' AND c.Kind = 'gauge')
+		AND ((c.InstScope = 'exact' AND s.inst = c.InstName)
+			OR (c.InstScope <> 'exact' AND s.inst NOT IN (N'_Total', N'mssqlsystemresource')));
+
+	INSERT #pcs_val (Win, MetricKey, Entity, StatusCode, Status, Reason)
+	SELECT w.Win, c.MetricKey, NULL, 'missing', 'missing', N'counter ' + c.ObjSuffix + N': ' + c.CounterName + N' not found'
+	FROM #pcs_win w
+	JOIN #pcs_catalog c ON (c.AgOnly = 0 OR @pcs_IsAgReplica = 1)
+	WHERE w.SampleOff = 0
+		AND NOT (w.Win <> 'start' AND c.Kind = 'ratio')
+		AND NOT (w.Win = 'lastrun' AND c.Kind = 'gauge')
+		AND NOT EXISTS (SELECT 1 FROM #pcs_val v WHERE v.Win = w.Win AND v.MetricKey = c.MetricKey)
+		AND (c.InstScope = 'exact' OR NOT EXISTS (SELECT 1 FROM #pcs_snap s WHERE s.snap = w.ToSnap AND s.obj = c.ObjSuffix AND s.counter = c.CounterName));
+
+	UPDATE v SET
+		NumFrom = CASE WHEN w.FromSnap IS NULL THEN 0 ELSE nf.value END
+		, BaseTo = bt.value
+		, BaseType = bt.cntr_type
+		, BaseFrom = CASE WHEN w.FromSnap IS NULL THEN 0 ELSE bf.value END
+		, DenTo = dt.value
+		, DenType = dt.cntr_type
+		, DenFrom = CASE WHEN w.FromSnap IS NULL THEN 0 ELSE df.value END
+	FROM #pcs_val v
+	JOIN #pcs_win w ON w.Win = v.Win
+	JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey
+	LEFT JOIN #pcs_snap nf ON nf.snap = w.FromSnap AND nf.obj = c.ObjSuffix AND nf.counter = c.CounterName AND nf.inst = v.Entity
+	LEFT JOIN #pcs_snap bt ON bt.snap = w.ToSnap AND bt.obj = c.ObjSuffix AND bt.counter = c.BaseCounter AND bt.inst = v.Entity
+	LEFT JOIN #pcs_snap bf ON bf.snap = w.FromSnap AND bf.obj = c.ObjSuffix AND bf.counter = c.BaseCounter AND bf.inst = v.Entity
+	LEFT JOIN #pcs_snap dt ON dt.snap = w.ToSnap AND dt.obj = c.DenObjSuffix AND dt.counter = c.DenCounter AND dt.inst = ISNULL(c.DenInstName, v.Entity)
+	LEFT JOIN #pcs_snap df ON df.snap = w.FromSnap AND df.obj = c.DenObjSuffix AND df.counter = c.DenCounter AND df.inst = ISNULL(c.DenInstName, v.Entity)
+	WHERE v.StatusCode IS NULL;
+
+	/* STATUS by kind (invariant 1), first match wins: a wrong type, then a missing reading, then a reset, then no data. */
+	UPDATE v SET StatusCode = CASE
+			WHEN CHARINDEX(',' + CONVERT(VARCHAR(12), v.NumType) + ',', c.ExpectTypes) = 0 THEN 'type:num'
+			WHEN v.NumTo < 0 THEN 'type:neg'
+			WHEN c.Kind IN ('ratio', 'average') AND v.BaseTo IS NULL THEN 'type:basemissing'
+			WHEN c.Kind IN ('ratio', 'average') AND v.BaseType <> 1073939712 THEN 'type:base'
+			WHEN c.DenCounter IS NOT NULL AND v.DenTo IS NULL THEN 'type:denmissing'
+			WHEN c.DenCounter IS NOT NULL AND CHARINDEX(',' + CONVERT(VARCHAR(12), v.DenType) + ',', c.DenExpectTypes) = 0 THEN 'type:den'
+			WHEN c.Kind IN ('rate', 'count', 'average', 'per') AND (v.NumFrom IS NULL OR (c.Kind = 'average' AND v.BaseFrom IS NULL) OR (c.Kind = 'per' AND v.DenFrom IS NULL)) THEN 'nodata:first'
+			WHEN c.Kind IN ('rate', 'count', 'average', 'per') AND v.NumTo < v.NumFrom THEN 'reset'
+			WHEN c.Kind = 'average' AND v.BaseTo < v.BaseFrom THEN 'reset'
+			WHEN c.Kind = 'per' AND v.DenTo < v.DenFrom THEN 'reset'
+			WHEN c.Kind = 'rate' AND w.Seconds <= 0 THEN 'nodata:secs'
+			WHEN c.Kind = 'ratio' AND v.BaseTo = 0 THEN 'nodata:base0'
+			WHEN c.Kind = 'average' AND v.BaseTo - v.BaseFrom = 0 THEN 'nodata:basedelta'
+			WHEN c.Kind = 'per' AND v.DenTo - v.DenFrom = 0 THEN 'nodata:dendelta'
+			WHEN c.Kind = 'gauge' AND c.DenCounter IS NOT NULL AND v.DenTo = 0 THEN 'nodata:den0'
+			ELSE 'ok' END
+	FROM #pcs_val v
+	JOIN #pcs_win w ON w.Win = v.Win
+	JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey
+	WHERE v.StatusCode IS NULL;
+
+	UPDATE v SET
+		Status = CASE WHEN CHARINDEX(':', v.StatusCode) > 0 THEN LEFT(v.StatusCode, CHARINDEX(':', v.StatusCode) - 1) ELSE v.StatusCode END
+		, Reason = CASE v.StatusCode
+			WHEN 'type:num' THEN N'the live cntr_type ' + ISNULL(CONVERT(VARCHAR(12), v.NumType), 'NULL') + N' is not in the family ' + c.ExpectTypes + N' expected for kind ' + c.Kind
+			WHEN 'type:neg' THEN N'the raw value is negative, so it was not read'
+			WHEN 'type:basemissing' THEN N'its base counter ' + ISNULL(c.BaseCounter, N'?') + N' was not found'
+			WHEN 'type:base' THEN N'the base counter has cntr_type ' + ISNULL(CONVERT(VARCHAR(12), v.BaseType), 'NULL') + N', not 1073939712'
+			WHEN 'type:denmissing' THEN N'its denominator ' + ISNULL(c.DenObjSuffix, N'?') + N': ' + ISNULL(c.DenCounter, N'?') + N' was not found'
+			WHEN 'type:den' THEN N'the denominator has cntr_type ' + ISNULL(CONVERT(VARCHAR(12), v.DenType), 'NULL') + N', not in ' + ISNULL(c.DenExpectTypes, '')
+			WHEN 'nodata:first' THEN CASE WHEN v.Win = 'lastrun' THEN N'not in the last run''s counters (absent then is no data, not zero)' ELSE N'not present at the start of the window' END
+			WHEN 'reset' THEN N'the counter went down inside the window'
+			WHEN 'nodata:secs' THEN N'the window has no length'
+			WHEN 'nodata:base0' THEN N'its base is 0'
+			WHEN 'nodata:basedelta' THEN N'its base did not move in the window'
+			WHEN 'nodata:dendelta' THEN N'its denominator (' + ISNULL(c.DenCounter, N'?') + N') did not move in the window'
+			WHEN 'nodata:den0' THEN N'its denominator is 0'
+			ELSE v.Reason END
+	FROM #pcs_val v
+	JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey;
+
+	/* VALUE by kind (invariant 1). Every divisor is NULLIF-guarded as well as status-guarded. */
+	UPDATE v SET Value = CONVERT(DECIMAL(38,6), CASE c.Kind
+			WHEN 'rate' THEN CONVERT(FLOAT, v.NumTo - v.NumFrom) / NULLIF(CONVERT(FLOAT, w.Seconds), 0)
+			WHEN 'count' THEN CONVERT(FLOAT, v.NumTo - v.NumFrom)
+			WHEN 'ratio' THEN CONVERT(FLOAT, v.NumTo) * 100.0 / NULLIF(CONVERT(FLOAT, v.BaseTo), 0)
+			WHEN 'average' THEN CONVERT(FLOAT, v.NumTo - v.NumFrom) / NULLIF(CONVERT(FLOAT, v.BaseTo - v.BaseFrom), 0)
+			WHEN 'per' THEN CONVERT(FLOAT, v.NumTo - v.NumFrom) * CONVERT(FLOAT, c.Scale) / NULLIF(CONVERT(FLOAT, v.DenTo - v.DenFrom), 0)
+			WHEN 'gauge' THEN CASE WHEN c.DenCounter IS NULL THEN CONVERT(FLOAT, v.NumTo) ELSE CONVERT(FLOAT, v.NumTo) * CONVERT(FLOAT, c.Scale) / NULLIF(CONVERT(FLOAT, v.DenTo), 0) END
+			END)
+	FROM #pcs_val v
+	JOIN #pcs_win w ON w.Win = v.Win
+	JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey
+	WHERE v.Status = 'ok';
+
+	/* RULES: the most severe first-part rule that fires for the metric in this window. */
+	UPDATE v SET FiredRule = (
+		SELECT TOP 1 r.RuleId
+		FROM #pcs_rules r
+		CROSS APPLY (SELECT CASE
+				WHEN r.Normalise = 'week' THEN v.Value * 604800 / CASE WHEN w.Seconds > 604800 THEN w.Seconds ELSE 604800 END
+				WHEN r.UseReading = 'max' AND v.Win = 'sample' AND v.NumFrom > v.Value THEN v.NumFrom
+				ELSE v.Value END AS Judged) j
+		WHERE r.Stage IN ('S1', 'S2') AND r.Op IS NOT NULL
+			AND CHARINDEX(',' + v.MetricKey + ',', r.MetricKeys) > 0
+			AND CHARINDEX(',' + v.Win + ',', r.Windows) > 0
+			AND (r.MinUptimeSeconds IS NULL OR @pcs_UptimeSec >= r.MinUptimeSeconds)
+			AND ((r.Op = '>' AND j.Judged > r.Threshold) OR (r.Op = '<' AND j.Judged < r.Threshold))
+		ORDER BY ISNULL(CASE WHEN v.Win = 'sample' THEN r.SeverityInSample END, ISNULL(r.Severity, N'0')) DESC, r.RuleId)
+	FROM #pcs_val v
+	JOIN #pcs_win w ON w.Win = v.Win
+	WHERE v.Status = 'ok';
+
+	UPDATE v SET
+		ShownValue = CASE WHEN r.UseReading = 'max' AND v.Win = 'sample' AND v.NumFrom > v.Value THEN v.NumFrom ELSE v.Value END
+		, Severity = CASE WHEN v.Win = 'sample' AND r.SeverityInSample IS NOT NULL THEN r.SeverityInSample ELSE r.Severity END
+	FROM #pcs_val v
+	LEFT JOIN #pcs_rules r ON r.RuleId = v.FiredRule
+	WHERE v.Status = 'ok';
+
+	UPDATE v SET
+		ValueText = CASE WHEN v.ShownValue IS NULL THEN ''
+			WHEN c.Kind = 'count' OR (c.Kind = 'gauge' AND c.DenCounter IS NULL) THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,0), v.ShownValue))
+			ELSE CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,2), v.ShownValue)) END
+		, WindowText = CASE
+			WHEN c.Kind IN ('gauge', 'ratio') AND w.Win = 'start' THEN N'reading now'
+			WHEN c.Kind IN ('gauge', 'ratio') THEN N'reading at the end of the ' + w.SecondsText + N' s sample'
+			WHEN c.InstScope = 'perdb' AND w.Win = 'start' THEN N'since the database came online, at most since start, ' + CONVERT(VARCHAR(30), CONVERT(DECIMAL(19,2), @pcs_UptimeSec / 86400.0)) + N' days'
+			ELSE w.WindowText END
+		, WindowSecondsText = CASE WHEN c.Kind IN ('gauge', 'ratio') THEN '0' ELSE w.SecondsText END
+	FROM #pcs_val v
+	JOIN #pcs_win w ON w.Win = v.Win
+	JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey;
+
+	SET @pcs_Ready = 1;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counters: snapshots', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage  = ERROR_MESSAGE()
+		RAISERROR (@errMessage,0,1) WITH NOWAIT;
+	RAISERROR (N'Error with Performance counters: snapshots',0,1) WITH NOWAIT;
+		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
+	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+END CATCH
+
+/* HISTORY SUMMARIES (HISTORY f-k in the header comment): points, normal ranges and R_NORM30, trends, first seen
+   and R14. Its own TRY (k): a failure here is a could-not-run row, and sections 120-123 still write without these clauses. */
+IF @pcs_Ready = 1 AND @pcs_HistState = 'read'
+BEGIN
+	BEGIN TRY
+		SET @pcs_Step = N'Performance counters: normals, trends, first seen';
+		SELECT @pcs_MinPts = MAX(CASE WHEN RuleId = 'NORM_MINPOINTS' THEN CONVERT(INT, Threshold) END)
+			, @pcs_Steady = MAX(CASE WHEN RuleId = 'TREND_STEADY' THEN Threshold END)
+		FROM #pcs_rules;
+
+		/* f. POINTS: one per (metric, entity) per run read, by kind, from that run's own cumulative values. */
+		INSERT #pcs_pt (MetricKey, Entity, RunNo, EvalDate, Value)
+		SELECT c.MetricKey, n.inst, r.RunNo, r.EvalDate, x.V
+		FROM #pcs_runs r
+		JOIN #pcs_hrow n ON n.EvalText = r.EvalText
+		JOIN #pcs_catalog c ON c.ObjSuffix = n.obj AND c.CounterName = n.counter
+			AND c.Kind IN ('rate', 'per', 'ratio', 'average', 'gauge') AND (c.AgOnly = 0 OR @pcs_IsAgReplica = 1)
+			AND ((c.InstScope = 'exact' AND n.inst = c.InstName) OR (c.InstScope <> 'exact' AND n.inst NOT IN (N'_Total', N'mssqlsystemresource')))
+		LEFT JOIN #pcs_hrow b ON b.EvalText = r.EvalText AND b.obj = c.ObjSuffix AND b.counter = c.BaseCounter AND b.inst = n.inst
+		LEFT JOIN #pcs_hrow d ON d.EvalText = r.EvalText AND d.obj = c.DenObjSuffix AND d.counter = c.DenCounter AND d.inst = ISNULL(c.DenInstName, n.inst)
+		CROSS APPLY (SELECT CASE c.Kind
+				WHEN 'rate' THEN CASE WHEN r.PtSec > 0 THEN CONVERT(FLOAT, n.value) / CONVERT(FLOAT, r.PtSec) END
+				WHEN 'per' THEN CASE WHEN d.value > 0 THEN CONVERT(FLOAT, n.value) * CONVERT(FLOAT, c.Scale) / CONVERT(FLOAT, d.value) END
+				WHEN 'ratio' THEN CASE WHEN b.value > 0 THEN CONVERT(FLOAT, n.value) * 100.0 / CONVERT(FLOAT, b.value) END
+				WHEN 'average' THEN CASE WHEN b.value > 0 THEN CONVERT(FLOAT, n.value) / CONVERT(FLOAT, b.value) END
+				WHEN 'gauge' THEN CASE WHEN c.DenCounter IS NULL THEN CONVERT(FLOAT, n.value)
+					WHEN d.value > 0 THEN CONVERT(FLOAT, n.value) * CONVERT(FLOAT, c.Scale) / CONVERT(FLOAT, d.value) END
+				END AS V) x
+		WHERE r.HasCounters = 1 AND x.V IS NOT NULL;
+
+		/* g. NORMAL RANGES: 10th and 90th percentile by nearest rank, per (metric, entity), over 7, 30 and 90 days. */
+		INSERT #pcs_norm (MetricKey, Entity, Days, N, Lo, Hi)
+		SELECT q.MetricKey, q.Entity, q.Days, MAX(q.N)
+			, MAX(CASE WHEN q.rn = CEILING(0.1 * q.N) THEN q.Value END)
+			, MAX(CASE WHEN q.rn = CEILING(0.9 * q.N) THEN q.Value END)
+		FROM (
+			SELECT p.MetricKey, p.Entity, dd.Days, p.Value
+				, ROW_NUMBER() OVER (PARTITION BY p.MetricKey, p.Entity, dd.Days ORDER BY p.Value, p.RunNo) AS rn
+				, COUNT(*) OVER (PARTITION BY p.MetricKey, p.Entity, dd.Days) AS N
+			FROM #pcs_pt p
+			CROSS JOIN (SELECT 7 AS Days UNION ALL SELECT 30 UNION ALL SELECT 90) dd
+			WHERE p.EvalDate >= DATEADD(DAY, 0 - dd.Days, @pcs_Snap1At)
+		) q
+		GROUP BY q.MetricKey, q.Entity, q.Days;
+		UPDATE n SET
+			LoText = CASE WHEN c.Kind = 'gauge' AND c.DenCounter IS NULL THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,0), n.Lo)) ELSE CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,2), n.Lo)) END
+			, HiText = CASE WHEN c.Kind = 'gauge' AND c.DenCounter IS NULL THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,0), n.Hi)) ELSE CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,2), n.Hi)) END
+		FROM #pcs_norm n
+		JOIN #pcs_catalog c ON c.MetricKey = n.MetricKey;
+		UPDATE #pcs_norm SET KeyText = CASE WHEN N >= @pcs_MinPts THEN LoText + ',' + HiText + ',' + CONVERT(VARCHAR(12), N) ELSE 'thin,' + CONVERT(VARCHAR(12), N) END;
+
+		/* R_NORM30: now outside the 30-day range on the side of a threshold rule that judges this metric in section 120. */
+		UPDATE v SET NormOut = CASE
+				WHEN v.Value < n30.Lo AND EXISTS (SELECT 1 FROM #pcs_rules r WHERE r.Stage IN ('S1', 'S2') AND r.Op = '<' AND CHARINDEX(',' + v.MetricKey + ',', r.MetricKeys) > 0
+					AND CHARINDEX(',start,', r.Windows) > 0 AND (r.MinUptimeSeconds IS NULL OR @pcs_UptimeSec >= r.MinUptimeSeconds)) THEN 'below'
+				WHEN v.Value > n30.Hi AND EXISTS (SELECT 1 FROM #pcs_rules r WHERE r.Stage IN ('S1', 'S2') AND r.Op = '>' AND CHARINDEX(',' + v.MetricKey + ',', r.MetricKeys) > 0
+					AND CHARINDEX(',start,', r.Windows) > 0 AND (r.MinUptimeSeconds IS NULL OR @pcs_UptimeSec >= r.MinUptimeSeconds)) THEN 'above' END
+		FROM #pcs_val v
+		JOIN #pcs_norm n30 ON n30.MetricKey = v.MetricKey AND n30.Entity = v.Entity AND n30.Days = 30
+		WHERE v.Win = 'start' AND v.Status = 'ok' AND n30.N >= @pcs_MinPts;
+
+		/* The normal clause and keys on every section 120 row of a kind that has a normal. */
+		UPDATE v SET
+			HistSummary = CASE
+				WHEN v.NormOut IS NOT NULL THEN REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(tOut.Sentence, N'{Side}', v.NormOut), N'{Low}', n30.LoText), N'{High}', n30.HiText), N'{Unit}', c.Unit), N'{Points}', CONVERT(NVARCHAR(12), n30.N))
+				WHEN n30.N >= @pcs_MinPts THEN REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(tN.Sentence, N'{Days}', N'30'), N'{Low}', n30.LoText), N'{High}', n30.HiText), N'{Unit}', c.Unit), N'{Points}', CONVERT(NVARCHAR(12), n30.N))
+				WHEN n90.N >= @pcs_MinPts THEN REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(tN.Sentence, N'{Days}', N'90'), N'{Low}', n90.LoText), N'{High}', n90.HiText), N'{Unit}', c.Unit), N'{Points}', CONVERT(NVARCHAR(12), n90.N))
+				WHEN @pcs_Runs > 0 THEN REPLACE(REPLACE(REPLACE(REPLACE(tT.Sentence, N'{Points}', CONVERT(NVARCHAR(12), ISNULL(n90.N, 0))), N'{Threshold}', CONVERT(NVARCHAR(12), @pcs_MinPts))
+					, N'{Read}', CONVERT(NVARCHAR(12), @pcs_RunsRead)), N'{Runs}', CONVERT(NVARCHAR(12), @pcs_Runs)) END
+			, HistDetails = '[Normal7d]:' + ISNULL(n7.KeyText, 'thin,0') + ';[Normal30d]:' + ISNULL(n30.KeyText, 'thin,0') + ';[Normal90d]:' + ISNULL(n90.KeyText, 'thin,0')
+				+ ';[NormalShown]:' + CASE WHEN n30.N >= @pcs_MinPts THEN '30d' WHEN n90.N >= @pcs_MinPts THEN '90d' ELSE 'thin' END
+				+ CASE WHEN v.NormOut IS NOT NULL THEN ';[NormalOut]:' + v.NormOut + ';[NormalRule]:R_NORM30' ELSE '' END + ';'
+		FROM #pcs_val v
+		JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey AND c.Kind IN ('rate', 'per', 'ratio', 'average', 'gauge')
+		LEFT JOIN #pcs_norm n7 ON n7.MetricKey = v.MetricKey AND n7.Entity = v.Entity AND n7.Days = 7
+		LEFT JOIN #pcs_norm n30 ON n30.MetricKey = v.MetricKey AND n30.Entity = v.Entity AND n30.Days = 30
+		LEFT JOIN #pcs_norm n90 ON n90.MetricKey = v.MetricKey AND n90.Entity = v.Entity AND n90.Days = 90
+		JOIN #pcs_rules tN ON tN.RuleId = 'T_NORM'
+		JOIN #pcs_rules tT ON tT.RuleId = 'NORM_MINPOINTS'
+		JOIN #pcs_rules tOut ON tOut.RuleId = 'R_NORM30'
+		WHERE v.Win = 'start' AND v.Entity IS NOT NULL AND v.Status <> 'missing';
+
+		/* h. TRENDS. Pairs: adjacent runs read, both in ONE segment (invariant 3); the window between them is their uptime
+		   difference when both stored it, else the clock. */
+		INSERT #pcs_pair (A, B, BDate, Sec)
+		SELECT a.EvalText, b.EvalText, b.EvalDate
+			, CASE WHEN a.UptimeSec IS NOT NULL AND b.UptimeSec IS NOT NULL THEN b.UptimeSec - a.UptimeSec ELSE DATEDIFF(SECOND, a.EvalDate, b.EvalDate) END
+		FROM (SELECT EvalText, EvalDate, Seg, UptimeSec, ROW_NUMBER() OVER (ORDER BY RunNo) AS k FROM #pcs_runs WHERE HasCounters = 1) b
+		JOIN (SELECT EvalText, EvalDate, Seg, UptimeSec, ROW_NUMBER() OVER (ORDER BY RunNo) AS k FROM #pcs_runs WHERE HasCounters = 1) a
+			ON a.k = b.k - 1 AND a.Seg = b.Seg;
+		DELETE FROM #pcs_pair WHERE Sec <= 0;
+
+		INSERT #pcs_tpt (Trend, EvalDate, Value)
+		SELECT 'PLE', p.EvalDate, p.Value FROM #pcs_pt p WHERE p.MetricKey = 'PLE' AND p.Entity = N'';
+		/* Log growths per week over a pair: the sum over the databases in both runs; a database whose count went down is skipped. */
+		INSERT #pcs_tpt (Trend, EvalDate, Value)
+		SELECT 'LOG_GROWTHS', p.BDate, SUM(CONVERT(FLOAT, nb.value - na.value)) * 604800.0 / NULLIF(CONVERT(FLOAT, p.Sec), 0)
+		FROM #pcs_pair p
+		JOIN #pcs_catalog c ON c.MetricKey = 'LOG_GROWTHS'
+		JOIN #pcs_hrow nb ON nb.EvalText = p.B AND nb.obj = c.ObjSuffix AND nb.counter = c.CounterName AND nb.inst NOT IN (N'_Total', N'mssqlsystemresource')
+		JOIN #pcs_hrow na ON na.EvalText = p.A AND na.obj = nb.obj AND na.counter = nb.counter AND na.inst = nb.inst
+		WHERE nb.value >= na.value
+		GROUP BY p.A, p.B, p.BDate, p.Sec;
+		/* The long-tail share over a pair: the elapsed ms of the buckets from 1 s up, over the elapsed ms of all buckets; a pair
+		   with a bucket missing in the earlier run or a bucket that went down is skipped. */
+		INSERT #pcs_tpt (Trend, EvalDate, Value)
+		SELECT 'TAIL', p.BDate
+			, 100.0 * SUM(CASE WHEN k.LowMs >= 1000 THEN CONVERT(FLOAT, mb.value - ma.value) ELSE 0 END) / NULLIF(SUM(CONVERT(FLOAT, mb.value - ma.value)), 0)
+		FROM #pcs_pair p
+		JOIN #pcs_hrow mb ON mb.EvalText = p.B AND mb.obj = N'Batch Resp Statistics' AND mb.inst = N'Elapsed Time:Total(ms)'
+		LEFT JOIN #pcs_hrow ma ON ma.EvalText = p.A AND ma.obj = mb.obj AND ma.counter = mb.counter AND ma.inst = mb.inst
+		CROSS APPLY (SELECT CHARINDEX(N'>=', mb.counter) AS P1) a1
+		CROSS APPLY (SELECT CASE WHEN a1.P1 > 0 THEN CHARINDEX(N'ms', mb.counter, a1.P1) ELSE 0 END AS P2) a2
+		CROSS APPLY (SELECT CASE WHEN a2.P2 > a1.P1 + 2 THEN SUBSTRING(mb.counter, a1.P1 + 2, a2.P2 - a1.P1 - 2) END AS LowT) t
+		CROSS APPLY (SELECT CASE WHEN LEN(t.LowT) BETWEEN 1 AND 12 AND t.LowT NOT LIKE N'%[^0-9]%' THEN CONVERT(BIGINT, t.LowT) END AS LowMs) k
+		GROUP BY p.A, p.B, p.BDate
+		HAVING COUNT(ma.value) = COUNT(*) AND MIN(mb.value - ma.value) >= 0 AND SUM(mb.value - ma.value) > 0;
+
+		INSERT #pcs_trend (Trend, Days, N, Direction)
+		SELECT x.Trend, CASE WHEN x.N30 >= @pcs_MinPts THEN 30 WHEN x.N90 >= @pcs_MinPts THEN 90 END
+			, CASE WHEN x.N30 >= @pcs_MinPts THEN x.N30 ELSE x.N90 END, 'thin'
+		FROM (SELECT tr.Trend
+				, SUM(CASE WHEN p.EvalDate >= DATEADD(DAY, -30, @pcs_Snap1At) THEN 1 ELSE 0 END) AS N30
+				, SUM(CASE WHEN p.EvalDate >= DATEADD(DAY, -90, @pcs_Snap1At) THEN 1 ELSE 0 END) AS N90
+			FROM (SELECT 'PLE' AS Trend UNION ALL SELECT 'LOG_GROWTHS' UNION ALL SELECT 'TAIL') tr
+			LEFT JOIN #pcs_tpt p ON p.Trend = tr.Trend
+			GROUP BY tr.Trend) x;
+		/* First half against second half of the window's points in time order; the middle point is dropped when N is odd. */
+		UPDATE t SET FirstMean = m.F, SecondMean = m.S
+		FROM #pcs_trend t
+		JOIN (SELECT q.Trend
+				, AVG(CASE WHEN q.rn <= q.N / 2 THEN q.Value END) AS F
+				, AVG(CASE WHEN q.rn > q.N - q.N / 2 THEN q.Value END) AS S
+			FROM (SELECT p.Trend, p.Value
+					, ROW_NUMBER() OVER (PARTITION BY p.Trend ORDER BY p.EvalDate) AS rn
+					, COUNT(*) OVER (PARTITION BY p.Trend) AS N
+				FROM #pcs_tpt p
+				JOIN #pcs_trend t2 ON t2.Trend = p.Trend AND t2.Days IS NOT NULL
+				WHERE p.EvalDate >= DATEADD(DAY, 0 - t2.Days, @pcs_Snap1At)) q
+			GROUP BY q.Trend) m ON m.Trend = t.Trend;
+		UPDATE #pcs_trend SET Direction = CASE
+				WHEN Days IS NULL OR FirstMean IS NULL OR SecondMean IS NULL THEN 'thin'
+				WHEN FirstMean = 0 THEN CASE WHEN SecondMean > 0 THEN 'rising' ELSE 'steady' END
+				WHEN ABS(SecondMean - FirstMean) * 100.0 / FirstMean <= @pcs_Steady THEN 'steady'
+				WHEN SecondMean > FirstMean THEN 'rising'
+				ELSE 'falling' END;
+		UPDATE t SET
+			SumText = CASE WHEN t.Direction = 'thin'
+					THEN REPLACE(REPLACE(CASE WHEN t.Trend = 'PLE' THEN tr.ThinRuns ELSE tr.ThinPairs END, N'{Points}', CONVERT(NVARCHAR(12), t.N)), N'{Threshold}', CONVERT(NVARCHAR(12), @pcs_MinPts))
+				ELSE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(CASE t.Trend WHEN 'PLE' THEN tr.SPle WHEN 'LOG_GROWTHS' THEN tr.SLog ELSE tr.STail END
+					, N'{Days}', CONVERT(NVARCHAR(12), t.Days)), N'{Direction}', t.Direction), N'{Points}', CONVERT(NVARCHAR(12), t.N))
+					, N'{First}', f.FirstText), N'{Second}', f.SecondText) END
+			, DetText = '[Trend]:' + t.Direction + ';[TrendWindow]:' + ISNULL(CONVERT(VARCHAR(12), t.Days) + 'd', '') + ';[TrendPoints]:' + CONVERT(VARCHAR(12), t.N)
+				+ ';[TrendFirst]:' + ISNULL(f.FirstText, '') + ';[TrendSecond]:' + ISNULL(f.SecondText, '') + ';'
+		FROM #pcs_trend t
+		CROSS APPLY (SELECT
+				CASE WHEN t.Trend = 'PLE' THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,0), t.FirstMean)) WHEN t.Trend = 'TAIL' THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,1), t.FirstMean)) ELSE CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,2), t.FirstMean)) END AS FirstText
+				, CASE WHEN t.Trend = 'PLE' THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,0), t.SecondMean)) WHEN t.Trend = 'TAIL' THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,1), t.SecondMean)) ELSE CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,2), t.SecondMean)) END AS SecondText) f
+		CROSS JOIN (SELECT MAX(CASE WHEN RuleId = 'T_TREND_PLE' THEN Sentence END) AS SPle
+				, MAX(CASE WHEN RuleId = 'T_TREND_LOG' THEN Sentence END) AS SLog
+				, MAX(CASE WHEN RuleId = 'T_TREND_TAIL' THEN Sentence END) AS STail
+				, MAX(CASE WHEN RuleId = 'T_TREND_THIN_RUNS' THEN Sentence END) AS ThinRuns
+				, MAX(CASE WHEN RuleId = 'T_TREND_THIN_PAIRS' THEN Sentence END) AS ThinPairs
+			FROM #pcs_rules) tr;
+
+		/* The PLE trend joins the PLE row of section 120; the log-growth trend joins the Log growths roll-up of 120; the
+		   long-tail trend joins section 123 (since start, long tail). */
+		UPDATE v SET HistSummary = ISNULL(v.HistSummary + N' ', N'') + t.SumText, HistDetails = ISNULL(v.HistDetails, '') + t.DetText
+		FROM #pcs_val v
+		JOIN #pcs_trend t ON t.Trend = 'PLE'
+		WHERE v.Win = 'start' AND v.MetricKey = 'PLE' AND v.Entity = N'';
+		INSERT #pcs_rollx (Win, MetricKey, XSum, XDet)
+		SELECT 'start', 'LOG_GROWTHS', t.SumText, t.DetText FROM #pcs_trend t WHERE t.Trend = 'LOG_GROWTHS';
+		SELECT @pcs_TailTrendSum = t.SumText, @pcs_TailTrendDet = t.DetText FROM #pcs_trend t WHERE t.Trend = 'TAIL';
+
+		/* i. FIRST SEEN: the earliest run read above 0 (a style-120 evaldate sorts as its date); else 'now' when this run is above 0. */
+		INSERT #pcs_first (MetricKey, Entity, FirstText)
+		SELECT c.MetricKey, n.inst, MIN(r.EvalText)
+		FROM #pcs_runs r
+		JOIN #pcs_hrow n ON n.EvalText = r.EvalText
+		JOIN #pcs_catalog c ON c.ObjSuffix = n.obj AND c.CounterName = n.counter AND c.MetricKey IN ('GRANTS_PENDING', 'LOCK_TIMEOUTS', 'DEPRECATED')
+			AND ((c.InstScope = 'exact' AND n.inst = c.InstName) OR (c.InstScope <> 'exact' AND n.inst NOT IN (N'_Total', N'mssqlsystemresource')))
+		WHERE r.HasCounters = 1 AND n.value > 0
+		GROUP BY c.MetricKey, n.inst;
+		INSERT #pcs_first (MetricKey, Entity, FirstText)
+		SELECT v.MetricKey, v.Entity, N'now'
+		FROM #pcs_val v
+		WHERE v.Win = 'start' AND v.MetricKey IN ('GRANTS_PENDING', 'LOCK_TIMEOUTS', 'DEPRECATED') AND v.Entity IS NOT NULL AND v.NumTo > 0
+			AND NOT EXISTS (SELECT 1 FROM #pcs_first f WHERE f.MetricKey = v.MetricKey AND f.Entity = v.Entity);
+		UPDATE v SET
+			HistSummary = ISNULL(v.HistSummary + N' ', N'') + CASE WHEN f.FirstText = N'now' THEN REPLACE(tFN.Sentence, N'{Read}', CONVERT(NVARCHAR(12), @pcs_RunsRead))
+				ELSE REPLACE(REPLACE(tF.Sentence, N'{First}', f.FirstText), N'{Read}', CONVERT(NVARCHAR(12), @pcs_RunsRead)) END
+			, HistDetails = ISNULL(v.HistDetails, '') + '[FirstSeen]:' + f.FirstText + ';'
+		FROM #pcs_val v
+		JOIN #pcs_first f ON f.MetricKey = v.MetricKey AND f.Entity = v.Entity
+		JOIN #pcs_rules tF ON tF.RuleId = 'T_FIRST'
+		JOIN #pcs_rules tFN ON tFN.RuleId = 'T_FIRST_NOW'
+		WHERE v.Win = 'start';
+		UPDATE v SET HistDetails = ISNULL(v.HistDetails, '') + '[FirstSeen]:none;'
+		FROM #pcs_val v
+		WHERE v.Win = 'start' AND v.MetricKey IN ('GRANTS_PENDING', 'LOCK_TIMEOUTS', 'DEPRECATED') AND v.Entity IS NOT NULL AND v.Status <> 'missing'
+			AND NOT EXISTS (SELECT 1 FROM #pcs_first f WHERE f.MetricKey = v.MetricKey AND f.Entity = v.Entity);
+		/* Every deprecated feature seen, on the Deprecated feature use roll-up of 120 (a feature seen only in history has no
+		   row of its own): the first 10 in the Summary, all of them in Details (cut at 1500 characters). */
+		INSERT #pcs_rollx (Win, MetricKey, XSum, XDet)
+		SELECT 'start', 'DEPRECATED'
+			, REPLACE(REPLACE(t.Sentence, N'{Read}', CONVERT(NVARCHAR(12), @pcs_RunsRead)), N'{List}'
+				, STUFF((SELECT TOP 10 N', ' + f.Entity + N' ' + f.FirstText FROM #pcs_first f WHERE f.MetricKey = 'DEPRECATED'
+					ORDER BY CASE WHEN f.FirstText = N'now' THEN 1 ELSE 0 END, f.FirstText, f.Entity FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'')
+					+ CASE WHEN g.N > 10 THEN N', and ' + CONVERT(NVARCHAR(12), g.N - 10) + N' more' ELSE N'' END)
+			, '[FirstSeen]:' + LEFT(STUFF((SELECT ',' + f.FirstText + '=' + REPLACE(REPLACE(REPLACE(f.Entity, '%', '%25'), ';', '%3B'), ',', '%2C') FROM #pcs_first f WHERE f.MetricKey = 'DEPRECATED'
+				ORDER BY CASE WHEN f.FirstText = N'now' THEN 1 ELSE 0 END, f.FirstText, f.Entity FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N''), 1500) + ';'
+		FROM (SELECT COUNT(*) AS N FROM #pcs_first WHERE MetricKey = 'DEPRECATED') g
+		JOIN #pcs_rules t ON t.RuleId = 'T_FIRST_LIST'
+		WHERE g.N > 0;
+
+		/* j. R14: observations of Transactions started per database (each run read, then now), each judged against the one
+		   before it in the same segment; now is in the last run's segment only when 122 compares with it. */
+		INSERT #pcs_obs (Entity, EvalDate, EvalText, Seg, Value)
+		SELECT n.inst, r.EvalDate, r.EvalText, r.Seg, n.value
+		FROM #pcs_runs r
+		JOIN #pcs_catalog c ON c.MetricKey = 'DB_TXN'
+		JOIN #pcs_hrow n ON n.EvalText = r.EvalText AND n.obj = c.ObjSuffix AND n.counter = c.CounterName AND n.inst NOT IN (N'_Total', N'mssqlsystemresource')
+		WHERE r.HasCounters = 1;
+		SET @pcs_NowSeg = CASE WHEN @pcs_LastState = 'ok' THEN (SELECT MAX(Seg) FROM #pcs_runs WHERE EvalText = @pcs_LastEvalText) ELSE ISNULL((SELECT MAX(Seg) FROM #pcs_runs), 0) + 1 END;
+		INSERT #pcs_obs (Entity, EvalDate, EvalText, Seg, Value)
+		SELECT s.inst, @pcs_Snap1At, CONVERT(NVARCHAR(20), @pcs_Snap1At, 120), @pcs_NowSeg, s.value
+		FROM #pcs_snap s
+		JOIN #pcs_catalog c ON c.MetricKey = 'DB_TXN'
+		WHERE s.snap = 1 AND s.obj = c.ObjSuffix AND s.counter = c.CounterName AND s.inst NOT IN (N'_Total', N'mssqlsystemresource');
+		UPDATE o SET Ord = q.rn
+		FROM #pcs_obs o
+		JOIN (SELECT Entity, EvalDate, ROW_NUMBER() OVER (PARTITION BY Entity ORDER BY EvalDate) AS rn FROM #pcs_obs) q ON q.Entity = o.Entity AND q.EvalDate = o.EvalDate;
+		/* No transaction started: 0 since start (or since the database came online), or the same value as the observation
+		   before it in the same segment. */
+		UPDATE o SET Ok = CASE WHEN o.Value = 0 THEN 1 WHEN p.Seg = o.Seg AND p.Value = o.Value THEN 1 ELSE 0 END
+		FROM #pcs_obs o
+		LEFT JOIN #pcs_obs p ON p.Entity = o.Entity AND p.Ord = o.Ord - 1;
+		INSERT #pcs_r14 (Entity, N, Days, FirstText, LastText, Evidence)
+		SELECT g.Entity, g.N, CONVERT(DECIMAL(19,1), g.Mins / 1440.0), g.FirstText, g.LastText
+			, LEFT(STUFF((SELECT ',' + o2.EvalText + '=' + CONVERT(VARCHAR(30), o2.Value) FROM #pcs_obs o2 WHERE o2.Entity = g.Entity ORDER BY o2.Ord
+				FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N''), 1500)
+		FROM (SELECT o.Entity, COUNT(*) AS N, DATEDIFF(MINUTE, MIN(o.EvalDate), MAX(o.EvalDate)) AS Mins, MIN(o.EvalText) AS FirstText, MAX(o.EvalText) AS LastText
+			FROM #pcs_obs o
+			GROUP BY o.Entity
+			HAVING MIN(o.Ok) = 1) g
+		JOIN #pcs_rules r ON r.RuleId = 'R14'
+		WHERE g.N >= r.Threshold AND g.Mins >= r.Threshold2 * 1440;
+
+		/* Last, so a failure above leaves every severity as the threshold rules set it: R_NORM30 raises a row to Warning. */
+		UPDATE v SET Severity = CASE WHEN ISNULL(v.Severity, N'0') < rn.Severity THEN rn.Severity ELSE v.Severity END
+		FROM #pcs_val v
+		JOIN #pcs_rules rn ON rn.RuleId = 'R_NORM30'
+		WHERE v.Win = 'start' AND v.NormOut IS NOT NULL;
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counters: normals, trends, first seen', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		SELECT @errMessage  = ERROR_MESSAGE()
+			RAISERROR (@errMessage,0,1) WITH NOWAIT;
+		RAISERROR (N'Error with Performance counters: normals, trends, first seen',0,1) WITH NOWAIT;
+		UPDATE #pcs_val SET HistSummary = NULL, HistDetails = NULL, NormOut = NULL;
+		DELETE FROM #pcs_rollx;
+		DELETE FROM #pcs_r14;
+		SELECT @pcs_TailTrendSum = NULL, @pcs_TailTrendDet = NULL;
+	END CATCH
+END
+
+/* SECTIONS 120, 121 and 122: ONE row-writing body, run once per window, each run in its own TRY/CATCH, so a failure
+   in one section becomes that section's "could not run" row and the other still writes. */
+IF @pcs_Ready = 1
+BEGIN
+	SET @pcs_Sec = (SELECT MIN(SectionID) FROM #pcs_win);
+	WHILE @pcs_Sec IS NOT NULL
+	BEGIN
+		BEGIN TRY
+			SET @pcs_Step = (SELECT Title FROM #pcs_win WHERE SectionID = @pcs_Sec);
+			/* Header: the window, and in 120 the keys that make a later run's history exact. */
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details])
+			SELECT w.SectionID, w.Title, w.HeaderSummary, w.HeaderDetails
+			FROM #pcs_win w
+			WHERE w.SectionID = @pcs_Sec;
+
+			/* One "not an AG replica" row instead of the AG lag counters. */
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details])
+			SELECT w.SectionID, N'AG lag - not an AG replica', t.Sentence
+				, '[Area]:AG lag;[IsHadrEnabled]:' + CONVERT(VARCHAR(5), @pcs_HadrEnabled) + ';[Status]:notag;[Window]:' + w.WindowText + ';[WindowSeconds]:' + w.SecondsText + ';'
+			FROM #pcs_win w
+			JOIN #pcs_rules t ON t.RuleId = 'T_NOTAG'
+			WHERE w.SectionID = @pcs_Sec AND w.SampleOff = 0 AND @pcs_IsAgReplica = 0
+				AND EXISTS (SELECT 1 FROM #pcs_catalog c WHERE c.AgOnly = 1);
+
+			/* One "not available on this server" row per area with missing counters. */
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details])
+			SELECT w.SectionID, a.Area + N' - not available'
+				, REPLACE(t.Sentence, N'{Labels}', STUFF((
+					SELECT N', ' + c2.Label
+					FROM #pcs_val v2 JOIN #pcs_catalog c2 ON c2.MetricKey = v2.MetricKey
+					WHERE v2.Win = w.Win AND v2.Status = 'missing' AND c2.Area = a.Area
+					ORDER BY c2.SortOrder
+					FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''))
+				, '[Area]:' + a.Area + ';[Status]:missing;[Missing]:' + STUFF((
+					SELECT ',' + v2.MetricKey
+					FROM #pcs_val v2 JOIN #pcs_catalog c2 ON c2.MetricKey = v2.MetricKey
+					WHERE v2.Win = w.Win AND v2.Status = 'missing' AND c2.Area = a.Area
+					ORDER BY c2.SortOrder
+					FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N'') + ';[Window]:' + w.WindowText + ';[WindowSeconds]:' + w.SecondsText + ';'
+			FROM #pcs_win w
+			JOIN (SELECT DISTINCT v.Win, c.Area FROM #pcs_val v JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey WHERE v.Status = 'missing') a ON a.Win = w.Win
+			JOIN #pcs_rules t ON t.RuleId = 'T_NA'
+			WHERE w.SectionID = @pcs_Sec;
+
+			/* Metric rows: every single-instance and per-node metric; a per-database, per-replica or per-feature entity only
+			   when it hits a rule. The sentence is the fired rule's, else the information, no-data, reset or type sentence. */
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details], [Severity])
+			SELECT w.SectionID
+				, c.Area + N' - ' + c.Label + CASE WHEN c.InstScope = 'exact' THEN N'' WHEN c.InstScope = 'pernode' THEN N' [node ' + v.Entity + N']' ELSE N' [' + v.Entity + N']' END
+				, LEFT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+					CASE v.Status WHEN 'ok' THEN ISNULL(r.Sentence, tInfo.Sentence) WHEN 'type' THEN tType.Sentence WHEN 'reset' THEN tReset.Sentence ELSE tNoData.Sentence END
+					, N'{Subject}', c.Label + CASE WHEN c.InstScope = 'exact' THEN N'' WHEN c.InstScope = 'pernode' THEN N' (node ' + v.Entity + N')' ELSE N' (' + v.Entity + N')' END)
+					, N'{Entity}', ISNULL(v.Entity, N''))
+					, N'{Label}', c.Label)
+					, N'{Value}', ISNULL(v.ValueText, ''))
+					, N'{Unit}', c.Unit)
+					, N'{Window}', ISNULL(v.WindowText, w.WindowText))
+					, N'{Threshold}', ISNULL(CASE WHEN r.Threshold = FLOOR(r.Threshold) THEN CONVERT(VARCHAR(40), CONVERT(DECIMAL(38,0), r.Threshold)) ELSE CONVERT(VARCHAR(40), CONVERT(DECIMAL(38,2), r.Threshold)) END, ''))
+					, N'{Reason}', ISNULL(v.Reason, N'')) + ISNULL(N' ' + v.HistSummary, N''), 4000)
+				, LEFT('[Metric]:' + c.MetricKey + ';[Kind]:' + c.Kind + ';[Value]:' + ISNULL(v.ValueText, '') + ';[Unit]:' + c.Unit
+					+ ';[Window]:' + ISNULL(v.WindowText, w.WindowText) + ';[WindowSeconds]:' + ISNULL(v.WindowSecondsText, w.SecondsText)
+					+ ';[CntrType]:' + ISNULL(CONVERT(VARCHAR(12), v.NumType), '') + ';[Status]:' + v.Status
+					+ CASE WHEN c.InstScope = 'exact' THEN '' ELSE ';[Entity]:' + REPLACE(REPLACE(REPLACE(v.Entity, '%', '%25'), ';', '%3B'), ',', '%2C') END
+					+ CASE WHEN v.FiredRule IS NULL THEN '' ELSE ';[Rule]:' + v.FiredRule + ';[Threshold]:'
+						+ CASE WHEN r.Threshold = FLOOR(r.Threshold) THEN CONVERT(VARCHAR(40), CONVERT(DECIMAL(38,0), r.Threshold)) ELSE CONVERT(VARCHAR(40), CONVERT(DECIMAL(38,2), r.Threshold)) END END
+					+ CASE WHEN v.Status = 'ok' AND (c.Kind = 'per' OR c.DenCounter IS NOT NULL)
+						THEN ';[Numerator]:' + CONVERT(VARCHAR(30), CASE WHEN c.Kind = 'per' THEN v.NumTo - v.NumFrom ELSE v.NumTo END)
+							+ ';[Denominator]:' + CONVERT(VARCHAR(30), CASE WHEN c.Kind = 'per' THEN v.DenTo - v.DenFrom ELSE v.DenTo END)
+							+ ';[Scale]:' + CONVERT(VARCHAR(30), CONVERT(DECIMAL(19,0), c.Scale)) ELSE '' END
+					+ CASE WHEN v.Status = 'ok' AND c.Kind = 'ratio' THEN ';[Base]:' + CONVERT(VARCHAR(30), v.BaseTo)
+						WHEN v.Status = 'ok' AND c.Kind = 'average' THEN ';[Base]:' + CONVERT(VARCHAR(30), v.BaseTo - v.BaseFrom) ELSE '' END
+					+ CASE WHEN v.Status = 'ok' AND c.Kind = 'gauge' AND c.DenCounter IS NULL AND w.FromSnap IS NOT NULL
+						THEN ';[Readings]:' + ISNULL(CONVERT(VARCHAR(30), v.NumFrom), '') + ',' + CONVERT(VARCHAR(30), v.NumTo) ELSE '' END
+					+ CASE WHEN v.Status <> 'ok' THEN ';[Reason]:' + REPLACE(ISNULL(v.Reason, N''), ';', ',') ELSE '' END
+					+ ';' + ISNULL(v.HistDetails, ''), 4000)
+				, v.Severity
+			FROM #pcs_val v
+			JOIN #pcs_win w ON w.Win = v.Win
+			JOIN #pcs_catalog c ON c.MetricKey = v.MetricKey
+			LEFT JOIN #pcs_rules r ON r.RuleId = v.FiredRule
+			JOIN #pcs_rules tInfo ON tInfo.RuleId = 'T_INFO'
+			JOIN #pcs_rules tType ON tType.RuleId = 'T_TYPE'
+			JOIN #pcs_rules tReset ON tReset.RuleId = 'T_RESET'
+			JOIN #pcs_rules tNoData ON tNoData.RuleId = 'T_NODATA'
+			WHERE w.SectionID = @pcs_Sec
+				AND v.Status <> 'missing'
+				AND (c.InstScope IN ('exact', 'pernode') OR v.FiredRule IS NOT NULL OR v.NormOut IS NOT NULL)
+			ORDER BY c.SortOrder, v.Entity;
+
+			/* Roll-up rows: ONE per per-database, per-replica or per-feature metric. [Value] is the sum for a rate or a
+			   count (the instance total), the highest reading otherwise. */
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details])
+			SELECT w.SectionID
+				, c.Area + N' - ' + c.Label + N' (all ' + c.EntityNoun + N')'
+				, LEFT(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+					CASE WHEN g.N = 0 THEN t0.Sentence WHEN g.NZ = 0 THEN tz.Sentence ELSE t.Sentence END
+					, N'{Label}', c.Label)
+					, N'{Window}', ISNULL(g.WindowText, w.WindowText))
+					, N'{N}', CONVERT(VARCHAR(12), g.N))
+					, N'{Entities}', c.EntityNoun)
+					, N'{NZ}', CONVERT(VARCHAR(12), g.NZ))
+					, N'{Zero}', CONVERT(VARCHAR(12), g.Z))
+					, N'{Max}', ISNULL(mx.ValueText, N'-'))
+					, N'{Unit}', c.Unit)
+					, N'{MaxAt}', CASE WHEN g.NZ = 0 THEN N'-' ELSE ISNULL(mx.Entity, N'-') END)
+					, N'{Hits}', CONVERT(VARCHAR(12), g.Hits)) + ISNULL(N' ' + x.XSum, N''), 4000)
+				, LEFT('[Metric]:' + c.MetricKey + ';[Kind]:' + c.Kind
+					+ ';[Value]:' + ISNULL(CASE WHEN c.Kind = 'count' THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,0), g.SumValue))
+						WHEN c.Kind = 'rate' THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,2), g.SumValue))
+						WHEN c.Kind = 'gauge' AND c.DenCounter IS NULL THEN CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,0), g.MaxValue))
+						ELSE CONVERT(VARCHAR(50), CONVERT(DECIMAL(38,2), g.MaxValue)) END, '')
+					+ ';[Unit]:' + c.Unit + ';[Window]:' + ISNULL(g.WindowText, w.WindowText) + ';[WindowSeconds]:' + ISNULL(g.WindowSecondsText, w.SecondsText)
+					+ ';[Status]:rollup;[Entities]:' + CONVERT(VARCHAR(12), g.N) + ';[NonZero]:' + CONVERT(VARCHAR(12), g.NZ) + ';[Zero]:' + CONVERT(VARCHAR(12), g.Z)
+					+ ';[Hits]:' + CONVERT(VARCHAR(12), g.Hits) + ';[NotComputed]:' + CONVERT(VARCHAR(12), g.NotOk)
+					+ ';[Max]:' + ISNULL(mx.ValueText, '') + ';[MaxAt]:' + CASE WHEN g.NZ = 0 THEN '' ELSE ISNULL(REPLACE(REPLACE(REPLACE(mx.Entity, '%', '%25'), ';', '%3B'), ',', '%2C'), '') END
+					+ ';[NonZeroNames]:' + ISNULL(CASE WHEN LEN(nz.Names) > 1500 THEN LEFT(nz.Names, 1500) + ',...(' + CONVERT(VARCHAR(12), g.NZ) + ' in all)' ELSE nz.Names END, '')
+					+ ';[ZeroNames]:' + ISNULL(CASE WHEN LEN(zn.Names) > 1500 THEN LEFT(zn.Names, 1500) + ',...(' + CONVERT(VARCHAR(12), g.Z) + ' in all)' ELSE zn.Names END, '')
+					+ ';' + ISNULL(x.XDet, ''), 4000)
+			FROM #pcs_win w
+			JOIN #pcs_catalog c ON c.InstScope IN ('perdb', 'perinst')
+			JOIN (
+				SELECT v.Win, v.MetricKey
+					, SUM(CASE WHEN v.Status = 'ok' THEN 1 ELSE 0 END) AS N
+					, SUM(CASE WHEN v.Status = 'ok' AND v.Value > 0 THEN 1 ELSE 0 END) AS NZ
+					, SUM(CASE WHEN v.Status = 'ok' AND v.Value = 0 THEN 1 ELSE 0 END) AS Z
+					, SUM(CASE WHEN v.FiredRule IS NOT NULL OR v.NormOut IS NOT NULL THEN 1 ELSE 0 END) AS Hits
+					, SUM(CASE WHEN v.Status <> 'ok' THEN 1 ELSE 0 END) AS NotOk
+					, SUM(CASE WHEN v.Status = 'ok' THEN v.Value END) AS SumValue
+					, MAX(CASE WHEN v.Status = 'ok' THEN v.Value END) AS MaxValue
+					, MAX(v.WindowText) AS WindowText
+					, MAX(v.WindowSecondsText) AS WindowSecondsText
+				FROM #pcs_val v
+				WHERE v.Status <> 'missing'
+				GROUP BY v.Win, v.MetricKey
+			) g ON g.Win = w.Win AND g.MetricKey = c.MetricKey
+			LEFT JOIN #pcs_rollx x ON x.Win = w.Win AND x.MetricKey = c.MetricKey
+			JOIN #pcs_rules t ON t.RuleId = 'T_ROLLUP'
+			JOIN #pcs_rules t0 ON t0.RuleId = 'T_ROLLUP0'
+			JOIN #pcs_rules tz ON tz.RuleId = 'T_ROLLUPZ' /* every entity at zero: name none of them */
+			OUTER APPLY (
+				SELECT TOP 1 vm.Entity, vm.ValueText
+				FROM #pcs_val vm
+				WHERE vm.Win = w.Win AND vm.MetricKey = c.MetricKey AND vm.Status = 'ok'
+				ORDER BY vm.Value DESC, vm.Entity
+			) mx
+			OUTER APPLY (
+				SELECT STUFF((
+					SELECT ',' + REPLACE(REPLACE(REPLACE(vn.Entity, '%', '%25'), ';', '%3B'), ',', '%2C')
+					FROM #pcs_val vn
+					WHERE vn.Win = w.Win AND vn.MetricKey = c.MetricKey AND vn.Status = 'ok' AND vn.Value > 0
+					ORDER BY vn.Entity
+					FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N'') AS Names
+			) nz
+			OUTER APPLY (
+				SELECT STUFF((
+					SELECT ',' + REPLACE(REPLACE(REPLACE(vz.Entity, '%', '%25'), ';', '%3B'), ',', '%2C')
+					FROM #pcs_val vz
+					WHERE vz.Win = w.Win AND vz.MetricKey = c.MetricKey AND vz.Status = 'ok' AND vz.Value = 0
+					ORDER BY vz.Entity
+					FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 1, N'') AS Names
+			) zn
+			WHERE w.SectionID = @pcs_Sec
+			ORDER BY c.SortOrder;
+
+			/* R14 (HISTORY j): one Information row per database with no transaction started across the history. */
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details])
+			SELECT 120, c.Area + N' - no transactions [' + q.Entity + N']'
+				, REPLACE(REPLACE(REPLACE(r.Sentence, N'{Entity}', q.Entity), N'{Runs}', CONVERT(NVARCHAR(12), q.N)), N'{Days}', CONVERT(NVARCHAR(30), q.Days))
+				, LEFT('[Metric]:' + c.MetricKey + ';[Kind]:' + c.Kind + ';[Status]:history;[Rule]:R14;[Threshold]:' + CONVERT(VARCHAR(40), CONVERT(DECIMAL(38,0), r.Threshold))
+					+ ';[Entity]:' + REPLACE(REPLACE(REPLACE(q.Entity, '%', '%25'), ';', '%3B'), ',', '%2C') + ';[Runs]:' + CONVERT(VARCHAR(12), q.N)
+					+ ';[Days]:' + CONVERT(VARCHAR(30), q.Days) + ';[FirstRun]:' + q.FirstText + ';[LastRun]:' + q.LastText + ';[Evidence]:' + ISNULL(q.Evidence, '') + ';', 4000)
+			FROM #pcs_r14 q
+			JOIN #pcs_catalog c ON c.MetricKey = 'DB_TXN'
+			JOIN #pcs_rules r ON r.RuleId = 'R14'
+			WHERE @pcs_Sec = 120
+			ORDER BY q.Entity;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(@pcs_Step, N'Performance counters'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SELECT @errMessage  = ERROR_MESSAGE()
+				RAISERROR (@errMessage,0,1) WITH NOWAIT;
+			RAISERROR (N'Error with Performance counters',0,1) WITH NOWAIT;
+		END CATCH
+		SET @pcs_Sec = (SELECT MIN(SectionID) FROM #pcs_win WHERE SectionID > @pcs_Sec);
+	END
+
+	/* SECTION 123: batch response-time profile (header note e). Its own TRY/CATCH. */
+	BEGIN TRY
+		SET @pcs_Step = N'Batch response-time profile';
+		/* Bucket deltas per window: the bucket edges are parsed from the counter name ('Batches >=000010ms & <000020ms'),
+		   CASE-guarded. 'prior' = the last run's own since-start profile (snapshot 3 against zero). */
+		INSERT #pcs_brs (Win, LowMs, HighMs, Band, CntTo, CntFrom, MsTo, MsFrom, TypeTo)
+		SELECT x.Win, k.LowMs, k.HighMs
+			, CASE WHEN k.LowMs < 10 THEN 1 WHEN k.LowMs < 100 THEN 2 WHEN k.LowMs < 1000 THEN 3 WHEN k.LowMs < 10000 THEN 4 ELSE 5 END
+			, rt.value, CASE WHEN x.FromSnap IS NULL THEN 0 ELSE rf.value END
+			, mt.value, CASE WHEN x.FromSnap IS NULL THEN 0 ELSE mf.value END
+			, rt.cntr_type
+		FROM (SELECT w.Win, w.FromSnap, w.ToSnap FROM #pcs_win w WHERE w.SampleOff = 0
+			UNION ALL SELECT 'prior', NULL, 3 WHERE @pcs_LastState = 'ok') x
+		JOIN #pcs_snap rt ON rt.snap = x.ToSnap AND rt.obj = N'Batch Resp Statistics' AND rt.inst = N'Elapsed Time:Requests'
+		CROSS APPLY (SELECT CHARINDEX(N'>=', rt.counter) AS P1, CHARINDEX(N'<', rt.counter) AS P3) a
+		CROSS APPLY (SELECT CASE WHEN a.P1 > 0 THEN CHARINDEX(N'ms', rt.counter, a.P1) ELSE 0 END AS P2
+			, CASE WHEN a.P3 > 0 THEN CHARINDEX(N'ms', rt.counter, a.P3) ELSE 0 END AS P4) b
+		CROSS APPLY (SELECT CASE WHEN b.P2 > a.P1 + 2 THEN SUBSTRING(rt.counter, a.P1 + 2, b.P2 - a.P1 - 2) END AS LowT
+			, CASE WHEN b.P4 > a.P3 + 1 THEN SUBSTRING(rt.counter, a.P3 + 1, b.P4 - a.P3 - 1) END AS HighT) t
+		CROSS APPLY (SELECT CASE WHEN LEN(t.LowT) BETWEEN 1 AND 12 AND t.LowT NOT LIKE N'%[^0-9]%' THEN CONVERT(BIGINT, t.LowT) END AS LowMs
+			, CASE WHEN LEN(t.HighT) BETWEEN 1 AND 12 AND t.HighT NOT LIKE N'%[^0-9]%' THEN CONVERT(BIGINT, t.HighT) END AS HighMs) k
+		LEFT JOIN #pcs_snap rf ON rf.snap = x.FromSnap AND rf.obj = rt.obj AND rf.counter = rt.counter AND rf.inst = rt.inst
+		LEFT JOIN #pcs_snap mt ON mt.snap = x.ToSnap AND mt.obj = rt.obj AND mt.counter = rt.counter AND mt.inst = N'Elapsed Time:Total(ms)'
+		LEFT JOIN #pcs_snap mf ON mf.snap = x.FromSnap AND mf.obj = rt.obj AND mf.counter = rt.counter AND mf.inst = N'Elapsed Time:Total(ms)'
+		WHERE k.LowMs IS NOT NULL;
+
+		INSERT #pcs_brw (Win, Ord, WinLabel, WindowText, SecondsText, Status)
+		SELECT w.Win, CASE w.Win WHEN 'start' THEN 1 WHEN 'sample' THEN 2 ELSE 3 END
+			, CASE w.Win WHEN 'start' THEN N'since start' WHEN 'sample' THEN N'right now' ELSE N'since the last run' END
+			, CASE WHEN w.SampleOff = 1 AND w.Win = 'sample' THEN N'off' ELSE w.WindowText END, w.SecondsText
+			, CASE WHEN w.SampleOff = 1 THEN 'off' END
+		FROM #pcs_win w
+		UNION ALL
+		SELECT 'prior', 4, N'up to the last run', N'up to the last run at ' + @pcs_LastEvalText, ISNULL(CONVERT(VARCHAR(30), @pcs_LastUptimeSec), ''), NULL
+		WHERE @pcs_LastState = 'ok';
+
+		/* Status per window, first match wins (invariant 1): no buckets, a wrong type, a bucket missing at the
+		   window's start, a bucket that went down (reset), no batch at all. */
+		UPDATE b SET Status = CASE
+				WHEN NOT EXISTS (SELECT 1 FROM #pcs_brs s WHERE s.Win = b.Win) THEN 'missing'
+				WHEN EXISTS (SELECT 1 FROM #pcs_brs s WHERE s.Win = b.Win AND b.Win <> 'prior' AND s.TypeTo <> 65792) THEN 'type'
+				WHEN EXISTS (SELECT 1 FROM #pcs_brs s WHERE s.Win = b.Win AND (s.CntFrom IS NULL OR s.MsFrom IS NULL OR s.MsTo IS NULL)) THEN 'nodata'
+				WHEN EXISTS (SELECT 1 FROM #pcs_brs s WHERE s.Win = b.Win AND (s.CntTo < s.CntFrom OR s.MsTo < s.MsFrom)) THEN 'reset'
+				WHEN (SELECT SUM(s.CntTo - s.CntFrom) FROM #pcs_brs s WHERE s.Win = b.Win) = 0 THEN 'nobatch'
+				ELSE 'ok' END
+		FROM #pcs_brw b
+		WHERE b.Status IS NULL;
+		UPDATE b SET Reason = CASE b.Status
+				WHEN 'missing' THEN N'the Batch Resp Statistics buckets were not found'
+				WHEN 'type' THEN N'a Batch Resp Statistics bucket has cntr_type ' + ISNULL((SELECT CONVERT(NVARCHAR(12), MAX(s.TypeTo)) FROM #pcs_brs s WHERE s.Win = b.Win AND s.TypeTo <> 65792), N'?') + N', not 65792'
+				WHEN 'nodata' THEN CASE WHEN b.Win = 'lastrun' THEN N'the last run stored no Batch Resp Statistics buckets' ELSE N'a bucket is missing at the start of the window' END
+				WHEN 'nobatch' THEN N'no batch completed in the window'
+				END
+		FROM #pcs_brw b;
+
+		UPDATE b SET N = g.N, T = g.T, TailN = g.TailN
+			, TailCP = CONVERT(DECIMAL(38,1), 100.0 * CONVERT(FLOAT, g.TailN) / CONVERT(FLOAT, g.N))
+			, TailTP = CASE WHEN g.T > 0 THEN CONVERT(DECIMAL(38,1), 100.0 * CONVERT(FLOAT, g.TailT) / CONVERT(FLOAT, g.T)) END
+		FROM #pcs_brw b
+		JOIN (SELECT s.Win, SUM(s.CntTo - s.CntFrom) AS N, SUM(s.MsTo - s.MsFrom) AS T
+				, SUM(CASE WHEN s.LowMs >= 1000 THEN s.CntTo - s.CntFrom ELSE 0 END) AS TailN
+				, SUM(CASE WHEN s.LowMs >= 1000 THEN s.MsTo - s.MsFrom ELSE 0 END) AS TailT
+			FROM #pcs_brs s GROUP BY s.Win) g ON g.Win = b.Win
+		WHERE b.Status = 'ok';
+
+		/* Band shares, the 17 buckets, and the median and p95 BUCKETS (the first bucket whose running count reaches 50% / 95%
+		   of the batches): ranges, never an invented exact time. */
+		UPDATE b SET
+			CountPct = STUFF((SELECT N', ' + bn.Label + N' ' + CONVERT(NVARCHAR(20), CONVERT(DECIMAL(38,1), 100.0 * CONVERT(FLOAT, ISNULL(bs.C, 0)) / CONVERT(FLOAT, b.N))) + N'%'
+				FROM (VALUES (1, N'under 10 ms'), (2, N'10-100 ms'), (3, N'100 ms-1 s'), (4, N'1-10 s'), (5, N'10 s or more')) bn (Band, Label)
+				OUTER APPLY (SELECT SUM(s.CntTo - s.CntFrom) AS C FROM #pcs_brs s WHERE s.Win = b.Win AND s.Band = bn.Band) bs
+				ORDER BY bn.Band FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'')
+			, TimePct = CASE WHEN b.T > 0 THEN STUFF((SELECT N', ' + bn.Label + N' ' + CONVERT(NVARCHAR(20), CONVERT(DECIMAL(38,1), 100.0 * CONVERT(FLOAT, ISNULL(bs.M, 0)) / CONVERT(FLOAT, b.T))) + N'%'
+				FROM (VALUES (1, N'under 10 ms'), (2, N'10-100 ms'), (3, N'100 ms-1 s'), (4, N'1-10 s'), (5, N'10 s or more')) bn (Band, Label)
+				OUTER APPLY (SELECT SUM(s.MsTo - s.MsFrom) AS M FROM #pcs_brs s WHERE s.Win = b.Win AND s.Band = bn.Band) bs
+				ORDER BY bn.Band FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N'') ELSE N'not measurable, no elapsed time was recorded' END
+			, CountList = STUFF((SELECT ',' + CONVERT(VARCHAR(20), CONVERT(DECIMAL(38,1), 100.0 * CONVERT(FLOAT, ISNULL(bs.C, 0)) / CONVERT(FLOAT, b.N)))
+				FROM (VALUES (1), (2), (3), (4), (5)) bn (Band)
+				OUTER APPLY (SELECT SUM(s.CntTo - s.CntFrom) AS C FROM #pcs_brs s WHERE s.Win = b.Win AND s.Band = bn.Band) bs
+				ORDER BY bn.Band FOR XML PATH(''), TYPE).value('.', 'VARCHAR(MAX)'), 1, 1, '')
+			, TimeList = CASE WHEN b.T > 0 THEN STUFF((SELECT ',' + CONVERT(VARCHAR(20), CONVERT(DECIMAL(38,1), 100.0 * CONVERT(FLOAT, ISNULL(bs.M, 0)) / CONVERT(FLOAT, b.T)))
+				FROM (VALUES (1), (2), (3), (4), (5)) bn (Band)
+				OUTER APPLY (SELECT SUM(s.MsTo - s.MsFrom) AS M FROM #pcs_brs s WHERE s.Win = b.Win AND s.Band = bn.Band) bs
+				ORDER BY bn.Band FOR XML PATH(''), TYPE).value('.', 'VARCHAR(MAX)'), 1, 1, '') ELSE '' END
+			, Buckets = LEFT(STUFF((SELECT ',' + CONVERT(VARCHAR(20), s.LowMs) + '-' + ISNULL(CONVERT(VARCHAR(20), s.HighMs), '') + ':' + CONVERT(VARCHAR(30), s.CntTo - s.CntFrom) + ':' + CONVERT(VARCHAR(30), s.MsTo - s.MsFrom)
+				FROM #pcs_brs s WHERE s.Win = b.Win
+				ORDER BY s.LowMs FOR XML PATH(''), TYPE).value('.', 'VARCHAR(MAX)'), 1, 1, ''), 2000)
+			, MedLow = m.LowMs, MedHigh = m.HighMs, P95Low = p.LowMs, P95High = p.HighMs
+		FROM #pcs_brw b
+		OUTER APPLY (SELECT TOP 1 s.LowMs, s.HighMs FROM #pcs_brs s
+			WHERE s.Win = b.Win AND 2 * (SELECT SUM(s2.CntTo - s2.CntFrom) FROM #pcs_brs s2 WHERE s2.Win = s.Win AND s2.LowMs <= s.LowMs) >= b.N
+			ORDER BY s.LowMs) m
+		OUTER APPLY (SELECT TOP 1 s.LowMs, s.HighMs FROM #pcs_brs s
+			WHERE s.Win = b.Win AND 100 * (SELECT SUM(s2.CntTo - s2.CntFrom) FROM #pcs_brs s2 WHERE s2.Win = s.Win AND s2.LowMs <= s.LowMs) >= 95 * b.N
+			ORDER BY s.LowMs) p
+		WHERE b.Status = 'ok';
+		UPDATE b SET
+			MedText = CASE WHEN b.MedHigh IS NULL THEN CASE WHEN b.MedLow >= 1000 THEN CONVERT(NVARCHAR(20), b.MedLow / 1000) + N' s' ELSE CONVERT(NVARCHAR(20), b.MedLow) + N' ms' END + N' or more'
+				WHEN b.MedLow = 0 THEN N'under ' + CASE WHEN b.MedHigh >= 1000 THEN CONVERT(NVARCHAR(20), b.MedHigh / 1000) + N' s' ELSE CONVERT(NVARCHAR(20), b.MedHigh) + N' ms' END
+				WHEN b.MedHigh < 1000 THEN N'between ' + CONVERT(NVARCHAR(20), b.MedLow) + N' and ' + CONVERT(NVARCHAR(20), b.MedHigh) + N' ms'
+				WHEN b.MedLow >= 1000 THEN N'between ' + CONVERT(NVARCHAR(20), b.MedLow / 1000) + N' and ' + CONVERT(NVARCHAR(20), b.MedHigh / 1000) + N' s'
+				ELSE N'between ' + CONVERT(NVARCHAR(20), b.MedLow) + N' ms and ' + CONVERT(NVARCHAR(20), b.MedHigh / 1000) + N' s' END
+			, P95Text = CASE WHEN b.P95High IS NULL THEN CASE WHEN b.P95Low >= 1000 THEN CONVERT(NVARCHAR(20), b.P95Low / 1000) + N' s' ELSE CONVERT(NVARCHAR(20), b.P95Low) + N' ms' END + N' or more'
+				WHEN b.P95Low = 0 THEN N'under ' + CASE WHEN b.P95High >= 1000 THEN CONVERT(NVARCHAR(20), b.P95High / 1000) + N' s' ELSE CONVERT(NVARCHAR(20), b.P95High) + N' ms' END
+				WHEN b.P95High < 1000 THEN N'between ' + CONVERT(NVARCHAR(20), b.P95Low) + N' and ' + CONVERT(NVARCHAR(20), b.P95High) + N' ms'
+				WHEN b.P95Low >= 1000 THEN N'between ' + CONVERT(NVARCHAR(20), b.P95Low / 1000) + N' and ' + CONVERT(NVARCHAR(20), b.P95High / 1000) + N' s'
+				ELSE N'between ' + CONVERT(NVARCHAR(20), b.P95Low) + N' ms and ' + CONVERT(NVARCHAR(20), b.P95High / 1000) + N' s' END
+		FROM #pcs_brw b
+		WHERE b.Status = 'ok';
+
+		/* Rows: the header, then per window (since start, right now, since the last run) the bands, the long tail (R15a), the
+		   median and p95 and, since the last run, the tail change (R15b); a window that could not be computed is ONE row
+		   saying why. Without the counters at all, one "not available" row. */
+		INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details])
+		SELECT 123, N'Batch response-time profile', t.Sentence
+			, '[Source]:Batch Resp Statistics;[Windows]:' + ISNULL(STUFF((SELECT ',' + b.Win FROM #pcs_brw b WHERE b.Ord < 4 AND b.Status = 'ok' ORDER BY b.Ord FOR XML PATH(''), TYPE).value('.', 'VARCHAR(MAX)'), 1, 1, ''), '')
+				+ ';[Bands]:0-10,10-100,100-1000,1000-10000,10000-;'
+		FROM #pcs_rules t WHERE t.RuleId = 'T_HDR_123';
+
+		IF NOT EXISTS (SELECT 1 FROM #pcs_snap WHERE snap = 1 AND obj = N'Batch Resp Statistics')
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details])
+			SELECT 123, N'Batch response time - not available', REPLACE(t.Sentence, N'{Labels}', N'Batch response-time profile (the Batch Resp Statistics counters)')
+				, '[Area]:Batch response time;[Status]:missing;[Missing]:BATCH_RESP;'
+			FROM #pcs_rules t WHERE t.RuleId = 'T_NA';
+		ELSE
+			INSERT #output_sqldba_org_sp_triage ([SectionID], [Section], [Summary], [Details], [Severity])
+			SELECT 123
+				, N'Batch response time - ' + b.WinLabel + CASE WHEN b.Status <> 'ok' THEN N'' WHEN k.RowKind = 1 THEN N' - bands' WHEN k.RowKind = 2 THEN N' - long tail'
+					WHEN k.RowKind = 3 THEN N' - median and p95' ELSE N' - tail change' END
+				, CASE
+					WHEN b.Status <> 'ok' THEN CASE b.Status
+						WHEN 'off' THEN CASE WHEN b.Win = 'lastrun' THEN @pcs_LastHeader ELSE s.SOff END
+						WHEN 'reset' THEN REPLACE(REPLACE(s.SReset, N'{Subject}', N'Batch response time'), N'{Window}', ISNULL(b.WindowText, N''))
+						WHEN 'type' THEN REPLACE(REPLACE(s.SType, N'{Subject}', N'Batch response time'), N'{Reason}', ISNULL(b.Reason, N''))
+						ELSE REPLACE(REPLACE(REPLACE(s.SNoData, N'{Subject}', N'Batch response time'), N'{Window}', ISNULL(b.WindowText, N'')), N'{Reason}', ISNULL(b.Reason, N'')) END
+					WHEN k.RowKind = 1 THEN REPLACE(REPLACE(REPLACE(REPLACE(s.SBands, N'{N}', CONVERT(NVARCHAR(30), b.N)), N'{Window}', b.WindowText), N'{CountPct}', b.CountPct), N'{TimePct}', b.TimePct)
+					WHEN k.RowKind = 2 AND b.TailTP > s.T15a THEN REPLACE(REPLACE(REPLACE(s.S15a, N'{Value}', CONVERT(NVARCHAR(30), b.TailTP)), N'{Window}', b.WindowText), N'{Threshold}', CONVERT(NVARCHAR(40), CONVERT(DECIMAL(38,0), s.T15a)))
+					WHEN k.RowKind = 2 AND b.TailN = 0 THEN REPLACE(s.STail0, N'{Window}', b.WindowText)
+					WHEN k.RowKind = 2 THEN REPLACE(REPLACE(REPLACE(s.STail, N'{CountPct}', CONVERT(NVARCHAR(30), b.TailCP)), N'{TimePct}', ISNULL(CONVERT(NVARCHAR(30), b.TailTP), N'n/a')), N'{Window}', b.WindowText)
+					WHEN k.RowKind = 3 THEN REPLACE(REPLACE(REPLACE(s.SMedP95, N'{Median}', b.MedText), N'{P95}', b.P95Text), N'{Window}', b.WindowText)
+					WHEN c.Chg > s.T15b THEN REPLACE(REPLACE(s.S15b, N'{Value}', CONVERT(NVARCHAR(30), c.Chg)), N'{Threshold}', CONVERT(NVARCHAR(40), CONVERT(DECIMAL(38,0), s.T15b)))
+					WHEN c.Chg IS NOT NULL THEN REPLACE(REPLACE(REPLACE(REPLACE(s.STailChg, N'{Before}', CONVERT(NVARCHAR(30), p.TailTP)), N'{After}', CONVERT(NVARCHAR(30), b.TailTP)), N'{Value}', CONVERT(NVARCHAR(30), c.Chg)), N'{Window}', b.WindowText)
+					ELSE REPLACE(s.STailChg0, N'{Reason}', CASE WHEN p.Status IS NULL THEN N'there is no profile up to the last run'
+						WHEN p.Status = 'nobatch' THEN N'no batch had completed up to the last run'
+						WHEN p.Status IN ('missing', 'nodata') THEN N'the last run stored no Batch Resp Statistics buckets'
+						WHEN p.Status = 'ok' THEN N'no elapsed time was recorded'
+						ELSE ISNULL(p.Reason, p.Status) END) END
+					+ CASE WHEN b.Status = 'ok' AND k.RowKind = 2 AND b.Win = 'start' THEN ISNULL(N' ' + @pcs_TailTrendSum, N'') ELSE N'' END
+				, '[Metric]:' + CASE WHEN b.Status <> 'ok' OR k.RowKind = 1 THEN 'BATCH_BANDS' WHEN k.RowKind = 2 THEN 'BATCH_TAIL' WHEN k.RowKind = 3 THEN 'BATCH_MEDIAN_P95' ELSE 'BATCH_TAIL_CHANGE' END
+					+ ';[Kind]:count;[Window]:' + ISNULL(b.WindowText, N'') + ';[WindowSeconds]:' + CASE WHEN b.Status = 'off' THEN '0' ELSE ISNULL(b.SecondsText, '') END
+					+ ';[Status]:' + b.Status
+					+ CASE WHEN b.Status <> 'ok' THEN ';[Reason]:' + REPLACE(ISNULL(b.Reason, CASE WHEN b.Win <> 'lastrun' THEN N'sample off' WHEN @pcs_LastState = 'hist' THEN @pcs_HistState ELSE @pcs_LastState END), ';', ',')
+						WHEN k.RowKind = 1 THEN ';[Value]:' + CONVERT(VARCHAR(30), b.N) + ';[Unit]:batches;[Batches]:' + CONVERT(VARCHAR(30), b.N) + ';[ElapsedMs]:' + CONVERT(VARCHAR(30), b.T)
+							+ ';[CountPct]:' + ISNULL(b.CountList, '') + ';[TimePct]:' + ISNULL(b.TimeList, '') + ';[Buckets]:' + ISNULL(b.Buckets, '')
+						WHEN k.RowKind = 2 THEN ';[Value]:' + ISNULL(CONVERT(VARCHAR(30), b.TailTP), '') + ';[Unit]:% of elapsed time;[TailBatches]:' + CONVERT(VARCHAR(30), b.TailN)
+							+ ';[TailCountPct]:' + CONVERT(VARCHAR(30), b.TailCP) + ';[TailTimePct]:' + ISNULL(CONVERT(VARCHAR(30), b.TailTP), '')
+							+ CASE WHEN b.TailTP > s.T15a THEN ';[Rule]:R15a;[Threshold]:' + CONVERT(VARCHAR(40), CONVERT(DECIMAL(38,0), s.T15a)) ELSE '' END
+						WHEN k.RowKind = 3 THEN ';[Unit]:ms;[Median]:' + CONVERT(VARCHAR(20), b.MedLow) + '-' + ISNULL(CONVERT(VARCHAR(20), b.MedHigh), '')
+							+ ';[P95]:' + CONVERT(VARCHAR(20), b.P95Low) + '-' + ISNULL(CONVERT(VARCHAR(20), b.P95High), '')
+						ELSE ';[Value]:' + ISNULL(CONVERT(VARCHAR(30), c.Chg), '') + ';[Unit]:points;[Before]:' + ISNULL(CONVERT(VARCHAR(30), p.TailTP), '') + ';[After]:' + ISNULL(CONVERT(VARCHAR(30), b.TailTP), '')
+							+ CASE WHEN c.Chg > s.T15b THEN ';[Rule]:R15b;[Threshold]:' + CONVERT(VARCHAR(40), CONVERT(DECIMAL(38,0), s.T15b)) ELSE '' END END
+					+ ';' + CASE WHEN b.Status = 'ok' AND k.RowKind = 2 AND b.Win = 'start' THEN ISNULL(@pcs_TailTrendDet, '') ELSE '' END
+				, CASE WHEN b.Status = 'ok' AND k.RowKind = 2 AND b.TailTP > s.T15a THEN s.Sev15a
+					WHEN b.Status = 'ok' AND k.RowKind = 4 AND c.Chg > s.T15b THEN s.Sev15b END
+			FROM #pcs_brw b
+			CROSS JOIN (VALUES (1), (2), (3), (4)) k (RowKind)
+			LEFT JOIN #pcs_brw p ON p.Win = 'prior'
+			CROSS APPLY (SELECT CONVERT(DECIMAL(38,1), b.TailTP - p.TailTP) AS Chg) c
+			CROSS JOIN (SELECT MAX(CASE WHEN RuleId = 'T_BANDS' THEN Sentence END) AS SBands
+					, MAX(CASE WHEN RuleId = 'T_TAIL' THEN Sentence END) AS STail
+					, MAX(CASE WHEN RuleId = 'T_TAIL0' THEN Sentence END) AS STail0
+					, MAX(CASE WHEN RuleId = 'T_MEDP95' THEN Sentence END) AS SMedP95
+					, MAX(CASE WHEN RuleId = 'T_TAILCHG' THEN Sentence END) AS STailChg
+					, MAX(CASE WHEN RuleId = 'T_TAILCHG0' THEN Sentence END) AS STailChg0
+					, MAX(CASE WHEN RuleId = 'T_OFF_121' THEN Sentence END) AS SOff
+					, MAX(CASE WHEN RuleId = 'T_RESET' THEN Sentence END) AS SReset
+					, MAX(CASE WHEN RuleId = 'T_TYPE' THEN Sentence END) AS SType
+					, MAX(CASE WHEN RuleId = 'T_NODATA' THEN Sentence END) AS SNoData
+					, MAX(CASE WHEN RuleId = 'R15a' THEN Sentence END) AS S15a
+					, MAX(CASE WHEN RuleId = 'R15a' THEN Threshold END) AS T15a
+					, MAX(CASE WHEN RuleId = 'R15a' THEN Severity END) AS Sev15a
+					, MAX(CASE WHEN RuleId = 'R15b' THEN Sentence END) AS S15b
+					, MAX(CASE WHEN RuleId = 'R15b' THEN Threshold END) AS T15b
+					, MAX(CASE WHEN RuleId = 'R15b' THEN Severity END) AS Sev15b
+				FROM #pcs_rules) s
+			WHERE b.Ord < 4
+				AND (k.RowKind = 1 OR (b.Status = 'ok' AND (k.RowKind IN (2, 3) OR (k.RowKind = 4 AND b.Win = 'lastrun'))))
+			ORDER BY b.Ord, k.RowKind;
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Batch response-time profile', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		SELECT @errMessage  = ERROR_MESSAGE()
+			RAISERROR (@errMessage,0,1) WITH NOWAIT;
+		RAISERROR (N'Error with Batch response-time profile',0,1) WITH NOWAIT;
+	END CATCH
+END
+	/* One grammar pass over the summary sentences (2026-10-22): a count of 1 reads singular. Sentence templates
+	   say '{Runs} runs', '{Restarts} restarts' and so on; this fixes the whole class here once, rather than in each template. */
+	UPDATE #output_sqldba_org_sp_triage
+	SET Summary = REPLACE(REPLACE(REPLACE(REPLACE(Summary, N' 1 runs', N' 1 run'), N' 1 restarts', N' 1 restart'), N' 1 databases', N' 1 database'), N' 1 pairs', N' 1 pair')
+	WHERE SectionID IN (120, 121, 122, 123);
+	IF @Debug = 1
+	BEGIN
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTime = GETDATE()
+		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT;
+		RAISERROR (N'Done looking at Performance counter summaries',0,1) WITH NOWAIT;
+	END
+
+	/*----------------------------------------
 	--TCP listener states
 	----------------------------------------*/
+IF OBJECT_ID(N'sys.dm_tcp_listener_states') IS NOT NULL
+BEGIN
 BEGIN TRY
 	SET @CustomErrorText = 'TCP listener states'
-	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline*/
+	
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
@@ -9916,15 +11757,19 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TCP listener states', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with TCP listener states',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
+END
+ELSE
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (N'TCP listener states', 0, N'sys.dm_tcp_listener_states is not on this server. It needs a newer SQL Server version.');
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at TCP listener states',0,1) WITH NOWAIT;
@@ -9951,7 +11796,7 @@ LogDate	ProcessInfo	Text
 	----------------------------------------*/
 BEGIN TRY
 	SET @CustomErrorText = 'Endpoints'
-	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline*/
+	
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
@@ -9984,6 +11829,7 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Endpoints', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with Endpoints',0,1) WITH NOWAIT;
@@ -9992,7 +11838,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at Endpoints',0,1) WITH NOWAIT;
@@ -10003,7 +11849,7 @@ END CATCH
 	----------------------------------------*/
 BEGIN TRY
 	SET @CustomErrorText = 'Connections ports and IPs'
-	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline*/
+	
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
@@ -10034,6 +11880,7 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Connections ports and IPs', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with Connections ports and IPs',0,1) WITH NOWAIT;
@@ -10042,7 +11889,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at Connections ports and IPs',0,1) WITH NOWAIT;
@@ -10051,9 +11898,11 @@ END CATCH
 	/*----------------------------------------
 	--Server registry
 	----------------------------------------*/
+IF OBJECT_ID(N'sys.dm_server_registry') IS NOT NULL
+BEGIN
 BEGIN TRY
 	SET @CustomErrorText = 'Server registry'
-	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline*/
+	
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
@@ -10076,15 +11925,19 @@ BEGIN TRY
 	
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server registry', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with Server registry',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
+END
+ELSE
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (N'Server registry', 0, N'sys.dm_server_registry is not on this server. It needs a newer SQL Server version.');
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at Server registry',0,1) WITH NOWAIT;
@@ -10096,7 +11949,7 @@ END CATCH
 	----------------------------------------*/
 BEGIN TRY
 	SET @CustomErrorText = 'Check certificates'
-	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline*/
+	
 	INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
@@ -10119,52 +11972,62 @@ BEGIN TRY
 		LIKE '%certificate%';
 		/*A self-generated certificate was successfully loaded for encryption.*/
 
+
+		
+		SET @dynamicSQL = 'SELECT 
+		DISTINCT 
+			109
+			, @CustomErrorText
+			,''"State":''
+			+ CASE 
+				WHEN GETDATE() > expiry_date THEN ''"!Expired!"''
+				WHEN DATEADD(MONTH,3,GETDATE()) > expiry_date THEN ''"Expiring Soon"''
+				ELSE ''"Ok"''
+			END
+			+
+			'',"CertName":"'' + ISNULL(name,'''') +''"''
+			+
+			'',"CertSubject":"'' + ISNULL(subject,'''') +''"''
+			+
+			'',"CertIssuer":"'' + ISNULL(issuer_name,'''') +''"''
+
+			, ''"DaysToExpire":"'' +CONVERT(VARCHAR(10),DATEDIFF(DAY,GETDATE(),expiry_date)) +''"''
+			+ 
+			'',"StartDate":"'' +CONVERT(VARCHAR,start_date,120) +''"''
+			+ 
+			'',"ExpiryDate":"'' +CONVERT(VARCHAR,expiry_date,120) +''"''
+
+			+ 
+			'',"Type":"'' + CASE
+				WHEN name LIKE ''##%'' THEN ''Internal''
+				ELSE ''External''
+			END +''"''
+			+ 
+			'',"pvt_key_encryption_type_desc":"'' + ISNULL(pvt_key_encryption_type_desc,'''') + ''"''
+			--Does not work in SQL 2014, 12
+			' + CASE WHEN CONVERT( TINYINT ,@SQLVersion) <= 12 -- 2012- 
+			THEN '+ '',"KeyLength":"'' + CONVERT(VARCHAR(10),ISNULL(key_length,'''')) + ''"'' '
+			ELSE ''
+			END
+			+'
+			
+
+		FROM [master].sys.certificates
+		WHERE 1=1
+		AND name NOT LIKE ''##%'' '
+		
 		INSERT #output_sqldba_org_sp_triage (
 		[SectionID]
 		, [Section]
 		, [Summary]
 		, [Details]
 		)
-		SELECT 
-		DISTINCT 
-			109
-			, @CustomErrorText
-			,'"State":'
-			+ CASE 
-				WHEN GETDATE() > expiry_date THEN '"!Expired!"'
-				WHEN DATEADD(MONTH,3,GETDATE()) > expiry_date THEN '"Expiring Soon"'
-				ELSE '"Ok"'
-			END
-			+
-			',"CertName":"' + ISNULL(name,'') +'"'
-			+
-			',"CertSubject]":"' + ISNULL(subject,'') +'"'
-			+
-			',"CertIssuer]":"' + ISNULL(issuer_name,'') +'"'
-
-			, '"DaysToExpire":"' +CONVERT(VARCHAR(10),DATEDIFF(DAY,GETDATE(),expiry_date)) +'"'
-			+ 
-			',"StartDate":"' +CONVERT(VARCHAR,start_date,120) +'"'
-			+ 
-			',"ExpiryDate":"' +CONVERT(VARCHAR,expiry_date,120) +'"'
-
-			+ 
-			',"Type":"' + CASE
-				WHEN name LIKE '##%' THEN 'Internal'
-				ELSE 'External'
-			END +'"'
-			+ 
-			',"pvt_key_encryption_type_desc":"' + ISNULL(pvt_key_encryption_type_desc,'')
-			+ 
-			',"KeyLength":"' + CONVERT(VARCHAR(10),ISNULL(key_length,'')) 
-
-		FROM [master].sys.certificates
-		WHERE 1=1
-		AND name NOT LIKE '##%'
+		EXEC sp_executesql @dynamicSQL, N'@CustomErrorText nvarchar(500)', @CustomErrorText = @CustomErrorText
 
 		SET @CustomErrorText = 'Done looking at '+ @CustomErrorText
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Check certificates', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	SET @CustomErrorText = 'Error with '+ @CustomErrorText
@@ -10174,7 +12037,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@CustomErrorText,0,1) WITH NOWAIT;
@@ -10184,9 +12047,13 @@ END CATCH
 	/*----------------------------------------
 	--Availability Group synchronization lag
 	----------------------------------------*/
+IF OBJECT_ID(N'sys.dm_hadr_database_replica_states') IS NOT NULL
+	AND OBJECT_ID(N'sys.availability_replicas') IS NOT NULL
+	AND OBJECT_ID(N'sys.dm_hadr_availability_replica_states') IS NOT NULL
+BEGIN
 BEGIN TRY
 	SET @CustomErrorText = 'Availability Group synchronization lag'
-	/*https://learn.microsoft.com/en-us/archive/blogs/sql_pfe_blog/create-a-quick-and-easy-performance-baseline*/
+	
 	INSERT #output_sqldba_org_sp_triage 
 		(
 			[SectionID]
@@ -10255,6 +12122,7 @@ BEGIN TRY
 	
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Availability Group synchronization lag', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	SET @CustomErrorText = 'Error with '+ @CustomErrorText
@@ -10262,14 +12130,648 @@ BEGIN CATCH
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
 END CATCH
+END
+ELSE
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (N'Availability Group synchronization lag', 0, N'sys.dm_hadr_database_replica_states, sys.availability_replicas and sys.dm_hadr_availability_replica_states are not on this server. They need a newer SQL Server version.');
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (@CustomErrorText,0,1) WITH NOWAIT;
 	END
 
+
+	/*----------------------------------------
+	-- Core checks (corpus parity, basic set)
+	----------------------------------------*/
+	/* Eleven checks that SQLTriage's own check library also makes, written here so a client who runs this script
+	   without the app still gets them. Invariant: each step means exactly what its library check means (same
+	   predicate, exclusions, threshold, verdict and count) and is NOT a copy of its text. Each step writes ONE
+	   summary row whose Summary starts with PASS: FAIL: WARN: INFO: or SKIP: and whose Details start with count=,
+	   then optional object rows (Summary = the object, Details = the measure). Section is a literal naming the
+	   library id and the public sp_Blitz CheckID. SectionIDs 3001-3011 are disjoint from every sp_Blitz CheckID.
+	   No step here creates a persistent object or changes server state. Every view or column newer than the oldest
+	   version this script supports is read through dynamic SQL after an existence test. A coverage gap is a WARN
+	   summary row with count=NULL, never silence; a CATCH that implements one still records its skip row first. */
+	SET @CustomErrorText = 'Core checks (corpus parity, basic set)';
+	DECLARE @cc_verdict [NVARCHAR] (4), @cc_count INT, @cc_msg [NVARCHAR] (3000), @cc_sev [NVARCHAR] (2);
+	DECLARE @cc_seeall INT, @cc_band INT, @cc_errs INT, @cc_total INT, @cc_listok BIT, @cc_hadr INT, @cc_userdbs INT;
+	DECLARE @cc_sql [NVARCHAR] (4000), @cc_good DATETIME, @cc_c INT, @cc_note [NVARCHAR] (400);
+	DECLARE @cc_certs INT, @cc_keys INT, @cc_canviewdef INT, @cc_gap BIT, @cc_srvrows INT, @cc_llrows INT, @cc_dbdef INT;
+	DECLARE @cc_list TABLE (dbname SYSNAME NOT NULL);
+	DECLARE @cc_obj TABLE (rn INT NOT NULL, objname [NVARCHAR] (400) NULL, measure [NVARCHAR] (1000) NULL);
+	DECLARE @cc_agids TABLE (database_id INT NOT NULL);
+
+	/* 3001 Database not ONLINE */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SET @cc_seeall = CONVERT(INT, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DATABASE'));
+	INSERT INTO @cc_obj (rn, objname, measure)
+		SELECT ROW_NUMBER() OVER (ORDER BY sdb.name), QUOTENAME(sdb.name), N'state=' + sdb.state_desc
+		FROM sys.databases AS sdb
+		WHERE sdb.state > 1;
+	SELECT @cc_count = COUNT(*) FROM @cc_obj;
+	SET @cc_verdict = CASE WHEN @cc_count > 0 THEN N'FAIL' WHEN @cc_seeall = 0 THEN N'WARN' ELSE N'PASS' END;
+	IF @cc_verdict = N'WARN' SET @cc_count = NULL;
+	SET @cc_msg = CASE @cc_verdict
+		WHEN N'FAIL' THEN CONVERT([NVARCHAR] (12), @cc_count) + N' database(s) are in a state other than ONLINE or RESTORING, such as OFFLINE, SUSPECT, RECOVERY_PENDING or EMERGENCY.'
+		WHEN N'WARN' THEN N'Coverage unknown. This login lacks VIEW ANY DATABASE, so it cannot see every database. This is not a clean result.'
+		ELSE N'No database is in a state other than ONLINE or RESTORING.' END;
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_Bad WHEN N'WARN' THEN @Result_Warning ELSE @Result_Good END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3001, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Database not online [SQLT-BLITZ-UNUSUAL-DATABASE-STATE; public equivalent: sp_Blitz CheckID 102]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Counts databases whose state is not ONLINE (0) or RESTORING (1).' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Database not online', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3002 Last good integrity check. The database list is built here from sys.databases, never from @Databases. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	DELETE FROM @cc_list;
+	SELECT @cc_count = 0, @cc_band = 0, @cc_errs = 0, @cc_total = 0, @cc_listok = 1, @cc_note = N'';
+	SET @cc_hadr = CONVERT(INT, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0));
+	SET @cc_seeall = CONVERT(INT, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DATABASE'));
+	BEGIN TRY
+		INSERT INTO @cc_list (dbname)
+			SELECT sdb.name
+			FROM sys.databases AS sdb
+			WHERE sdb.database_id > 4 AND sdb.state = 0 AND sdb.user_access = 0 AND sdb.is_read_only = 0
+				AND sdb.database_id IN (SELECT r.database_id FROM #sp_triage_readable_db AS r)
+				AND sdb.source_database_id IS NULL AND sdb.name <> N'tempdb'
+				AND sdb.create_date < DATEADD(DAY, -14, GETDATE());
+		/* AG secondaries that refuse connections cannot be read; the HADR views are touched only when HADR is on. */
+		IF @cc_hadr = 1
+		BEGIN
+			SET @cc_sql = N'SELECT rs.database_id FROM sys.dm_hadr_database_replica_states AS rs
+				INNER JOIN sys.availability_replicas AS rep ON rep.replica_id = rs.replica_id
+				WHERE ISNULL(rs.is_local, 0) = 1 AND ISNULL(rs.is_primary_replica, 1) = 0
+				AND ISNULL(rep.secondary_role_allow_connections, 1) = 0;';
+			INSERT INTO @cc_agids (database_id) EXEC sp_executesql @cc_sql;
+			DELETE l FROM @cc_list AS l WHERE DB_ID(l.dbname) IN (SELECT a.database_id FROM @cc_agids AS a);
+		END
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check CHECKDB: database list', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		SET @cc_listok = 0;
+	END CATCH
+	IF @cc_listok = 0
+		SELECT @cc_verdict = N'WARN', @cc_count = NULL
+			, @cc_msg = N'Coverage unknown. The list of databases to check could not be built, so no database was checked. This is not a clean result.';
+	ELSE IF NOT EXISTS (SELECT 1 FROM @cc_list)
+	BEGIN
+		IF @cc_seeall = 0
+			SELECT @cc_verdict = N'WARN', @cc_count = NULL
+				, @cc_msg = N'Coverage unknown. This login lacks VIEW ANY DATABASE, so no database could be listed or checked. This is not a clean result.';
+		ELSE
+		BEGIN
+			SELECT @cc_userdbs = COUNT(*) FROM sys.databases WHERE database_id > 4 AND name <> N'tempdb';
+			SELECT @cc_verdict = N'SKIP', @cc_count = NULL
+				, @cc_msg = CASE WHEN @cc_userdbs = 0 THEN N'This instance has no user database, so there is nothing to check.'
+					ELSE CONVERT([NVARCHAR] (12), @cc_userdbs) + N' user database(s) exist, but every one is left out: offline or restoring, read-only, single-user, a snapshot, created in the last 14 days, or an AG secondary that refuses connections. Nothing was checked, so this says nothing about CHECKDB.' END;
+		END
+	END
+	ELSE
+	BEGIN
+		IF OBJECT_ID('tempdb..#cc_dbinfo') IS NOT NULL
+			DROP TABLE #cc_dbinfo;
+		CREATE TABLE #cc_dbinfo (ParentObject [NVARCHAR] (255), [Object] [NVARCHAR] (255), Field [NVARCHAR] (255), [Value] [NVARCHAR] (4000));
+		DECLARE cc_checkdb_cur CURSOR LOCAL FAST_FORWARD FOR SELECT dbname FROM @cc_list ORDER BY dbname;
+		OPEN cc_checkdb_cur;
+		FETCH NEXT FROM cc_checkdb_cur INTO @dbname;
+		WHILE @@FETCH_STATUS = 0
+		BEGIN
+			SET @cc_total = @cc_total + 1;
+			SET @cc_good = NULL;
+			DELETE FROM #cc_dbinfo;
+			SET @cc_sql = N'USE ' + QUOTENAME(@dbname) + N'; DBCC DBINFO WITH TABLERESULTS, NO_INFOMSGS;';
+			BEGIN TRY
+				INSERT INTO #cc_dbinfo (ParentObject, [Object], Field, [Value]) EXEC sp_executesql @cc_sql;
+				/* style 121 text; the pattern test stands in for TRY_CONVERT, which 2008 lacks */
+				SELECT @cc_good = CASE WHEN i.[Value] LIKE N'[12][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9]%'
+						THEN CONVERT(DATETIME, LEFT(i.[Value], 23), 121) END
+					FROM #cc_dbinfo AS i
+					WHERE i.Field = N'dbi_dbccLastKnownGood';
+				IF @cc_good IS NULL OR @cc_good < DATEADD(DAY, -14, GETDATE())
+				BEGIN
+					SET @cc_count = @cc_count + 1;
+					INSERT INTO @cc_obj (rn, objname, measure)
+						VALUES (@cc_total, QUOTENAME(@dbname), N'last good CHECKDB=' + ISNULL(CONVERT([NVARCHAR] (19), @cc_good, 120), N'none on record'));
+				END
+				ELSE IF @cc_good < DATEADD(DAY, -7, GETDATE())
+				BEGIN
+					SET @cc_band = @cc_band + 1;
+					INSERT INTO @cc_obj (rn, objname, measure)
+						VALUES (@cc_total, QUOTENAME(@dbname), N'last good CHECKDB=' + CONVERT([NVARCHAR] (19), @cc_good, 120) + N' (7 to 14 days ago)');
+				END
+			END TRY
+			BEGIN CATCH
+				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check CHECKDB: ' + @dbname, N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+				SET @cc_errs = @cc_errs + 1;
+				INSERT INTO @cc_obj (rn, objname, measure) VALUES (@cc_total, QUOTENAME(@dbname), N'could not be read');
+			END CATCH
+			FETCH NEXT FROM cc_checkdb_cur INTO @dbname;
+		END
+		CLOSE cc_checkdb_cur;
+		DEALLOCATE cc_checkdb_cur;
+		DROP TABLE #cc_dbinfo;
+		IF @cc_errs > 0
+			SET @cc_note = N' ' + CONVERT([NVARCHAR] (12), @cc_errs) + N' of ' + CONVERT([NVARCHAR] (12), @cc_total) + N' databases could not be read; the result covers the rest.';
+		SET @cc_verdict = CASE WHEN @cc_count > 0 THEN N'FAIL' WHEN @cc_band > 0 THEN N'WARN' ELSE N'PASS' END;
+		IF @cc_verdict = N'PASS' AND (@cc_seeall = 0 OR @cc_errs > 0)
+			SELECT @cc_verdict = N'WARN', @cc_count = NULL
+				, @cc_msg = CASE WHEN @cc_seeall = 0 THEN N'Coverage unknown. This login lacks VIEW ANY DATABASE, so only the databases it can see were checked. This is not a clean result.'
+					WHEN @cc_errs >= @cc_total THEN N'Coverage unknown. None of the ' + CONVERT([NVARCHAR] (12), @cc_total) + N' databases to check could be read. This is not a clean result.'
+					ELSE N'Coverage unknown. Some databases could not be read. This is not a clean result.' END + @cc_note;
+		ELSE
+			SET @cc_msg = CASE @cc_verdict
+				WHEN N'FAIL' THEN CONVERT([NVARCHAR] (12), @cc_count) + N' database(s) have no successful CHECKDB in the last 14 days, or none on record.'
+					+ CASE WHEN @cc_band > 0 THEN N' A further ' + CONVERT([NVARCHAR] (12), @cc_band) + N' last had one 7 to 14 days ago.' ELSE N'' END
+				WHEN N'WARN' THEN CONVERT([NVARCHAR] (12), @cc_band) + N' database(s) last had a successful CHECKDB 7 to 14 days ago. None is past 14 days yet.'
+				ELSE N'Every checked database had a successful CHECKDB in the last 7 days.' END
+				+ CASE WHEN @cc_seeall = 0 THEN N' Counted only in the databases this login can see.' ELSE N'' END + @cc_note;
+	END
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_ReallyBad WHEN N'WARN' THEN @Result_Warning WHEN N'PASS' THEN @Result_Good ELSE @Result_NA END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3002, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Last good integrity check (CHECKDB) [SQLT-BLITZ-DBCC-CHECKDB-NOT-PERFORMED-RECENTLY; public equivalent: sp_Blitz CheckID 68]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Checks user databases that are online, read-write, multi-user, not snapshots and older than 14 days; the count is the databases past 14 days. sp_Blitz also checks system databases and new databases and has no 7-day warning.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Last good integrity check (CHECKDB)', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3003 Page verify */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SET @cc_seeall = CONVERT(INT, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DATABASE'));
+	INSERT INTO @cc_obj (rn, objname, measure)
+		SELECT ROW_NUMBER() OVER (ORDER BY sdb.name), QUOTENAME(sdb.name), N'page_verify=' + sdb.page_verify_option_desc
+		FROM sys.databases AS sdb
+		WHERE sdb.name <> N'tempdb' AND sdb.state NOT IN (1, 6) AND sdb.page_verify_option <> 2;
+	SELECT @cc_count = COUNT(*) FROM @cc_obj;
+	SET @cc_verdict = CASE WHEN @cc_count > 0 THEN N'FAIL' WHEN @cc_seeall = 0 THEN N'WARN' ELSE N'PASS' END;
+	IF @cc_verdict = N'WARN' SET @cc_count = NULL;
+	SET @cc_msg = CASE @cc_verdict
+		WHEN N'FAIL' THEN CONVERT([NVARCHAR] (12), @cc_count) + N' database(s) do not use PAGE_VERIFY CHECKSUM, so a damaged page can go unnoticed.'
+		WHEN N'WARN' THEN N'Coverage unknown. This login lacks VIEW ANY DATABASE, so it cannot see every database. This is not a clean result.'
+		ELSE N'Every database except tempdb uses PAGE_VERIFY CHECKSUM.' END;
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_Bad WHEN N'WARN' THEN @Result_Warning ELSE @Result_Good END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3003, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Page verify not CHECKSUM [SQLT-VA-PAGE-VERIFY-CHECKSUM; public equivalent: sp_Blitz CheckID 14]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Checks every database except tempdb, system databases included; RESTORING and OFFLINE databases are left out.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Page verify not CHECKSUM', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3004 AUTO_CLOSE. The count covers every offender; the object rows show the first five by name. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SET @cc_seeall = CONVERT(INT, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DATABASE'));
+	INSERT INTO @cc_obj (rn, objname, measure)
+		SELECT ROW_NUMBER() OVER (ORDER BY sdb.name), QUOTENAME(sdb.name), N'AUTO_CLOSE=ON'
+		FROM sys.databases AS sdb
+		WHERE sdb.database_id > 4 AND sdb.state_desc = N'ONLINE' AND sdb.is_auto_close_on = 1;
+	SELECT @cc_count = COUNT(*) FROM @cc_obj;
+	SET @cc_verdict = CASE WHEN @cc_count > 0 THEN N'FAIL' WHEN @cc_seeall = 0 THEN N'WARN' ELSE N'PASS' END;
+	IF @cc_verdict = N'WARN' SET @cc_count = NULL;
+	SET @cc_msg = CASE @cc_verdict
+		WHEN N'FAIL' THEN CONVERT([NVARCHAR] (12), @cc_count) + N' user database(s) have AUTO_CLOSE on: each one closes when idle and is slow to reopen.'
+		WHEN N'WARN' THEN N'Coverage unknown. This login lacks VIEW ANY DATABASE, so it cannot see every database. This is not a clean result.'
+		ELSE N'No user database has AUTO_CLOSE on.' END;
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_Bad WHEN N'WARN' THEN @Result_Warning ELSE @Result_Good END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3004, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: AUTO_CLOSE on [SQLT-BLITZ-AUTO-CLOSE; public equivalent: sp_Blitz CheckID 12]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Checks ONLINE user databases and lists up to five by name. sp_Blitz checks every database in any state.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o WHERE o.rn <= 5
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: AUTO_CLOSE on', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3005 AUTO_SHRINK. The count covers every offender; the object rows show the first five by name. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SET @cc_seeall = CONVERT(INT, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DATABASE'));
+	INSERT INTO @cc_obj (rn, objname, measure)
+		SELECT ROW_NUMBER() OVER (ORDER BY sdb.name), QUOTENAME(sdb.name), N'AUTO_SHRINK=ON'
+		FROM sys.databases AS sdb
+		WHERE sdb.database_id > 4 AND sdb.state_desc = N'ONLINE' AND sdb.is_auto_shrink_on = 1;
+	SELECT @cc_count = COUNT(*) FROM @cc_obj;
+	SET @cc_verdict = CASE WHEN @cc_count > 0 THEN N'FAIL' WHEN @cc_seeall = 0 THEN N'WARN' ELSE N'PASS' END;
+	IF @cc_verdict = N'WARN' SET @cc_count = NULL;
+	SET @cc_msg = CASE @cc_verdict
+		WHEN N'FAIL' THEN CONVERT([NVARCHAR] (12), @cc_count) + N' user database(s) have AUTO_SHRINK on: each one shrinks its files in the background, which fragments indexes, and then grows them again.'
+		WHEN N'WARN' THEN N'Coverage unknown. This login lacks VIEW ANY DATABASE, so it cannot see every database. This is not a clean result.'
+		ELSE N'No user database has AUTO_SHRINK on.' END;
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_Bad WHEN N'WARN' THEN @Result_Warning ELSE @Result_Good END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3005, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: AUTO_SHRINK on [SQLT-BLITZ-AUTO-SHRINK; public equivalent: sp_Blitz CheckID 13]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Checks ONLINE user databases and lists up to five by name. sp_Blitz checks every database that is not OFFLINE.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o WHERE o.rn <= 5
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: AUTO_SHRINK on', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3006 Query Store off and not requested. 2016 and later; the database list is built here, never from @Databases. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	DELETE FROM @cc_list;
+	SELECT @cc_count = 0, @cc_errs = 0, @cc_total = 0, @cc_listok = 1, @cc_note = N'';
+	SET @cc_hadr = CONVERT(INT, ISNULL(SERVERPROPERTY('IsHadrEnabled'), 0));
+	SET @cc_seeall = CONVERT(INT, HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DATABASE'));
+	IF @SQLVersion < 13
+		SELECT @cc_verdict = N'SKIP', @cc_count = NULL, @cc_msg = N'Query Store needs SQL Server 2016 or later.';
+	ELSE
+	BEGIN
+		BEGIN TRY
+			SET @cc_sql = N'SELECT sdb.name FROM sys.databases AS sdb
+				WHERE sdb.database_id > 4 AND sdb.state = 0 AND sdb.user_access = 0 AND sdb.is_read_only = 0
+				AND sdb.database_id IN (SELECT r.database_id FROM #sp_triage_readable_db AS r)
+				AND (@h = 0 OR NOT EXISTS (SELECT 1 FROM sys.dm_hadr_database_replica_states AS rs
+					INNER JOIN sys.availability_replicas AS rep ON rep.replica_id = rs.replica_id
+					WHERE rs.database_id = sdb.database_id AND ISNULL(rs.is_local, 0) = 1
+					AND ISNULL(rs.is_primary_replica, 1) = 0 AND ISNULL(rep.secondary_role_allow_connections, 1) = 0));';
+			INSERT INTO @cc_list (dbname) EXEC sp_executesql @cc_sql, N'@h INT', @h = @cc_hadr;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check Query Store: database list', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @cc_listok = 0;
+		END CATCH
+		IF @cc_listok = 0
+			SELECT @cc_verdict = N'WARN', @cc_count = NULL
+				, @cc_msg = N'Coverage unknown. The list of databases to check could not be built, so no database was checked. This is not a clean result.';
+		ELSE IF NOT EXISTS (SELECT 1 FROM @cc_list)
+		BEGIN
+			IF @cc_seeall = 0
+				SELECT @cc_verdict = N'WARN', @cc_count = NULL
+					, @cc_msg = N'Coverage unknown. This login lacks VIEW ANY DATABASE, so no database could be listed or checked. This is not a clean result.';
+			ELSE
+				SELECT @cc_verdict = N'SKIP', @cc_count = NULL
+					, @cc_msg = N'There is no online, read-write, multi-user user database to check.';
+		END
+		ELSE
+		BEGIN
+			DECLARE cc_qs_cur CURSOR LOCAL FAST_FORWARD FOR SELECT dbname FROM @cc_list ORDER BY dbname;
+			OPEN cc_qs_cur;
+			FETCH NEXT FROM cc_qs_cur INTO @dbname;
+			WHILE @@FETCH_STATUS = 0
+			BEGIN
+				SET @cc_total = @cc_total + 1;
+				SET @cc_c = 0;
+				/* read inside the database (USE), not by a three-part name: an AUTO_CLOSE database read from master dropped out of the count */
+				SET @cc_sql = N'USE ' + QUOTENAME(@dbname) + N'; SELECT @n = COUNT(*) FROM sys.database_query_store_options AS qso WHERE qso.desired_state = 0 AND qso.actual_state = 0;';
+				BEGIN TRY
+					EXEC sp_executesql @cc_sql, N'@n INT OUTPUT', @n = @cc_c OUTPUT;
+					IF ISNULL(@cc_c, 0) > 0
+					BEGIN
+						SET @cc_count = @cc_count + 1;
+						INSERT INTO @cc_obj (rn, objname, measure) VALUES (@cc_total, QUOTENAME(@dbname), N'Query Store=OFF, not requested');
+					END
+				END TRY
+				BEGIN CATCH
+					INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check Query Store: ' + @dbname, N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+					SET @cc_errs = @cc_errs + 1;
+					INSERT INTO @cc_obj (rn, objname, measure) VALUES (@cc_total, QUOTENAME(@dbname), N'could not be read');
+				END CATCH
+				FETCH NEXT FROM cc_qs_cur INTO @dbname;
+			END
+			CLOSE cc_qs_cur;
+			DEALLOCATE cc_qs_cur;
+			IF @cc_errs > 0
+				SET @cc_note = N' ' + CONVERT([NVARCHAR] (12), @cc_errs) + N' of ' + CONVERT([NVARCHAR] (12), @cc_total) + N' databases could not be read; the result covers the rest.';
+			SET @cc_verdict = CASE WHEN @cc_count > 0 THEN N'FAIL' ELSE N'PASS' END;
+			IF @cc_verdict = N'PASS' AND (@cc_seeall = 0 OR @cc_errs > 0)
+				SELECT @cc_verdict = N'WARN', @cc_count = NULL
+					, @cc_msg = CASE WHEN @cc_seeall = 0 THEN N'Coverage unknown. This login lacks VIEW ANY DATABASE, so only the databases it can see were checked. This is not a clean result.'
+						WHEN @cc_errs >= @cc_total THEN N'Coverage unknown. None of the ' + CONVERT([NVARCHAR] (12), @cc_total) + N' databases to check could be read. This is not a clean result.'
+						ELSE N'Coverage unknown. Some databases could not be read. This is not a clean result.' END + @cc_note;
+			ELSE
+				SET @cc_msg = CASE @cc_verdict
+					WHEN N'FAIL' THEN CONVERT([NVARCHAR] (12), @cc_count) + N' user database(s) have Query Store off, and nobody has asked for it to be on.'
+					ELSE N'Every checked user database has Query Store on, or has asked for it.' END
+					+ CASE WHEN @cc_seeall = 0 THEN N' Counted only in the databases this login can see.' ELSE N'' END + @cc_note;
+		END
+	END
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_Bad WHEN N'WARN' THEN @Result_Warning WHEN N'PASS' THEN @Result_Good ELSE @Result_NA END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3006, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Query Store off [SQLT-BLITZ-QUERY-STORE-DISABLED; public equivalent: sp_Blitz CheckID 163]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Checks online, read-write, multi-user user databases. sp_Blitz counts a database where Query Store was not asked for even if it is running, and skips some databases by name.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Query Store off', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3007 Global trace flags. Fills #output_sqldba_org_sp_triage_TraceStatus, which nothing filled before. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	DELETE FROM #output_sqldba_org_sp_triage_TraceStatus;
+	SET @cc_listok = 1;
+	BEGIN TRY
+		INSERT INTO #output_sqldba_org_sp_triage_TraceStatus (TraceFlag, status, Global, Session)
+			EXEC sp_executesql N'DBCC TRACESTATUS(-1) WITH NO_INFOMSGS';
+	END TRY
+	BEGIN CATCH
+		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check trace flags: TRACESTATUS', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+		SET @cc_listok = 0;
+	END CATCH
+	IF @cc_listok = 0
+		SELECT @cc_verdict = N'WARN', @cc_count = NULL
+			, @cc_msg = N'Coverage unknown. The list of global trace flags could not be read. This is not a clean result.';
+	ELSE
+	BEGIN
+		INSERT INTO @cc_obj (rn, objname, measure)
+			SELECT ROW_NUMBER() OVER (ORDER BY CONVERT(INT, ts.TraceFlag)), N'Trace flag ' + ts.TraceFlag, N'global=1'
+			FROM #output_sqldba_org_sp_triage_TraceStatus AS ts
+			WHERE ts.Global = 1;
+		SELECT @cc_count = COUNT(*) FROM @cc_obj;
+		SET @cc_verdict = CASE WHEN @cc_count > 0 THEN N'INFO' ELSE N'PASS' END;
+		SET @cc_msg = CASE WHEN @cc_count > 0
+			THEN CONVERT([NVARCHAR] (12), @cc_count) + N' global trace flag(s) are on. Make sure each one is meant to be on and is written down.'
+			ELSE N'No global trace flag is on.' END;
+	END
+	SET @cc_sev = CASE @cc_verdict WHEN N'WARN' THEN @Result_Warning WHEN N'PASS' THEN @Result_Good ELSE @Result_NA END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3007, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Global trace flags [SQLT-BLITZ-GLOBAL-TRACE-FLAGS-ENABLED; public equivalent: sp_Blitz CheckID 74]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Reads DBCC TRACESTATUS(-1) and counts the flags that are on globally.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Global trace flags', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3008 TDE certificate key backup. sys.certificates hides rows from a login without VIEW ANY DEFINITION, and the
+	   encryption-key view needs VIEW SERVER STATE: either gap is a coverage WARN, not a clean result. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SELECT @cc_count = NULL, @cc_keys = NULL, @cc_gap = 0;
+	IF NOT EXISTS (SELECT 1 FROM sys.all_columns AS ac WHERE ac.[object_id] = OBJECT_ID(N'sys.certificates') AND ac.name = N'pvt_key_last_backup_date')
+		SELECT @cc_verdict = N'SKIP', @cc_msg = N'This SQL Server version does not record when a certificate''s private key was backed up.';
+	ELSE
+	BEGIN
+		SELECT @cc_certs = COUNT(*) FROM master.sys.certificates;
+		SET @cc_canviewdef = ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DEFINITION'), 0);
+		BEGIN TRY
+			SET @cc_sql = N'SELECT @k = COUNT(*) FROM sys.dm_database_encryption_keys;
+				SELECT @s = COUNT(*) FROM master.sys.certificates AS ce
+					INNER JOIN sys.dm_database_encryption_keys AS ek ON ek.encryptor_thumbprint = ce.thumbprint
+					WHERE ce.pvt_key_last_backup_date IS NULL OR ce.pvt_key_last_backup_date <= DATEADD(DAY, -30, GETDATE());';
+			EXEC sp_executesql @cc_sql, N'@k INT OUTPUT, @s INT OUTPUT', @k = @cc_keys OUTPUT, @s = @cc_count OUTPUT;
+			SET @cc_sql = N'SELECT ROW_NUMBER() OVER (ORDER BY ce.name), QUOTENAME(ce.name)
+					, N''databases=''+ CONVERT(NVARCHAR(12), COUNT(*)) + N'', last private key backup='' + ISNULL(CONVERT(NVARCHAR(19), ce.pvt_key_last_backup_date, 120), N''none on record'')
+				FROM master.sys.certificates AS ce
+					INNER JOIN sys.dm_database_encryption_keys AS ek ON ek.encryptor_thumbprint = ce.thumbprint
+				WHERE ce.pvt_key_last_backup_date IS NULL OR ce.pvt_key_last_backup_date <= DATEADD(DAY, -30, GETDATE())
+				GROUP BY ce.name, ce.pvt_key_last_backup_date;';
+			INSERT INTO @cc_obj (rn, objname, measure) EXEC sp_executesql @cc_sql;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check TDE certificate: encryption keys', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @cc_gap = 1;
+		END CATCH
+		IF @cc_gap = 1 OR @cc_count IS NULL
+			SELECT @cc_gap = 1, @cc_msg = N'Coverage unknown. The database encryption keys could not be read (this needs VIEW SERVER STATE), so no encrypted database was matched to its certificate. This is not a clean result.';
+		ELSE IF ISNULL(@cc_certs, 0) = 0 AND ISNULL(@cc_keys, 0) > 0
+			SELECT @cc_gap = 1, @cc_msg = N'Coverage unknown. ' + CONVERT([NVARCHAR] (12), @cc_keys) + N' database(s) are encrypted, but this login sees no certificate in master, so the certificates are hidden from it. This is not a clean result.';
+		ELSE IF ISNULL(@cc_certs, 0) = 0 AND @cc_canviewdef = 0
+			SELECT @cc_gap = 1, @cc_msg = N'Coverage unknown. This login sees no certificate in master and lacks VIEW ANY DEFINITION, so certificates may be hidden from it. This is not a clean result.';
+		IF @cc_gap = 1
+			SELECT @cc_verdict = N'WARN', @cc_count = NULL;
+		ELSE IF @cc_count = 0
+			SELECT @cc_verdict = N'PASS', @cc_msg = N'No encrypted database uses a certificate whose private key lacks a backup from the last 30 days.';
+		ELSE
+			SELECT @cc_verdict = N'FAIL', @cc_msg = CONVERT([NVARCHAR] (12), @cc_count) + N' encrypted database(s) use a certificate whose private key has no backup from the last 30 days. Without that backup, the databases and their backups cannot be restored on another server.';
+	END
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_ReallyBad WHEN N'WARN' THEN @Result_Warning WHEN N'PASS' THEN @Result_Good ELSE @Result_NA END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3008, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: TDE certificate key backup [SQLT-BLITZ-TDE-CERT-BACKUP; public equivalent: sp_Blitz CheckID 119]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Counts encrypted databases whose certificate in master has no private key backup in the last 30 days, or none on record.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: TDE certificate key backup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3009 Backup-encryption certificate key backup. Reads master.sys.certificates; VIEW DEFINITION is tested in master. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SELECT @cc_count = NULL, @cc_gap = 0, @cc_dbdef = NULL;
+	IF NOT EXISTS (SELECT 1 FROM msdb.INFORMATION_SCHEMA.COLUMNS AS isc WHERE isc.TABLE_SCHEMA = N'dbo' AND isc.TABLE_NAME = N'backupset' AND isc.COLUMN_NAME = N'encryptor_thumbprint')
+		OR NOT EXISTS (SELECT 1 FROM sys.all_columns AS ac WHERE ac.[object_id] = OBJECT_ID(N'sys.certificates') AND ac.name = N'pvt_key_last_backup_date')
+		SELECT @cc_verdict = N'SKIP', @cc_msg = N'This SQL Server version cannot encrypt backups, so there is nothing to check.';
+	ELSE
+	BEGIN
+		EXEC master.sys.sp_executesql N'SELECT @p = CASE WHEN CONVERT(INT, HAS_PERMS_BY_NAME(NULL, N''DATABASE'', N''VIEW DEFINITION'')) = 1 THEN 1 ELSE 0 END;'
+			, N'@p INT OUTPUT', @p = @cc_dbdef OUTPUT;
+		BEGIN TRY
+			SET @cc_sql = N'SELECT @s = COUNT(DISTINCT ce.thumbprint) FROM master.sys.certificates AS ce
+					INNER JOIN msdb.dbo.backupset AS bks ON bks.encryptor_thumbprint = ce.thumbprint
+					WHERE ce.pvt_key_last_backup_date IS NULL OR ce.pvt_key_last_backup_date <= DATEADD(DAY, -30, GETDATE());';
+			EXEC sp_executesql @cc_sql, N'@s INT OUTPUT', @s = @cc_count OUTPUT;
+			SET @cc_sql = N'SELECT ROW_NUMBER() OVER (ORDER BY ce.name), QUOTENAME(ce.name)
+					, N''encrypted backups in history='' + CONVERT(NVARCHAR(12), COUNT(*)) + N'', last private key backup='' + ISNULL(CONVERT(NVARCHAR(19), ce.pvt_key_last_backup_date, 120), N''none on record'')
+				FROM master.sys.certificates AS ce
+					INNER JOIN msdb.dbo.backupset AS bks ON bks.encryptor_thumbprint = ce.thumbprint
+				WHERE ce.pvt_key_last_backup_date IS NULL OR ce.pvt_key_last_backup_date <= DATEADD(DAY, -30, GETDATE())
+				GROUP BY ce.name, ce.pvt_key_last_backup_date;';
+			INSERT INTO @cc_obj (rn, objname, measure) EXEC sp_executesql @cc_sql;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check backup certificate: read', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @cc_gap = 1;
+		END CATCH
+		IF @cc_gap = 1 OR @cc_count IS NULL
+			SELECT @cc_verdict = N'WARN', @cc_count = NULL
+				, @cc_msg = N'Coverage unknown. The certificates or the msdb backup history could not be read. This is not a clean result.';
+		ELSE IF @cc_count > 0
+			SELECT @cc_verdict = N'FAIL'
+				, @cc_msg = CONVERT([NVARCHAR] (12), @cc_count) + N' certificate(s) used to encrypt backups have no private key backup from the last 30 days. Without that key, those backups cannot be restored.';
+		ELSE IF ISNULL(@cc_dbdef, 0) = 0
+			SELECT @cc_verdict = N'WARN', @cc_count = NULL
+				, @cc_msg = N'Coverage unknown. This login lacks VIEW DEFINITION in master, so certificates may be hidden from it. This is not a clean result.';
+		ELSE
+			SELECT @cc_verdict = N'PASS'
+				, @cc_msg = N'No certificate used to encrypt a backup lacks a private key backup from the last 30 days.';
+	END
+	SET @cc_sev = CASE @cc_verdict WHEN N'FAIL' THEN @Result_ReallyBad WHEN N'WARN' THEN @Result_Warning WHEN N'PASS' THEN @Result_Good ELSE @Result_NA END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3009, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Backup encryption certificate key backup [SQLT-BLITZ-BACKUP-ENCRYPTION-CERT-BACKUP; public equivalent: sp_Blitz CheckID 202]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Counts certificates in master that encrypted a backup in the msdb history and have no private key backup in the last 30 days, or none on record.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Backup encryption certificate key backup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3010 Memory dumps in the last 30 days. sys.dm_server_memory_dumps is read only on 2014 and later. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SELECT @cc_count = NULL, @cc_listok = 1;
+	IF @SQLVersion < 12
+		SELECT @cc_verdict = N'SKIP', @cc_msg = N'Listing memory dumps needs SQL Server 2014 or later. Look for SQLDump files in the error log folder instead.';
+	ELSE
+	BEGIN
+		BEGIN TRY
+			SET @cc_sql = N'SELECT @d = COUNT(*) FROM sys.dm_server_memory_dumps AS md WHERE md.creation_time > DATEADD(DAY, -30, SYSUTCDATETIME());';
+			EXEC sp_executesql @cc_sql, N'@d INT OUTPUT', @d = @cc_count OUTPUT;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check memory dumps: read', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @cc_listok = 0;
+		END CATCH
+		IF @cc_listok = 0
+			SELECT @cc_verdict = N'WARN', @cc_count = NULL
+				, @cc_msg = N'Coverage unknown. The list of memory dumps could not be read. This is not a clean result.';
+		ELSE IF @cc_count = 0
+			SELECT @cc_verdict = N'PASS', @cc_msg = N'No memory dump was written in the last 30 days.';
+		ELSE
+			SELECT @cc_verdict = N'WARN'
+				, @cc_msg = CONVERT([NVARCHAR] (12), @cc_count) + N' memory dump(s) were written in the last 30 days. Read the SQLDump files in the error log folder to find the cause.';
+	END
+	SET @cc_sev = CASE @cc_verdict WHEN N'WARN' THEN @Result_Warning WHEN N'PASS' THEN @Result_Good ELSE @Result_NA END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3010, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Memory dumps [SQLT-BLITZ-MEMORY-DUMPS-HAVE-OCCURRED-SQLDUMP-FILES-PRESENT; public equivalent: sp_Blitz CheckID 171]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Counts memory dumps from the last 30 days. sp_Blitz reports dumps from the last year.' AS Details
+		) AS x;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Memory dumps', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+
+	/* 3011 Linked servers. sys.servers always holds the local server's own row, so an empty sys.servers means the
+	   catalog is hidden from this login, not that it is bare. */
+BEGIN TRY
+	DELETE FROM @cc_obj;
+	SELECT @cc_srvrows = COUNT(*) FROM sys.servers;
+	SELECT @cc_llrows = COUNT(*) FROM sys.linked_logins;
+	SET @cc_canviewdef = ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, N'VIEW ANY DEFINITION'), 0);
+	INSERT INTO @cc_obj (rn, objname, measure)
+		SELECT ROW_NUMBER() OVER (ORDER BY srv.name), QUOTENAME(srv.name), CONVERT([NVARCHAR] (12), COUNT(*))
+		FROM sys.servers AS srv
+			INNER JOIN sys.linked_logins AS lnk ON lnk.server_id = srv.server_id
+		WHERE srv.is_linked = 1
+		GROUP BY srv.name;
+	SELECT @cc_count = ISNULL(SUM(CONVERT(INT, o.measure)), 0) FROM @cc_obj AS o;
+	UPDATE @cc_obj SET measure = N'login mappings=' + measure;
+	IF @cc_count = 0 AND (ISNULL(@cc_srvrows, 0) = 0 OR @cc_canviewdef = 0)
+		SELECT @cc_verdict = N'WARN', @cc_count = NULL
+			, @cc_msg = CASE WHEN ISNULL(@cc_srvrows, 0) = 0
+				THEN N'Coverage unknown. sys.servers shows no rows at all, not even this server''s own row, so linked servers are hidden from this login. This is not a clean result.'
+				ELSE N'Coverage unknown. This login lacks VIEW ANY DEFINITION, so linked servers may be hidden from it (it sees ' + CONVERT([NVARCHAR] (12), ISNULL(@cc_srvrows, 0)) + N' server row(s) and ' + CONVERT([NVARCHAR] (12), ISNULL(@cc_llrows, 0)) + N' login mapping row(s)). This is not a clean result.' END;
+	ELSE IF @cc_count > 0
+		SELECT @cc_verdict = N'WARN'
+			, @cc_msg = CONVERT([NVARCHAR] (12), @cc_count) + N' linked server login mapping(s) found. Check that each linked server is still needed and that its logins have no more rights than they need.';
+	ELSE
+		SELECT @cc_verdict = N'PASS', @cc_msg = N'No linked server is set up on this instance.';
+	SET @cc_sev = CASE @cc_verdict WHEN N'WARN' THEN @Result_Warning ELSE @Result_Good END;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity, Details)
+		SELECT 3011, hdr.Section, x.Summary, @cc_sev, x.Details
+		FROM (SELECT N'Core check: Linked servers [SQLT-BLITZ-LINKED-SERVER-CONFIGURED; public equivalent: sp_Blitz CheckID 49]' AS Section) AS hdr
+		CROSS JOIN (
+			SELECT 0 AS rn, @cc_verdict + N': ' + @cc_msg AS Summary
+				, N'count=' + ISNULL(CONVERT([NVARCHAR] (12), @cc_count), N'NULL') + N'. Counts linked server login mappings: each row of sys.linked_logins that belongs to a linked server.' AS Details
+			UNION ALL
+			SELECT o.rn, o.objname, o.measure FROM @cc_obj AS o
+		) AS x
+		ORDER BY x.rn;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Linked servers', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (@errMessage,0,1) WITH NOWAIT;
+END CATCH
+	SET @CustomErrorText = 'Core checks (corpus parity, basic set)';
+	IF @Debug = 1
+	BEGIN
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTime = GETDATE()
+		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT;
+		RAISERROR (@CustomErrorText,0,1) WITH NOWAIT;
+	END
 
 /*ADD NEW sections before this line*/
 /*ADD NEW sections before this line*/
@@ -10302,6 +12804,7 @@ BEGIN TRY
 		
 END TRY
 BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'End-of-checks template (no check runs here)', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 	SELECT @errMessage  = ERROR_MESSAGE()
 		RAISERROR (@errMessage,0,1) WITH NOWAIT;
 	RAISERROR (N'Error with the thing',0,1) WITH NOWAIT;
@@ -10310,7 +12813,7 @@ BEGIN CATCH
 END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Done looking at FKs with no indexes',0,1) WITH NOWAIT;
@@ -10422,19 +12925,61 @@ END
 			----------------------------------------*/
 IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Cleaning up output table',0,1) WITH NOWAIT;
 	END
+
+/* Invariant 2: the ONE place a recorded skip becomes an output row. A row with no SQL error (ErrorNumber 0 or NULL, e.g. a
+   deliberate skip) reads 'could not run: <step>, <message>'; a real error keeps '<step>, <number>, <message>'
+   Placed before the fix-up UPDATE so
+   the SCREEN and TABLE paths both carry it. A CATCH after this point cannot reach the output; it keeps
+   its RAISERROR. */
+INSERT #output_sqldba_org_sp_triage
+(
+	SectionID
+	, Section
+	, Summary
+	, Severity
+)
+SELECT
+	0
+	, N'Could not run'
+	, LEFT(N'could not run: ' + ISNULL(s.Step, N'?') + N', ' + CASE WHEN ISNULL(s.ErrorNumber, 0) = 0 THEN N'' ELSE CONVERT([NVARCHAR] (12), s.ErrorNumber) + N', ' END + ISNULL(s.ErrorMessage, N''), 4000)
+	, @Result_CouldNotRun
+FROM #sp_triage_skipped s
+ORDER BY s.Seq ASC;
 
 UPDATE  #output_sqldba_org_sp_triage
 SET evaldate = @evaldate
 , SQLInstance = @ThisServer
 , domain = @ThisDomain
 
+/* 2026-07-08: restore xp_cmdshell BEFORE any result set streams to the client - a severe
+   mid-stream error (seen live: Msg 0, Level 11) aborts the batch and skipped the end-of-run
+   restore, leaving xp_cmdshell enabled. Hoisted ABOVE both the SCREEN and TABLE output paths
+   (last xp_cmdshell consumer in the proc is far earlier); the end-of-run restore still runs
+   on healthy paths and re-running it is a no-op. */
+IF @XpCmdShellWasOff = 1
+BEGIN TRY
+	EXEC sp_configure 'xp_cmdshell', 0;
+	RECONFIGURE;
+	SET @XpCmdShellWasOff = 0;
+	IF @AdvancedOptionsWasOff = 1
+	BEGIN
+		EXEC sp_configure 'show advanced options', 0;
+		RECONFIGURE;
+		SET @AdvancedOptionsWasOff = 0;
+	END;
+	RAISERROR ('xp_cmdshell and show advanced options restored to their state before this run.',0,1) WITH NOWAIT;
+END TRY
+BEGIN CATCH
+	RAISERROR ('WARNING: could not restore xp_cmdshell to OFF - please disable it manually.',0,1) WITH NOWAIT;
+END CATCH
+
 IF UPPER(LEFT(@Export,1)) = 'S'
-BEGIN	
+BEGIN
 	SELECT T1.ID
 	,  evaldate
 	, T1.domain
@@ -10447,17 +12992,23 @@ BEGIN
 	, ISNULL(T1.HoursToResolveWithTesting,'') [HoursToResolveWithTesting]
 	, NULL QueryPlan
 	FROM #output_sqldba_org_sp_triage T1
+	WHERE ISNULL(T1.SectionID, -1) <> 104 /*SectionID 104 (every raw perfmon counter, ~2,100 rows) goes to the export table only, never to the screen. Sections 120-123 summarise it.*/
 	ORDER BY ID ASC
 	OPTION (RECOMPILE)
 END
 
 
 
+/* 2026-10-16: the export-table block (CREATE, the one DELETE, ALTER, INSERT) runs with no lock timeout
+   and normal deadlock priority. The app reads its results from this table, so the triage's own lock timeout must
+   never cost a TABLE run its output. */
+SET LOCK_TIMEOUT -1;
+SET DEADLOCK_PRIORITY NORMAL;
 IF UPPER(LEFT(@Export,1)) = 'T'
 BEGIN
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Export to table. Creating table.',0,1) WITH NOWAIT;
@@ -10482,25 +13033,37 @@ BEGIN
 	, Details [NVARCHAR] (4000)
 	, HoursToResolveWithTesting MONEY 
 	, QueryPlan [NVARCHAR] (MAX)
-	);'	
-		EXEC sp_executesql @dynamicSQL;	
-	END
-	ELSE
-	BEGIN
-		SET @dynamicSQL = 'DELETE FROM ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
-		WHERE	evaldate < DATEADD(DAY, - ' + CONVERT([VARCHAR](5),@ExportCleanupDays) + ', GETDATE())'
+	);'
 		BEGIN TRY
-			EXEC sp_executesql @dynamicSQL;	
+			EXEC sp_executesql @dynamicSQL;	/*wrapped 2026-07-02 (was bare like the sibling DELETE below): a CREATE-permission failure in the export DB no longer aborts the whole run at the tail after all work is done*/
 		END TRY
 		BEGIN CATCH
-			SELECT @errMessage  = ERROR_MESSAGE()
-		RAISERROR (@errMessage,0,1) WITH NOWAIT;
-			RAISERROR (N'Error creating table',0,1) WITH NOWAIT;
-				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
-			RAISERROR	  (@CustomErrorText,0,1) WITH NOWAIT;
+			RAISERROR (N'Could not create export table (permission?); results still returned on screen',0,1) WITH NOWAIT;
+			SELECT @errMessage = ERROR_MESSAGE(); RAISERROR (@errMessage,0,1) WITH NOWAIT;
 		END CATCH
-
 	END
+	/* 2026-10-16. Invariant: a run whose @Export does not select the table
+	   never deletes from the export table. This is the ONE delete on it: inside the @Export = TABLE block, keeping rows
+	   newer than the SMALLER of @CleanupTime and @ExportCleanupDays (days); NULL on both, or a negative value, deletes
+	   nothing. evaldate is NVARCHAR(20) in style 120, so the cutoff is compared as a style-120 string: a DATETIME
+	   compare fails under SET LANGUAGE British. */
+	DECLARE @ExportCleanupCutoffDays INT;
+	SET @ExportCleanupCutoffDays = CASE
+		WHEN @CleanupTime IS NULL THEN @ExportCleanupDays
+		WHEN @ExportCleanupDays IS NULL OR @CleanupTime < @ExportCleanupDays THEN @CleanupTime
+		ELSE @ExportCleanupDays END;
+	IF @ExportCleanupCutoffDays >= 0 AND OBJECT_ID(@ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName) IS NOT NULL
+	BEGIN TRY
+		RAISERROR (N'Cleaning output table',0,1) WITH NOWAIT;
+		SET @dynamicSQL = N'DELETE FROM ' + @ExportDBName + N'.' + @ExportSchema + N'.' + @ExportTableName + N'
+		WHERE evaldate < ''' + CONVERT([NVARCHAR] (20), DATEADD(DAY, 0 - @ExportCleanupCutoffDays, GETDATE()), 120) + N'''';
+		EXEC sp_executesql @dynamicSQL;
+	END TRY
+	BEGIN CATCH
+		SELECT @errMessage  = ERROR_MESSAGE()
+		RAISERROR (@errMessage,0,1) WITH NOWAIT;
+		RAISERROR (N'Failed to clean old records in output table',0,1) WITH NOWAIT;
+	END CATCH
 	/*
 	Okay, time to be clever. Let's assume the table was built in a previous version, let's compare columns and see what needs to be added.Error with modifying output table
 	Look at columns in the table and evaluate columsn still to be added.
@@ -10571,7 +13134,7 @@ BEGIN
 			IF @ColumnToAdd = ''Details''
 				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD Details [NVARCHAR] (4000)
 			IF @ColumnToAdd = ''QueryPlan''
-				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD QueryPlan XML NULL
+				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD QueryPlan [NVARCHAR] (MAX) NULL /*was XML; matches the CREATE-TABLE path (10352) - the INSERT feeds a whitespace-collapsed NVARCHAR string, not guaranteed-valid XML*/
 			IF @ColumnToAdd = ''HoursToResolveWithTesting''
 				ALTER TABLE '+  @ExportDBName +'.' + @ExportSchema + '.' + @ExportTableName + ' ADD HoursToResolveWithTesting MONEY  NULL
 			SET @ColumnCountLoop = @ColumnCountLoop + 1;
@@ -10590,7 +13153,7 @@ BEGIN
 		END CATCH
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Populating table',0,1) WITH NOWAIT;
@@ -10636,11 +13199,14 @@ BEGIN
 	BEGIN
 		IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 			RAISERROR (N'Results to screen',0,1) WITH NOWAIT;
 		END
+		/* xp_cmdshell restore for this path was hoisted above the @Export branching
+		   (2026-07-08 verify round: the SCREEN-only path streamed before any restore). */
+		BEGIN TRY
 		/*And after all that hard work, how about we select to the screen as well*/
 		SELECT T1.ID
 		,  @evaldate evaldate
@@ -10669,227 +13235,82 @@ BEGIN
 				, CHAR(13), ' ')
 			, '  ',' '),'')   ELSE NULL END QueryPlan
 		FROM #output_sqldba_org_sp_triage T1
+		WHERE ISNULL(T1.SectionID, -1) <> 104 /*104 is export-table only; see the SCREEN select above*/
 		ORDER BY ID ASC
+		END TRY
+		BEGIN CATCH
+			/* Seen live 2026-07-08: 'Msg 0, Level 11 ... A severe error occurred on the current
+			   command' killed this screen SELECT after a clean table export, and used to abort
+			   the batch before the housekeeping below. Retry once without the LOB QueryPlan
+			   column and with CHAR(0) stripped - the usual TDS stream-breakers. The export
+			   table already holds the full results either way. */
+			SELECT @errMessage = ERROR_MESSAGE();
+			RAISERROR (N'%s',0,1,@errMessage) WITH NOWAIT; /*%s form: a literal % in the error text printf-mangles the bare form*/
+			RAISERROR (N'Results-to-screen SELECT failed; retrying without QueryPlan',0,1) WITH NOWAIT;
+			BEGIN TRY
+				SELECT T1.ID
+				,  @evaldate evaldate
+				, REPLACE(T1.domain, '~',':') domain
+				, REPLACE(@ThisServer, '~',':') [Server]
+				, T1.SectionID
+				/* COLLATE BIN2 on the NUL strips: under any non-binary collation REPLACE
+				   treats CHAR(0) as ignorable and the strip is a no-op (verify 2026-07-08) */
+				, REPLACE(REPLACE(ISNULL(T1.Section,'') COLLATE Latin1_General_BIN2, NCHAR(0),N''), '~',':') Section
+				, REPLACE(REPLACE(ISNULL(T1.Summary,'') COLLATE Latin1_General_BIN2, NCHAR(0),N''), '~',':') Summary
+				, REPLACE(T1.Severity, '~',':') Severity
+				, REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(T1.Details,'') COLLATE Latin1_General_BIN2, NCHAR(0),N''), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), '  ',' '), '~',':') [Details]
+				, T1.HoursToResolveWithTesting
+				, NULL QueryPlan
+				FROM #output_sqldba_org_sp_triage T1
+				WHERE ISNULL(T1.SectionID, -1) <> 104 /*104 is export-table only; see the SCREEN select above*/
+				ORDER BY ID ASC
+			END TRY
+			BEGIN CATCH
+				RAISERROR (N'Results-to-screen retry also failed; results remain in the export table.',0,1) WITH NOWAIT;
+			END CATCH
+		END CATCH
 	END
 END
 
-/*Check to send out the results over email as well*/
-IF @MailResults = 1 
-
-/*
-DECLARE @EmailSubject [NVARCHAR] (500)
-DECLARE @EmailRecipients [NVARCHAR] (500) 
-DECLARE @MaxID [NVARCHAR] (25)
-SELECT @MaxID= MAX(ID)  FROM   [master].[dbo].[sqldba_sp_triage®_output]
-DECLARE @evaldate [NVARCHAR] (25)
-DECLARE @ThisDomain [NVARCHAR] (50)
-DECLARE @ThisServer [NVARCHAR] (50)
-DECLARE @CharToCheck CHAR(1)
-SET @CharToCheck = '\'
-
-SELECT @evaldate = evaldate, @ThisDomain = domain , @ThisServer = SQLInstance 
-FROM   [master].[dbo].[sqldba_sp_triage®_output]
-WHERE ID = @MaxID
-
-DECLARE @EmailBody [NVARCHAR] (500) 
-DECLARE @query_result_separator [NVARCHAR] (50)
-DECLARE @StringToExecute [NVARCHAR] (4000)
-DECLARE @EmailProfile [NVARCHAR] (500)
-DECLARE @AttachfileName [NVARCHAR] (500)
-SET @query_result_separator = '~';--char(9);
-SET @EmailRecipients ='scriptoutput@sqldba.org'
-SET @EmailSubject = 'sqldba_sp_triage®_data for ' +@ThisDomain + ' '+@ThisServer + '' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','');
-
-SET @AttachfileName = 'sqldba_sp_triage®_data__' +REPLACE(@ThisDomain,'.','_') + '_'+ REPLACE(@ThisServer,@CharToCheck,'_') + '_' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','') +'.csv' 
-
-	SET @StringToExecute = '
-SET NOCOUNT ON;
-SELECT ID,evaldate,domain,SQLInstance,SectionID,Section,Summary,Severity,Details,HoursToResolveWithTesting,QueryPlan
-FROM (
-SELECT 
-CONVERT([NVARCHAR] (25),			''ID'') ID
-, CONVERT([NVARCHAR] (50),		''evaldate'') evaldate
-, CONVERT([NVARCHAR] (50),		''domain'') domain
-, CONVERT([NVARCHAR] (50),		''SQLInstance'' ) SQLInstance
-, CONVERT([NVARCHAR] (10),		''SectionID'') SectionID
-, CONVERT([NVARCHAR] (1000),		''Section'') Section
-, CONVERT([NVARCHAR] (4000),		''Summary'') Summary
-, CONVERT([NVARCHAR] (15),		''Severity'') Severity
-, CONVERT([NVARCHAR] (4000),		''Details'') Details
-, CONVERT([NVARCHAR] (35),		''HoursToResolveWithTesting'') HoursToResolveWithTesting
-, CONVERT([NVARCHAR] (4000),		''QueryPlan'') QueryPlan
-, 0 Sorter
-UNION ALL
-SELECT 
-ID,evaldate,domain,SQLInstance,SectionID,Section,Summary,Severity,Details,HoursToResolveWithTesting,QueryPlan, Sorter
-FROM 
-(
-SELECT TOP 100 PERCENT CONVERT([NVARCHAR] (25),T1.ID) ID
-	,  REPLACE(T1.evaldate,''~'',''-'') evaldate
-	,  REPLACE(domain,''~'',''-'') domain
-	,  REPLACE(SQLInstance ,''~'',''-'') SQLInstance
-	,  REPLACE(CONVERT([NVARCHAR] (10), SectionID),''~'',''-'')  SectionID
-	,  REPLACE(Section,''~'',''-'') Section
-	,  REPLACE(Summary,''~'',''-'') Summary
-	,  REPLACE(Severity,''~'',''-'') Severity
-	,  replace(replace(replace(replace( ISNULL(REPLACE(Details,''~'',''-''),''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' '') [Details]
-	,  REPLACE(CONVERT([NVARCHAR] (10),HoursToResolveWithTesting),''~'',''-'') HoursToResolveWithTesting
-	,  REPLACE(QueryPlan,''~'',''-'')QueryPlan
-	,T1.ID Sorter
-	FROM   [master].[dbo].[sqldba_sp_triage®_output]
-T1
-INNER JOIN (
-SELECT MAX(evaldate) evaldate   FROM   [master].[dbo].[sqldba_sp_triage®_output]
-) T2
-ON T1.evaldate = T2.evaldate
-) T3
-) T4
-ORDER BY Sorter ASC
-
-; SET NOCOUNT OFF;';
-
-					
-SET @EmailBody = @EmailSubject;
-
---EXECUTE msdb.dbo.sysmail_configure_sp 'MaxFileSize', '10000000';
-IF @EmailProfile IS NULL
-BEGIN
-	EXEC msdb.dbo.sp_send_dbmail
-	@recipients = @EmailRecipients,
-	@subject = @EmailSubject,
-	@body = @EmailBody,
-	@query_attachment_filename =@AttachfileName,
-	@attach_query_result_as_file = 1,
-	@query_result_header = 0,
-	@execute_query_database = 'master', 
-	@query_result_width = 32767,
-	@append_query_error = 1,
-	@query_result_no_padding = 1,
-	@query_result_separator = @query_result_separator,
-	@query = @StringToExecute EXECUTE AS LOGIN = N'sa';
- END
-
-
-
-*/
-BEGIN
-IF @Debug = 1
-		RAISERROR (N'Results to mail',0,1) WITH NOWAIT;
-DECLARE @EmailSubject [NVARCHAR] (500)
-SET @EmailSubject = 'sqldba_sp_triage®_data for ' +@ThisDomain + ' '+@ThisServer + '' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','');
-DECLARE @EmailBody [NVARCHAR] (500) 
-DECLARE @query_result_separator [NVARCHAR] (50)
-DECLARE @StringToExecute [NVARCHAR] (4000)
-DECLARE @EmailProfile [NVARCHAR] (500)
-DECLARE @AttachfileName [NVARCHAR] (500)
-SET @query_result_separator = '~';--char(9);
-SET @AttachfileName = 'sqldba_sp_triage®_data__' +REPLACE(@ThisDomain,'.','_') + '_'+ REPLACE(@ThisServer,@CharToCheck,'_') + '_' + REPLACE(REPLACE(REPLACE(@evaldate,'-','_'),':',''),' ','') +'.csv' 
-
-/*Yes, it is a mouth full, but it works to create a nicely formed, ready to use CSV file.*/
-	SET @StringToExecute = '
-SET NOCOUNT ON;
-SELECT ID,evaldate,domain,SQLInstance,SectionID,Section,Summary,Severity,Details,HoursToResolveWithTesting,QueryPlan
-FROM (
-SELECT 
-CONVERT([NVARCHAR] (25),			''ID'') ID
-, CONVERT([NVARCHAR] (50),		''evaldate'') evaldate
-, CONVERT([NVARCHAR] (50),		''domain'') domain
-, CONVERT([NVARCHAR] (50),		''SQLInstance'' ) SQLInstance
-, CONVERT([NVARCHAR] (10),		''SectionID'') SectionID
-, CONVERT([NVARCHAR] (1000),		''Section'') Section
-, CONVERT([NVARCHAR] (4000),		''Summary'') Summary
-, CONVERT([NVARCHAR] (15),		''Severity'') Severity
-, CONVERT([NVARCHAR] (4000),		''Details'') Details
-, CONVERT([NVARCHAR] (35),		''HoursToResolveWithTesting'') HoursToResolveWithTesting
-, CONVERT([NVARCHAR] (4000),		''QueryPlan'') QueryPlan
-, 0 Sorter
-UNION ALL
-SELECT 
-ID,evaldate,domain,SQLInstance,SectionID,Section,Summary,Severity,Details,HoursToResolveWithTesting,QueryPlan, Sorter
-FROM 
-(
-SELECT TOP 100 PERCENT CONVERT([NVARCHAR] (25),T1.ID) ID
-,  REPLACE(T1.evaldate,''~'',''-'') evaldate
-,  REPLACE(domain,''~'',''-'') domain
-,  REPLACE(SQLInstance ,''~'',''-'') SQLInstance
-,  REPLACE(CONVERT([NVARCHAR] (10), SectionID),''~'',''-'')  SectionID
-,  REPLACE(Section,''~'',''-'') Section
-,  REPLACE(Summary,''~'',''-'') Summary
-,  REPLACE(Severity,''~'',''-'') Severity
-,  replace(replace(replace(replace( ISNULL(REPLACE(Details,''~'',''-''),''''), CHAR(9), '' ''),CHAR(10),'' ''), CHAR(13), '' ''), ''  '','' '') [Details]
-,  REPLACE(CONVERT([NVARCHAR] (10),HoursToResolveWithTesting),''~'',''-'') HoursToResolveWithTesting
-,  REPLACE(QueryPlan,''~'',''-'')QueryPlan
-,T1.ID Sorter
- FROM   ['+ @ExportDBName +'].[' + @ExportSchema +'].[' + @ExportTableName + ']
-T1
-INNER JOIN (
-SELECT MAX(evaldate) evaldate   FROM   ['+ @ExportDBName +'].[' + @ExportSchema +'].[' + @ExportTableName + ']
-) T2
-ON T1.evaldate = T2.evaldate
-) T3
-) T4
-ORDER BY Sorter ASC
-
-; SET NOCOUNT OFF;';
-
-					
-					SET @EmailBody = @EmailSubject;
-					/*Make sure there is space to send*/
-					--EXECUTE msdb.dbo.sysmail_configure_sp 'MaxFileSize', '10000000';
-					IF @EmailProfile IS NULL
-					BEGIN
-					SET @dynamicSQL='
-						EXEC msdb.dbo.sp_send_dbmail
-						 @recipients = @EmailRecipients,
-						 @subject = @EmailSubject,
-						 @body = @EmailBody,
-						 @query_attachment_filename =@AttachfileName,
-						 @attach_query_result_as_file = 1,
-						 @query_result_header = 0,/*Set to 0 to Turn Headers off, makes for better CSV files as long as we include headers in Select statement*/
-						  @execute_query_database = @ExportDBName, 
-						 @query_result_width = 32767,
-						 @append_query_error = 1,
-						 @query_result_no_padding = 1,
-						 @query_result_separator = @query_result_separator,
-						 @query = @StringToExecute EXECUTE AS LOGIN = N''sa''
-						 '
-						 EXEC sp_executesql @dynamicSQL 
-						 ;
-					 END
-							
-END
-
+/* Email/export-by-mail path REMOVED 2026-07-02.
+   Rationale: it mailed the full output table (server/DB names, findings, query plans = client PII)
+   as a CSV attachment to a hard-coded sqldba.org address, running the extract query EXECUTE AS
+   LOGIN = 'sa'. That is an unauthorized cross-org data egress + privilege escalation on a client box.
+   Results are delivered via screen (@Export='SCREEN') or the export table (@Export='TABLE'); the app
+   collects from there. Do NOT reintroduce mail without an explicit, consented, per-run recipient and
+   no EXECUTE AS 'sa'. Prior dead + live blocks deleted in full. */
 
 	/*Before cleaning out tables, check if any other settings need to be turned OFF/ON*/
 IF @TurnNumericRoundabortOn = 1
 BEGIN
 	SET NUMERIC_ROUNDABORT ON;
 END
-		
-	/*Housekeeping*/
-	IF OBJECT_ID(@ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName) IS NOT NULL AND @CleanupTime IS NOT NULL
+
+	/* Restore xp_cmdshell to OFF if (and only if) THIS run turned it on. Leaves a server that
+	   already had it enabled untouched. Best-effort: a failure here must not fail the whole run. */
+	IF @XpCmdShellWasOff = 1
 	BEGIN TRY
-		RAISERROR (N'Cleaning output table',0,1) WITH NOWAIT;
-		SET @dynamicSQL = '
-		DECLARE @filterdate DATETIME
-		SET @filterdate = DATEADD(DAY,-' +CONVERT([VARCHAR](5),@CleanupTime)+',GETDATE())
-		DELETE FROM ' + @ExportDBName + '.' + @ExportSchema  + '.' + @ExportTableName + '
-		WHERE evaldate < CONVERT([VARCHAR],@filterdate,120)'
-		--PRINT @dynamicSQL
-		EXEC sp_executesql @dynamicSQL;	
+		EXEC sp_configure 'xp_cmdshell', 0;
+		RECONFIGURE;
+		SET @XpCmdShellWasOff = 0;
+		IF @AdvancedOptionsWasOff = 1
+		BEGIN
+			EXEC sp_configure 'show advanced options', 0;
+			RECONFIGURE;
+			SET @AdvancedOptionsWasOff = 0;
+		END;
+		RAISERROR ('xp_cmdshell and show advanced options restored to their state before this run.',0,1) WITH NOWAIT;
 	END TRY
 	BEGIN CATCH
-		SELECT @errMessage  = ERROR_MESSAGE()
-		RAISERROR (@errMessage,0,1) WITH NOWAIT;
-		RAISERROR (N'Failed to clean old records in output table',0,1) WITH NOWAIT;
+		RAISERROR ('WARNING: could not restore xp_cmdshell to OFF - please disable it manually.',0,1) WITH NOWAIT;
 	END CATCH
 
-
+	/*Housekeeping: the export-table delete runs only inside the @Export = TABLE block above (one delete, 2026-10-16).*/
 
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'Cleaning up #temp tables',0,1) WITH NOWAIT;
@@ -10932,32 +13353,20 @@ END
 	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_dbccloginfo') IS NOT NULL
 		DROP TABLE #output_sqldba_org_sp_triage_dbccloginfo
 
-	IF OBJECT_ID('tempdb..SQLVersionsDump') IS NOT NULL
+	IF OBJECT_ID('tempdb..output_sqldba_org_sp_triage_SQLVersionsDump') IS NOT NULL
 		DROP TABLE #output_sqldba_org_sp_triage_SQLVersionsDump
 
-	IF OBJECT_ID('tempdb..SQLVersions') IS NOT NULL
+	IF OBJECT_ID('tempdb..output_sqldba_org_sp_triage_SQLVersions') IS NOT NULL
 		DROP TABLE #output_sqldba_org_sp_triage_SQLVersions
 
 	IF OBJECT_ID('tempdb..#dadatafor_exec_query_stats') IS NOT NULL
 		DROP TABLE #dadatafor_exec_query_stats;
-
-	IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_sql_handle_convert_table', 'U') IS NOT NULL
-		DROP TABLE #LEXEL_OES_stats_sql_handle_convert_table;
-
-	IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_objects', 'U') IS NOT NULL
-		DROP TABLE #LEXEL_OES_stats_objects;
-
-	IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_object_name', 'U') IS NOT NULL
-		DROP TABLE #LEXEL_OES_stats_object_name;
 
 	IF OBJECT_ID('tempdb..#sql_handle_convert_table') IS NOT NULL
 		DROP TABLE #sql_handle_convert_table;
 
 	IF OBJECT_ID('tempdb..#perf_report_objects') IS NOT NULL
 		DROP TABLE #perf_report_objects;
-
-	IF OBJECT_ID('tempdb.dbo.#LEXEL_OES_stats_output', 'U') IS NOT NULL
-		DROP TABLE #LEXEL_OES_stats_output;
 
 	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_spnCheck') IS NOT NULL
 				DROP TABLE #output_sqldba_org_sp_triage_spnCheck
@@ -11043,7 +13452,7 @@ END
 
 	IF @Debug = 1
 	BEGIN
-		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](5),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
+		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
 		IF @ShowDebugTime = 1 RAISERROR( @DebugTimeMSG,0,1) WITH NOWAIT; 
 		RAISERROR (N'All done',0,1) WITH NOWAIT;
