@@ -68,6 +68,8 @@ DROP PROCEDURE [master].[dbo].[sp_triage®]
 , @CleanupTime [INT] = 180 /*TABLE runs only: export rows older than the SMALLER of @CleanupTime and @ExportCleanupDays (days) are deleted; NULL on both, or a negative value, = keep everything. Both parameters are kept so positional callers do not shift; ONE delete reads them (2026-10-16).*/
 , @BufferScanMaxGB [INT] = 64 /*Per-DB buffer-pool residency (sys.dm_os_buffer_descriptors) is only scanned when the pool holds at most this many GB of data pages - the scan takes minutes on big-memory servers. NULL or 0 = always skip; section 14 and the usage-likelihood section then report 0 buffer pages. Appended after @CleanupTime on purpose - legacy positional callers passing through @CleanupTime must not shift.*/
 , @PerfCounterSampleSeconds [INT] = 10 /*Length of the in-run performance-counter sample behind section 121 (right now): two readings this many seconds apart. 0 or NULL = off (section 121 says so); clamped to 1..300. Every run that samples takes this much longer. Appended LAST on purpose - positional callers must not shift (2026-10-21; the 10 s default is a ruling).*/
+, @ExcludeSystemDBs BIT = 0 /*1 = the per-database checks skip master, model, msdb and tempdb. Other sections still read them.*/
+, @TopIORankDBs [INT] = 20 /*Per-database checks run on every user database when there are at most this many. Above that: the N busiest by disk reads and writes since SQL Server started, plus the 5 largest by allocated size. The output names the rest. NULL or 0 = every database.*/
 WITH RECOMPILE/*, ENCRYPTION*/
 AS
 BEGIN
@@ -6746,25 +6748,101 @@ END
 
 			/*----------------------------------------
 			--Loop all the user databases to run database specific commands against them
-			some build in logic, if more than 10 non-core database, just do the heaviest usage databases.
 			Loop logic would set the variables then delete the entry from the @databases table
 			----------------------------------------*/
-	
-	IF (SELECT COUNT(1) FROM @Databases WHERE database_id > 4) > 10
+	/* Which databases the per-database loop checks. Invariants:
+	   - At most @TopIORankDBs user databases (database_id > 4) in @Databases: every one of them is checked.
+	   - More than that: the @TopIORankDBs busiest user databases by TotalIO (disk reads + writes since SQL Server
+	     started; no I/O row = least busy; ties go to the lower database_id), PLUS the 5 largest user databases by
+	     allocated size from @master_filesTable, whatever their I/O. System databases never take one of those places.
+	   - @TopIORankDBs NULL or <= 0 = every database.
+	   - System databases (database_id 1-4) are checked unless @ExcludeSystemDBs = 1.
+	   - Every user database left out is named in ONE #sp_triage_skipped row (message at most 3800 characters, cut
+	     after a whole name with " and N more").
+	   - Only the loop's input changes: every other reader of @Databases runs above this point.
+	   - After any delete, @Databasei_Max is the row count, so "Looping Database i of N" counts what is checked. */
+	DECLARE @PerDbUserCount INT, @PerDbKeptCount INT, @PerDbSkipCount INT, @PerDbShown INT, @PerDbRn INT;
+	DECLARE @PerDbSkipName [NVARCHAR] (300), @PerDbSkipList [NVARCHAR] (4000), @PerDbHead [NVARCHAR] (4000), @PerDbMsg [NVARCHAR] (4000);
+	DECLARE @PerDbKeep TABLE (database_id INT PRIMARY KEY);
+	DECLARE @PerDbSkipped TABLE (rn INT IDENTITY(1,1) PRIMARY KEY, dbname [NVARCHAR] (250));
+
+	IF @ExcludeSystemDBs = 1
+		DELETE FROM @Databases
+		WHERE database_id <= 4;
+
+	SELECT @PerDbUserCount = COUNT(1) FROM @Databases WHERE database_id > 4;
+
+	IF @TopIORankDBs > 0 AND @PerDbUserCount > @TopIORankDBs
 	BEGIN
-		RAISERROR (N'Lots of databases, only taking the top 5',0,1) WITH NOWAIT;
-	
+		INSERT @PerDbKeep (database_id)
+		SELECT io.database_id
+		FROM (
+			SELECT d.database_id
+				, ROW_NUMBER() OVER (ORDER BY ISNULL(d.TotalIO, 0) DESC, d.database_id ASC) AS rn
+			FROM @Databases d
+			WHERE d.database_id > 4
+		) io
+		WHERE io.rn <= @TopIORankDBs
+		UNION
+		SELECT sz.database_id
+		FROM (
+			SELECT mf.database_id
+				, ROW_NUMBER() OVER (ORDER BY SUM(CONVERT(BIGINT, mf.size)) DESC, mf.database_id ASC) AS rn
+			FROM @master_filesTable mf
+			WHERE mf.database_id > 4
+			AND mf.database_id IN (SELECT d.database_id FROM @Databases d)
+			GROUP BY mf.database_id
+		) sz
+		WHERE sz.rn <= 5;
+
+		INSERT @PerDbSkipped (dbname)
+		SELECT d.databasename
+		FROM @Databases d
+		WHERE d.database_id > 4
+		AND d.database_id NOT IN (SELECT k.database_id FROM @PerDbKeep k)
+		ORDER BY d.databasename;
+
+		SELECT @PerDbSkipCount = COUNT(1) FROM @PerDbSkipped;
+		SET @PerDbKeptCount = @PerDbUserCount - @PerDbSkipCount;
+
+		SET @PerDbHead = N'Checked ' + CONVERT([NVARCHAR] (12), @PerDbKeptCount) + N' of ' + CONVERT([NVARCHAR] (12), @PerDbUserCount)
+			+ N' user databases that can be read. @TopIORankDBs = ' + CONVERT([NVARCHAR] (12), @TopIORankDBs)
+			+ N' picks the ' + CONVERT([NVARCHAR] (12), @TopIORankDBs) + N' busiest by disk reads and writes since SQL Server started'
+			+ CASE WHEN EXISTS (SELECT 1 FROM @master_filesTable) THEN N', plus the 5 largest' ELSE N'' END
+			+ N'. Not checked: ';
+		/* Names in name order until the next one would push the message past 3800 characters; the 80 kept back
+		   hold " and N more" and the closing sentence. */
+		SELECT @PerDbSkipList = N'', @PerDbRn = 1, @PerDbShown = 0;
+		WHILE @PerDbRn <= @PerDbSkipCount
+		BEGIN
+			SELECT @PerDbSkipName = QUOTENAME(s.dbname) FROM @PerDbSkipped s WHERE s.rn = @PerDbRn;
+			IF LEN(@PerDbHead) + LEN(@PerDbSkipList) + 2 + LEN(@PerDbSkipName) + 80 > 3800 BREAK;
+			SET @PerDbSkipList = @PerDbSkipList + CASE WHEN @PerDbRn = 1 THEN N'' ELSE N', ' END + @PerDbSkipName;
+			SET @PerDbShown = @PerDbRn;
+			SET @PerDbRn = @PerDbRn + 1;
+		END
+		SET @PerDbMsg = @PerDbHead + @PerDbSkipList
+			+ CASE WHEN @PerDbShown < @PerDbSkipCount THEN N' and ' + CONVERT([NVARCHAR] (12), @PerDbSkipCount - @PerDbShown) + N' more' ELSE N'' END
+			+ N'. Set @TopIORankDBs = 0 to check every database.';
+
+		IF @PerDbSkipCount > 0
+		BEGIN
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage)
+			VALUES (N'Per-database checks for some user databases', 0, @PerDbMsg);
+			RAISERROR (N'%s', 0, 1, @PerDbMsg) WITH NOWAIT;
+		END
 
 		DELETE FROM @Databases
-		WHERE [TotalIORank] > 10 OR database_id <5
-
-		SELECT @Databasei_Max = COUNT(1) FROM @Databases
+		WHERE database_id > 4
+		AND database_id NOT IN (SELECT k.database_id FROM @PerDbKeep k);
 
 		/* 2026-10-16: a debug result set. Unguarded, it reached the client as an extra result set on every
 		   server with more than 10 user databases. */
 		IF @Debug = 1
 			SELECT * from @Databases
 	END
+
+	SET @Databasei_Max = (SELECT COUNT(1) FROM @Databases);
 
 	DECLARE @SkipthisDB BIT	
 	SET @SkipthisDB = 0
