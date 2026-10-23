@@ -1766,9 +1766,11 @@ DECLARE @xp_errorlog  TABLE
 			, @LogWindowEnd = DATEADD(MINUTE,60,sqlserver_start_time)
 		FROM [sys].dm_os_sys_info;
 
+		/* Archive <= 99: see the error-log reader's invariant at 'Iterate through each log file' (2026-10-24). */
 		SELECT @RestartInfoLog = ISNULL(MAX(Archive),0)
 		FROM @xp_errorlogs
-		WHERE CONVERT(DATETIME, [Date], 101) >= DATEADD(MINUTE,-1,@SvcStartTime); /*style 101 = fixed US parse, immune to session DATEFORMAT*/
+		WHERE CONVERT(DATETIME, [Date], 101) >= DATEADD(MINUTE,-1,@SvcStartTime) /*style 101 = fixed US parse, immune to session DATEFORMAT*/
+		AND Archive BETWEEN 0 AND 99;
 
 		WHILE @RestartInfoLog >= 0
 		BEGIN
@@ -4366,19 +4368,25 @@ IF @Debug = 1
 
 
 		--Iterate through each log file and output to a table (separate results)
+		/* 2026-10-24. Invariant: every error-log read in this proc passes an
+		   archive number from 0 to 99. sp_readerrorlog / xp_readerrorlog reject 100 and above with 'Invalid parameter
+		   value'; inside INSERT ... EXEC that error is swallowed but still flags the batch, so SSMS and SqlClient end the
+		   whole run with 'Msg 0, Level 11 ... A severe error occurred' after 'All done' (PROVED on SQL 2022 16.0.4305.5
+		   with 101 archives). xp_enumerrorlogs returns archives in TEXT order (0, 1, 10, 100, 11, ...), so the old
+		   'Id <= 5' read archives 0, 1, 10, 100 and 11 instead of the five newest. Now: the five newest, by number. */
 		DECLARE @logCount INT;
-		SELECT @logCount = COUNT(*) 
+		SELECT @logCount = COUNT(*)
 		FROM @ErrorLogFiles;
 
 		DECLARE @i [INT] ;
 		SET @i = 0;
 		DECLARE @tableName [NVARCHAR] (128);
 		DECLARE @datecheck DATETIME;
-		DECLARE curReadSQLErrorLogs CURSOR FAST_FORWARD READ_ONLY FOR 
-			   SELECT [Archive #] 
+		DECLARE curReadSQLErrorLogs CURSOR FAST_FORWARD READ_ONLY FOR
+			   SELECT TOP (5) [Archive #]
 			   FROM @ErrorLogFiles
-			   WHERE 1=1 --(Date > DATEADD(WEEK, -2,GETDATE()))
-			   AND Id <= 5
+			   WHERE [Archive #] BETWEEN 0 AND 99
+			   ORDER BY [Archive #]
 		OPEN curReadSQLErrorLogs
 		FETCH NEXT FROM curReadSQLErrorLogs INTO @i
 		WHILE @@FETCH_STATUS = 0
@@ -13054,6 +13062,38 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	RAISERROR ('WARNING: could not restore xp_cmdshell to OFF - please disable it manually.',0,1) WITH NOWAIT;
+END CATCH
+
+/* 2026-10-23. Invariant: #output_sqldba_org_sp_triage holds no control character
+   by the time ANY consumer reads it: the @Export = SCREEN select, the export-table INSERT (which the app and the upload
+   read) and the TABLE path's screen echo. @OutputSanitiseSQL runs ONCE, here, before the @Export branches.
+   Sections 39 (the plan_handle bytes, query text) and 108 (REG_BINARY registry values) carry NCHAR(1-31). They were
+   suspected of the 2026-10-23 'A severe error occurred' and cleared: that was an error-log archive number of 100 (see
+   'Iterate through each log file'). This stays so raw bytes never reach a reader. It replaces NCHAR(0-8, 11, 12, 14-31) with a space, in one UPDATE, under COLLATE
+   Latin1_General_BIN2 (any other collation treats NCHAR(0) as ignorable and REPLACE is a no-op). TAB, LF and CR are left
+   to the consumers' own REPLACEs. Nested REPLACE, not TRANSLATE: the script still installs on SQL 2008. */
+DECLARE @OutputSanitiseSQL NVARCHAR(MAX), @CtrlExpr NVARCHAR(MAX), @CtrlChar INT;
+SET @CtrlExpr = N'{c} COLLATE Latin1_General_BIN2';
+SET @CtrlChar = 0;
+WHILE @CtrlChar < 32
+BEGIN
+	IF @CtrlChar NOT IN (9, 10, 13)
+		SET @CtrlExpr = N'REPLACE(' + @CtrlExpr + N', NCHAR(' + CONVERT(NVARCHAR(2), @CtrlChar) + N'), N'' '')';
+	SET @CtrlChar = @CtrlChar + 1;
+END
+SET @OutputSanitiseSQL = N'UPDATE #output_sqldba_org_sp_triage SET domain = ' + REPLACE(@CtrlExpr, N'{c}', N'domain')
+	+ N', SQLInstance = ' + REPLACE(@CtrlExpr, N'{c}', N'SQLInstance')
+	+ N', Section = ' + REPLACE(@CtrlExpr, N'{c}', N'Section')
+	+ N', Summary = ' + REPLACE(@CtrlExpr, N'{c}', N'Summary')
+	+ N', Severity = ' + REPLACE(@CtrlExpr, N'{c}', N'Severity')
+	+ N', Details = ' + REPLACE(@CtrlExpr, N'{c}', N'Details') + N';';
+
+BEGIN TRY
+	EXEC sp_executesql @OutputSanitiseSQL;
+END TRY
+BEGIN CATCH
+	SELECT @errMessage = ERROR_MESSAGE();
+	RAISERROR (N'Output sanitise failed: %s',0,1,@errMessage) WITH NOWAIT;
 END CATCH
 
 IF UPPER(LEFT(@Export,1)) = 'S'
