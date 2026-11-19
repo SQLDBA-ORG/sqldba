@@ -6279,7 +6279,7 @@ END
 		10
 		, LEFT(mf.physical_name, 2) + '\ '
 		+ ' ; ' + CONVERT([VARCHAR](250),SUM(io_stall)/SUM(num_of_reads+num_of_writes)) + ' (ms)'
-		+ ' ; ' + CONVERT([VARCHAR](25),(CONVERT(MONEY,SUM([num_of_reads])) + SUM([num_of_writes])) * 8 /1024/1024/ CONVERT(MONEY,@DaysUptime))+ 'GB/day'
+		+ ' ; ' + CONVERT([VARCHAR](25),CONVERT(DECIMAL(20,2), SUM([num_of_bytes_read] + [num_of_bytes_written]) / 1073741824.0 / @DaysUptime))+ 'GB/day' /* GB per day comes from the byte counters (num_of_bytes_read + num_of_bytes_written), never from an IO count times 8 KB: one IO is not one 8 KB page. */
 		+ '; Free space: ' + CONVERT([VARCHAR](20), MAX(CAST(fd.FreeSpaceMB / 1024 as decimal(20,2)))) + 'GB'
 		, ' ; ' + 
 		CASE 
@@ -6320,7 +6320,7 @@ END
 		, LEFT ([f].[physical_name], 2) + '\ '
 		+ '; ' + DB_NAME ([s].[database_id]) 
 		+ '; '+ CONVERT([VARCHAR](20), CASE WHEN ([num_of_reads] = 0 AND [num_of_writes] = 0) THEN 0 ELSE ([io_stall] / ([num_of_reads] + [num_of_writes])) END) + ' (ms)'
-		+ '; '+ CONVERT([VARCHAR](20),CASE WHEN [num_of_reads] + [num_of_writes] = 0 THEN 0 ELSE CONVERT(MONEY,([num_of_reads] + [num_of_writes])) * 8 /1024/1024/ CONVERT(MONEY,@DaysUptime) END ) + 'GB/day'
+		+ '; '+ CONVERT([VARCHAR](20),CASE WHEN [num_of_reads] + [num_of_writes] = 0 THEN 0 ELSE CONVERT(DECIMAL(20,2), ([num_of_bytes_read] + [num_of_bytes_written]) / 1073741824.0 / @DaysUptime) END ) + 'GB/day' /* GB per day comes from the byte counters (num_of_bytes_read + num_of_bytes_written), never from an IO count times 8 KB: one IO is not one 8 KB page. */
 		, CONVERT([VARCHAR](20),CASE WHEN [num_of_reads] = 0 THEN 0 ELSE ([io_stall_read_ms] / [num_of_reads]) END ) + ' (ms)'
 		+ '; '+CONVERT([VARCHAR](20),CASE WHEN [num_of_writes] = 0 THEN 0 ELSE ([io_stall_write_ms] / [num_of_writes]) END ) + ' (ms)'
 		, CASE 
@@ -6776,13 +6776,13 @@ END
 		,  REPLICATE('|',CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0) 
 		+ REPLICATE('.',100 - CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0) + '' + CONVERT([VARCHAR](20), CONVERT(INT,ROUND(CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0,0))) +'% IO '
 		, T2.DatabaseName
-		+ '; ' + ISNULL(CONVERT([VARCHAR](20),CONVERT(INT,ROUND([CPU_Time(Ms)]/1000 * 1.0 /SUM([CPU_Time(Ms)]/1000) OVER()* 100.0,0))),'0') +'%'
+		+ '; ' + ISNULL(CONVERT([VARCHAR](20),CONVERT(INT,ROUND([CPU_Time(us)]/1000 * 1.0 /NULLIF(SUM([CPU_Time(us)]/1000) OVER(), 0)* 100.0,0))),'0') +'%'
 		+ '; ' +  ISNULL(CONVERT([VARCHAR](20),CONVERT(INT,ROUND(CONVERT(MONEY,T2.[TotalIO])/ SUM(T2.[TotalIO]) OVER()* 100.0 ,0))) ,'0')+'%'
 		+ '; ' +  ISNULL(CONVERT([VARCHAR](20),CONVERT(INT,ROUND(CONVERT(MONEY,src.db_buffer_pages )/ SUM(src.db_buffer_pages ) OVER()* 100.0 ,0))),'0')+'%'
 		+ '; ' +  + ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,TotalSize/1024)),'')
 		+ '; ' + ISNULL(DBlatency.[GB/day] +'(GB)','')
 		+ '; ' + ISNULL(DBlatency.[Latency],'')
-		,  ISNULL(CONVERT([VARCHAR](20),[CPU_Time(Ms)]) + ' (' + CONVERT([VARCHAR](20),CAST([CPU_Time(Ms)]/1000 * 1.0 /SUM([CPU_Time(Ms)]/1000) OVER()* 100.0 AS DECIMAL(5, 2))) + '%)','') 
+		,  ISNULL(CONVERT([VARCHAR](20), CONVERT(DECIMAL(19,2), [CPU_Time(us)] / 1000000.0)) + ' (' + CONVERT([VARCHAR](20),CAST([CPU_Time(us)]/1000 * 1.0 /NULLIF(SUM([CPU_Time(us)]/1000) OVER(), 0)* 100.0 AS DECIMAL(5, 2))) + '%)','') /* total_worker_time is in microseconds: the alias says (us), and the Details figure is seconds (us / 1000000). */
 		+ '; ' +  ISNULL(CONVERT([VARCHAR](20),[TotalIO]) + ' ; Reads: ' + CONVERT([VARCHAR](20),T2.[Number of Reads]) +' ; Writes: '+ CONVERT([VARCHAR](20),T2.[Number of Writes]),'')
 		+ '; ' +  ISNULL(CONVERT([VARCHAR](20),src.db_buffer_pages),'')
 		+ '; '+ ISNULL(CONVERT([VARCHAR](20),src.db_buffer_pages / 128) ,'')
@@ -6805,7 +6805,7 @@ END
 		TOP 100 PERCENT
 			DatabaseID
 			, DB_Name(DatabaseID)AS [DatabaseName]
-			, SUM(total_worker_time)AS [CPU_Time(Ms)]
+			, SUM(total_worker_time) AS [CPU_Time(us)] /* total_worker_time is in microseconds: the alias says (us), and the Details figure is seconds (us / 1000000). */
 		FROM  #dadatafor_exec_query_stats AS qs
 		CROSS APPLY
 		(
@@ -6845,7 +6845,7 @@ END
 			, CONVERT([VARCHAR](20),
 			CASE 
 				WHEN SUM([num_of_reads]) + SUM([num_of_writes]) = 0 THEN 0 
-				ELSE CONVERT(MONEY,(SUM([num_of_reads]) + SUM([num_of_writes]))) * 8 /1024/1024/ CONVERT(MONEY,@DaysUptime) 
+				ELSE CONVERT(DECIMAL(20,2), SUM([num_of_bytes_read] + [num_of_bytes_written]) / 1073741824.0 / @DaysUptime) /* GB per day comes from the byte counters (num_of_bytes_read + num_of_bytes_written), never from an IO count times 8 KB: one IO is not one 8 KB page. */
 			END ) [GB/day]
 			, CONVERT([VARCHAR](20),
 			CASE 
@@ -6857,7 +6857,7 @@ END
 		GROUP BY DB_NAME ([s].[database_id]) 
 	) DBlatency ON DBlatency.DBName =  T2.DatabaseName
 	WHERE T2.DatabaseName IS NOT NULL
-	ORDER BY [TotalIO] DESC,[CPU_Time(Ms)] DESC
+	ORDER BY [TotalIO] DESC,[CPU_Time(us)] DESC
 	OPTION (RECOMPILE) ;
 	END TRY
 	BEGIN CATCH
@@ -10464,8 +10464,8 @@ BEGIN TRY
 	SELECT 99 [SectionID]
 	, LEFT('Oldest Cache: ' + CASE WHEN @QueryStatsCaptured = 1 AND @oldestcachequery IS NOT NULL THEN CONVERT([VARCHAR](15), @DaysOldestCachedQuery) ELSE 'not read' END + '; Days Uptime: ' + CONVERT([VARCHAR](15),@DaysUptime),3500) [Section]
 	, LEFT(CONVERT([VARCHAR](50),@TotalIODailyWorkload)
-	+ 'GB/day; ' + CONVERT([VARCHAR](50),SUM(qs.execution_count)) +' executions/day; '
-	+ CONVERT([VARCHAR](50),CONVERT(MONEY,SUM(qs.total_elapsed_time) / 1000000.0)/1000) +' (avg) *[DailyGB; DailyExecutions; AverageTime(s)]', 3500) Summary
+	+ 'GB/day; ' + ISNULL(CONVERT([VARCHAR](50), CONVERT(DECIMAL(19,2), SUM(qs.execution_count) / NULLIF(@DaysOldestCachedQuery, 0))), 'not read') +' executions/day; '
+	+ ISNULL(CONVERT([VARCHAR](50), CONVERT(DECIMAL(19,4), SUM(qs.total_elapsed_time) / 1000000.0 / NULLIF(SUM(qs.execution_count), 0))), '0') +' (avg) *[DailyGB; DailyExecutions; AverageTime(s)]', 3500) Summary /* executions/day divides the execution count by the cache age in days; the average is seconds per execution (total_elapsed_time is in microseconds). */
 	, 'Total' [Details]
 	FROM #dadatafor_exec_query_stats qs
 
@@ -10495,7 +10495,7 @@ BEGIN TRY
 	)
 	SELECT  99, 'Total Disk I/O per day: '
 		+ CONVERT([VARCHAR](20),CASE WHEN SUM([num_of_reads]) + SUM([num_of_writes]) = 0 THEN 0 
-			ELSE CONVERT(MONEY,(SUM([num_of_reads]) + SUM([num_of_writes]))) * 8 /1024/1024/ CONVERT(MONEY,@DaysUptime) END ) + 'GB/day'
+			ELSE CONVERT(DECIMAL(20,2), SUM([num_of_bytes_read] + [num_of_bytes_written]) / 1073741824.0 / @DaysUptime) END ) + 'GB/day' /* GB per day comes from the byte counters (num_of_bytes_read + num_of_bytes_written), never from an IO count times 8 KB: one IO is not one 8 KB page. */
 	FROM [sys].dm_io_virtual_file_stats (NULL,NULL) AS [s]
 	
 	INSERT #output_sqldba_org_sp_triage (
