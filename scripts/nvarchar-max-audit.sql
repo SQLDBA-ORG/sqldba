@@ -44,9 +44,29 @@
    VERDICTS (result set 3)
      SHRINK       every value fits nvarchar(4000) and nothing blocks ALTER COLUMN. A fix is scripted.
      BLOCKED      it fits, but ALTER COLUMN is refused while the named objects exist. No fix is scripted.
+     FORCE        only with @ForceBlocked = 1: it fits and is blocked only by objects this script can drop
+                  and re-create. A fix is scripted (see FORCING A BLOCKED COLUMN).
      KEEP MAX     at least one row holds more than 4,000 characters.
      NO DATA      table empty, column all NULL, or only empty strings. Ask the application owner.
      NOT SCANNED  table is over @MaxRowsToScan.      SCAN FAILED  the scan raised an error (shown in Why).
+
+   FORCING A BLOCKED COLUMN (@ForceBlocked = 1)
+     For a column blocked only by a plain nonclustered index (INCLUDE or filter), user-created statistics
+     or a check constraint, the fix script does this in ONE transaction: drop them, ALTER the column,
+     re-create them. XACT_ABORT is on, so if any step fails everything rolls back and nothing has changed.
+     The table is locked for the whole transaction, so the ALTER runs offline, and each re-created index
+     is a full build that is logged at the index's size under FULL recovery.
+     What is carried over. Index: unique, key order, INCLUDE list, filter, PAD_INDEX, FILLFACTOR,
+     IGNORE_DUP_KEY, STATISTICS_NORECOMPUTE, row and page lock settings, ROW or PAGE compression,
+     filegroup. Statistics: columns, filter, NORECOMPUTE, INCREMENTAL. Check constraint: definition,
+     trusted or not, disabled or not, NOT FOR REPLICATION.
+     What is NOT carried over: a statistics sample rate or FULLSCAN (the re-created one samples by
+     default), and a system-generated constraint name becomes an ordinary name.
+     Never forced, they stay BLOCKED and the Why column says which: an index that is partitioned,
+     disabled, backs a constraint, is used by a foreign key, carries an extended property, or uses
+     OPTIMIZE_FOR_SEQUENTIAL_KEY or XML compression; a definition or filter that spans lines; a computed
+     column; a schema-bound view or function; full-text; and every table-level blocker.
+     One index that covers two forced columns is dropped and rebuilt once for each column.
 
    LOG ESTIMATES: planning figures, measured 2026-11-14 on SQL Server 2022 CU27 (tables of 76 to 310 MB)
      Offline ALTER COLUMN   rows x 450 bytes + 2 x the column's data (3 x on a heap). Fully logged in EVERY
@@ -88,7 +108,8 @@ DECLARE
     @ScanMaxDop    int           = 2,           -- MAXDOP for each scan; NULL = server default
     @HeadroomPct   int           = 50,          -- suggested size = longest value + this %, rounded up to a tidy size
     @FixScript     varchar(10)   = 'NONE',      -- NONE | COLUMN (one block per column) | TABLE (one block per table)
-    @UseOnline     bit           = 1;           -- use WITH (ONLINE = ON) where the edition and the table allow it
+    @UseOnline     bit           = 1,           -- use WITH (ONLINE = ON) where the edition and the table allow it
+    @ForceBlocked  bit           = 0;           -- 1 = also script a column blocked only by an index, statistics or a check constraint: drop, ALTER, re-create, one transaction
 
 IF @FixScript NOT IN ('NONE', 'COLUMN', 'TABLE')
 BEGIN
@@ -139,6 +160,8 @@ IF OBJECT_ID('tempdb..#QsPlan') IS NOT NULL DROP TABLE #QsPlan;
 IF OBJECT_ID('tempdb..#QsTop')  IS NOT NULL DROP TABLE #QsTop;
 IF OBJECT_ID('tempdb..#QsRows') IS NOT NULL DROP TABLE #QsRows;
 IF OBJECT_ID('tempdb..#QsDb')   IS NOT NULL DROP TABLE #QsDb;
+IF OBJECT_ID('tempdb..#BlkObj') IS NOT NULL DROP TABLE #BlkObj;
+IF OBJECT_ID('tempdb..#IdxNew') IS NOT NULL DROP TABLE #IdxNew;
 
 -- =====================================================================================================
 -- 1. Find the tables and columns (catalog only)
@@ -548,6 +571,8 @@ CREATE TABLE #Col (
     DefaultDef    nvarchar(max)  COLLATE DATABASE_DEFAULT NULL,
     Blockers      nvarchar(max)  COLLATE DATABASE_DEFAULT NULL,
     TopQueryRefs  nvarchar(400)  COLLATE DATABASE_DEFAULT NULL,          -- ranks of the top queries whose plan names this column
+    ForceOk       bit            NOT NULL DEFAULT 0,                     -- @ForceBlocked: every blocker of this column can be dropped and re-created
+    ForceNote     nvarchar(max)  COLLATE DATABASE_DEFAULT NULL,          -- @ForceBlocked: why it cannot
     -- filled by the scan
     RowCnt        bigint         NULL,
     NonNullRows   bigint         NULL,
@@ -584,15 +609,17 @@ IF @TopQueries IS NOT NULL
     INNER JOIN #Tab AS t ON t.ObjectId = c.ObjectId;
 
 -- Everything that makes SQL Server refuse ALTER COLUMN, or that the ALTER would silently lose
-CREATE TABLE #Blk (ObjectId int NOT NULL, ColumnId int NOT NULL, Reason nvarchar(400) COLLATE DATABASE_DEFAULT NOT NULL);
+-- Kind and RefId say what the blocker is, for @ForceBlocked: INDEX (index_id), STATS (stats_id), CHECK (object_id), OTHER.
+CREATE TABLE #Blk (ObjectId int NOT NULL, ColumnId int NOT NULL, Reason nvarchar(400) COLLATE DATABASE_DEFAULT NOT NULL,
+                   Kind varchar(10) COLLATE DATABASE_DEFAULT NOT NULL, RefId int NULL);
 
-INSERT INTO #Blk (ObjectId, ColumnId, Reason)
-SELECT c.ObjectId, c.ColumnId, N'index ' + QUOTENAME(i.name)
+INSERT INTO #Blk (ObjectId, ColumnId, Reason, Kind, RefId)
+SELECT c.ObjectId, c.ColumnId, N'index ' + QUOTENAME(i.name), 'INDEX', i.index_id
 FROM #Col AS c
 INNER JOIN sys.index_columns AS ic ON ic.object_id = c.ObjectId AND ic.column_id = c.ColumnId
 INNER JOIN sys.indexes AS i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
 UNION ALL
-SELECT c.ObjectId, c.ColumnId, N'statistics ' + QUOTENAME(s.name)
+SELECT c.ObjectId, c.ColumnId, N'statistics ' + QUOTENAME(s.name), 'STATS', s.stats_id
 FROM #Col AS c
 INNER JOIN sys.stats_columns AS sc ON sc.object_id = c.ObjectId AND sc.column_id = c.ColumnId
 INNER JOIN sys.stats AS s ON s.object_id = sc.object_id AND s.stats_id = sc.stats_id
@@ -605,18 +632,23 @@ SELECT DISTINCT c.ObjectId, c.ColumnId,
                  THEN LOWER(REPLACE(o.type_desc COLLATE DATABASE_DEFAULT, N'_', N' ')) + N' ' + QUOTENAME(o.name)
             WHEN d.referencing_class = 7
                  THEN N'filtered index ' + ISNULL(QUOTENAME(fi.name), N'')
-            ELSE LOWER(REPLACE(d.referencing_class_desc COLLATE DATABASE_DEFAULT, N'_', N' ')) + N' (schema-bound)' END
+            ELSE LOWER(REPLACE(d.referencing_class_desc COLLATE DATABASE_DEFAULT, N'_', N' ')) + N' (schema-bound)' END,
+       CASE WHEN d.referencing_class = 1 AND d.referencing_minor_id = 0 AND o.type = 'C' THEN 'CHECK'
+            WHEN d.referencing_class = 7 THEN 'INDEX'
+            ELSE 'OTHER' END,
+       CASE WHEN d.referencing_class = 1 AND d.referencing_minor_id = 0 AND o.type = 'C' THEN o.object_id
+            WHEN d.referencing_class = 7 THEN d.referencing_minor_id END
 FROM #Col AS c
 INNER JOIN sys.sql_expression_dependencies AS d
         ON d.referenced_id = c.ObjectId AND d.referenced_minor_id = c.ColumnId AND d.is_schema_bound_reference = 1
 LEFT JOIN sys.objects AS o  ON o.object_id = d.referencing_id AND d.referencing_class = 1
 LEFT JOIN sys.indexes AS fi ON fi.object_id = d.referencing_id AND fi.index_id = d.referencing_minor_id AND d.referencing_class = 7
 UNION ALL
-SELECT c.ObjectId, c.ColumnId, N'full-text index'
+SELECT c.ObjectId, c.ColumnId, N'full-text index', 'OTHER', NULL
 FROM #Col AS c
 INNER JOIN sys.fulltext_index_columns AS fc ON fc.object_id = c.ObjectId AND fc.column_id = c.ColumnId
 UNION ALL
-SELECT c.ObjectId, c.ColumnId, x.Reason
+SELECT c.ObjectId, c.ColumnId, x.Reason, 'OTHER', NULL
 FROM #Col AS c
 INNER JOIN sys.columns AS sc ON sc.object_id = c.ObjectId AND sc.column_id = c.ColumnId
 CROSS APPLY (VALUES
@@ -638,6 +670,150 @@ SET Blockers = STUFF((SELECT N', ' + b.Reason
                       FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'')
 FROM #Col AS c
 WHERE EXISTS (SELECT 1 FROM #Blk AS b WHERE b.ObjectId = c.ObjectId AND b.ColumnId = c.ColumnId);
+
+-- @ForceBlocked: for each blocking index, statistics object and check constraint, write the statement that
+-- drops it and the one that re-creates it exactly, or say why this script will not (NoForce).
+CREATE TABLE #BlkObj (
+    ObjectId  int            NOT NULL,
+    Kind      varchar(10)    COLLATE DATABASE_DEFAULT NOT NULL,
+    RefId     int            NOT NULL,
+    Label     nvarchar(300)  COLLATE DATABASE_DEFAULT NULL,
+    NoForce   nvarchar(300)  COLLATE DATABASE_DEFAULT NULL,      -- NULL = it can be dropped and re-created
+    DropSql   nvarchar(max)  COLLATE DATABASE_DEFAULT NULL,
+    CreateSql nvarchar(max)  COLLATE DATABASE_DEFAULT NULL,
+    PostSql   nvarchar(max)  COLLATE DATABASE_DEFAULT NULL,      -- a disabled check constraint is disabled again
+    ExtraMB   decimal(18, 2) NOT NULL DEFAULT 0,                 -- size of an index that has to be rebuilt
+    PRIMARY KEY (ObjectId, Kind, RefId)
+);
+-- indexes that use an option newer than SQL Server 2017, found without naming the new catalog columns here
+CREATE TABLE #IdxNew (ObjectId int NOT NULL, IndexId int NOT NULL);
+
+IF @ForceBlocked = 1
+BEGIN
+    INSERT INTO #BlkObj (ObjectId, Kind, RefId)
+    SELECT DISTINCT b.ObjectId, b.Kind, b.RefId
+    FROM #Blk AS b
+    WHERE b.Kind IN ('INDEX', 'STATS', 'CHECK') AND b.RefId IS NOT NULL;
+
+    IF COL_LENGTH('sys.indexes', 'optimize_for_sequential_key') IS NOT NULL
+        INSERT INTO #IdxNew (ObjectId, IndexId)
+        EXEC (N'SELECT object_id, index_id FROM sys.indexes WHERE optimize_for_sequential_key = 1');
+
+    IF COL_LENGTH('sys.partitions', 'xml_compression') IS NOT NULL
+        INSERT INTO #IdxNew (ObjectId, IndexId)
+        EXEC (N'SELECT DISTINCT object_id, index_id FROM sys.partitions WHERE xml_compression = 1');
+
+    -- statistics
+    UPDATE bo
+    SET Label     = N'statistics ' + QUOTENAME(s.name),
+        NoForce   = CASE WHEN s.filter_definition LIKE N'%[' + NCHAR(10) + NCHAR(13) + N']%' THEN N'its filter spans lines' END,
+        DropSql   = N'DROP STATISTICS ' + t.FullName + N'.' + QUOTENAME(s.name) + N';',
+        CreateSql = N'CREATE STATISTICS ' + QUOTENAME(s.name) + N' ON ' + t.FullName + N' (' + sc.Cols + N')'
+                  + ISNULL(N' WHERE ' + s.filter_definition, N'')
+                  + ISNULL(N' WITH ' + STUFF(CASE WHEN s.no_recompute = 1 THEN N', NORECOMPUTE' ELSE N'' END
+                                           + CASE WHEN s.is_incremental = 1 THEN N', INCREMENTAL = ON' ELSE N'' END, 1, 2, N''), N'')
+                  + N';'
+    FROM #BlkObj AS bo
+    INNER JOIN #Tab AS t ON t.ObjectId = bo.ObjectId
+    INNER JOIN sys.stats AS s ON s.object_id = bo.ObjectId AND s.stats_id = bo.RefId
+    CROSS APPLY (SELECT STUFF((SELECT N', ' + QUOTENAME(col.name)
+                               FROM sys.stats_columns AS x
+                               INNER JOIN sys.columns AS col ON col.object_id = x.object_id AND col.column_id = x.column_id
+                               WHERE x.object_id = s.object_id AND x.stats_id = s.stats_id
+                               ORDER BY x.stats_column_id
+                               FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'') AS Cols) AS sc
+    WHERE bo.Kind = 'STATS';
+
+    -- check constraints
+    UPDATE bo
+    SET Label     = N'check constraint ' + QUOTENAME(cc.name),
+        NoForce   = CASE WHEN cc.definition LIKE N'%[' + NCHAR(10) + NCHAR(13) + N']%' THEN N'its definition spans lines'
+                         WHEN EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 1 AND ep.major_id = cc.object_id AND ep.minor_id = 0)
+                              THEN N'it carries an extended property' END,
+        DropSql   = N'ALTER TABLE ' + t.FullName + N' DROP CONSTRAINT ' + QUOTENAME(cc.name) + N';',
+        CreateSql = N'ALTER TABLE ' + t.FullName + CASE WHEN cc.is_not_trusted = 1 THEN N' WITH NOCHECK' ELSE N' WITH CHECK' END
+                  + N' ADD CONSTRAINT ' + QUOTENAME(cc.name) + N' CHECK ' + CASE WHEN cc.is_not_for_replication = 1 THEN N'NOT FOR REPLICATION ' ELSE N'' END
+                  + cc.definition + N';',
+        PostSql   = CASE WHEN cc.is_disabled = 1 THEN N'ALTER TABLE ' + t.FullName + N' NOCHECK CONSTRAINT ' + QUOTENAME(cc.name) + N';' END
+    FROM #BlkObj AS bo
+    INNER JOIN #Tab AS t ON t.ObjectId = bo.ObjectId
+    INNER JOIN sys.check_constraints AS cc ON cc.object_id = bo.RefId AND cc.parent_object_id = bo.ObjectId
+    WHERE bo.Kind = 'CHECK';
+
+    -- indexes
+    UPDATE bo
+    SET Label     = N'index ' + QUOTENAME(i.name),
+        NoForce   = CASE WHEN i.type <> 2 THEN N'it is not a plain nonclustered index'
+                         WHEN i.is_primary_key = 1 OR i.is_unique_constraint = 1 THEN N'it backs a constraint'
+                         WHEN i.is_disabled = 1 THEN N'it is disabled'
+                         WHEN i.is_hypothetical = 1 THEN N'it is hypothetical'
+                         WHEN ds.type <> 'FG' OR pc.Parts <> 1 THEN N'it is partitioned'
+                         WHEN i.filter_definition LIKE N'%[' + NCHAR(10) + NCHAR(13) + N']%' THEN N'its filter spans lines'
+                         WHEN EXISTS (SELECT 1 FROM sys.foreign_keys AS fk WHERE fk.referenced_object_id = i.object_id AND fk.key_index_id = i.index_id)
+                              THEN N'a foreign key uses it'
+                         WHEN EXISTS (SELECT 1 FROM sys.extended_properties AS ep WHERE ep.class = 7 AND ep.major_id = i.object_id AND ep.minor_id = i.index_id)
+                              THEN N'it carries an extended property'
+                         WHEN EXISTS (SELECT 1 FROM #IdxNew AS n WHERE n.ObjectId = i.object_id AND n.IndexId = i.index_id)
+                              THEN N'it uses OPTIMIZE_FOR_SEQUENTIAL_KEY or XML compression' END,
+        DropSql   = N'DROP INDEX ' + QUOTENAME(i.name) + N' ON ' + t.FullName + N';',
+        CreateSql = N'CREATE ' + CASE WHEN i.is_unique = 1 THEN N'UNIQUE ' ELSE N'' END + N'NONCLUSTERED INDEX ' + QUOTENAME(i.name) + N' ON ' + t.FullName
+                  + N' (' + k.Cols + N')' + ISNULL(N' INCLUDE (' + inc.Cols + N')', N'') + ISNULL(N' WHERE ' + i.filter_definition, N'')
+                  + N' WITH (PAD_INDEX = ' + CASE WHEN i.is_padded = 1 THEN N'ON' ELSE N'OFF' END
+                  + CASE WHEN i.fill_factor BETWEEN 1 AND 100 THEN N', FILLFACTOR = ' + CAST(i.fill_factor AS nvarchar(3)) ELSE N'' END
+                  + CASE WHEN i.is_unique = 1 THEN N', IGNORE_DUP_KEY = ' + CASE WHEN i.ignore_dup_key = 1 THEN N'ON' ELSE N'OFF' END ELSE N'' END
+                  + N', STATISTICS_NORECOMPUTE = ' + CASE WHEN ISNULL(st.no_recompute, 0) = 1 THEN N'ON' ELSE N'OFF' END
+                  + N', ALLOW_ROW_LOCKS = '  + CASE WHEN i.allow_row_locks = 1  THEN N'ON' ELSE N'OFF' END
+                  + N', ALLOW_PAGE_LOCKS = ' + CASE WHEN i.allow_page_locks = 1 THEN N'ON' ELSE N'OFF' END
+                  + CASE WHEN pc.Compression IN (N'ROW', N'PAGE') THEN N', DATA_COMPRESSION = ' + pc.Compression ELSE N'' END
+                  + N') ON ' + QUOTENAME(ds.name) + N';',
+        ExtraMB   = ISNULL(sz.UsedMB, 0)
+    FROM #BlkObj AS bo
+    INNER JOIN #Tab AS t ON t.ObjectId = bo.ObjectId
+    INNER JOIN sys.indexes AS i ON i.object_id = bo.ObjectId AND i.index_id = bo.RefId
+    INNER JOIN sys.data_spaces AS ds ON ds.data_space_id = i.data_space_id
+    LEFT JOIN sys.stats AS st ON st.object_id = i.object_id AND st.stats_id = i.index_id
+    CROSS APPLY (SELECT COUNT(*) AS Parts, MAX(p.data_compression_desc COLLATE DATABASE_DEFAULT) AS Compression
+                 FROM sys.partitions AS p WHERE p.object_id = i.object_id AND p.index_id = i.index_id) AS pc
+    CROSS APPLY (SELECT SUM(ps.used_page_count) * 8 / 1024.0 AS UsedMB
+                 FROM sys.dm_db_partition_stats AS ps WHERE ps.object_id = i.object_id AND ps.index_id = i.index_id) AS sz
+    CROSS APPLY (SELECT STUFF((SELECT N', ' + QUOTENAME(col.name) + CASE WHEN x.is_descending_key = 1 THEN N' DESC' ELSE N'' END
+                               FROM sys.index_columns AS x
+                               INNER JOIN sys.columns AS col ON col.object_id = x.object_id AND col.column_id = x.column_id
+                               WHERE x.object_id = i.object_id AND x.index_id = i.index_id AND x.key_ordinal > 0
+                               ORDER BY x.key_ordinal
+                               FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'') AS Cols) AS k
+    CROSS APPLY (SELECT STUFF((SELECT N', ' + QUOTENAME(col.name)
+                               FROM sys.index_columns AS x
+                               INNER JOIN sys.columns AS col ON col.object_id = x.object_id AND col.column_id = x.column_id
+                               WHERE x.object_id = i.object_id AND x.index_id = i.index_id AND x.is_included_column = 1
+                               ORDER BY x.index_column_id
+                               FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'') AS Cols) AS inc
+    WHERE bo.Kind = 'INDEX';
+
+    -- a row this script could not describe is never forced
+    UPDATE #BlkObj SET NoForce = N'its definition could not be read' WHERE NoForce IS NULL AND (DropSql IS NULL OR CreateSql IS NULL);
+
+    -- per column: why it cannot be forced, or nothing
+    UPDATE c
+    SET ForceNote = STUFF((SELECT N'; ' + x.Note
+                           FROM (SELECT DISTINCT CASE WHEN b.Kind = 'OTHER' OR bo.ObjectId IS NULL
+                                                      THEN b.Reason + N' is not a kind this script re-creates'
+                                                      ELSE bo.Label + N': ' + bo.NoForce END AS Note
+                                 FROM #Blk AS b
+                                 LEFT JOIN #BlkObj AS bo ON bo.ObjectId = b.ObjectId AND bo.Kind = b.Kind AND bo.RefId = b.RefId
+                                 WHERE b.ObjectId = c.ObjectId AND b.ColumnId = c.ColumnId
+                                   AND (b.Kind = 'OTHER' OR bo.ObjectId IS NULL OR bo.NoForce IS NOT NULL)) AS x
+                           ORDER BY x.Note
+                           FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 2, N'')
+    FROM #Col AS c
+    WHERE c.Blockers IS NOT NULL;
+
+    UPDATE c
+    SET ForceOk = 1
+    FROM #Col AS c
+    INNER JOIN #Tab AS t ON t.ObjectId = c.ObjectId
+    WHERE c.Blockers IS NOT NULL AND c.ForceNote IS NULL AND t.TableBlocker IS NULL;
+END;
 
 -- =====================================================================================================
 -- 2. Scan: one pass per table, all of its nvarchar(max) columns at once
@@ -719,17 +895,27 @@ SET NewLen = CASE WHEN c.MaxChars > 0 AND c.RowsOver4000 = 0
                    WHEN t.ScanStatus <> 'SCANNED'     THEN 'SCAN FAILED'
                    WHEN c.RowsOver4000 > 0            THEN 'KEEP MAX'
                    WHEN ISNULL(c.MaxChars, 0) = 0     THEN 'NO DATA'
+                   WHEN c.ForceOk = 1                 THEN 'FORCE'
                    WHEN t.TableBlocker IS NOT NULL OR c.Blockers IS NOT NULL THEN 'BLOCKED'
                    ELSE 'SHRINK' END
 FROM #Col AS c
 INNER JOIN #Tab AS t ON t.ObjectId = c.ObjectId;
 
 UPDATE c
-SET GoesOnline   = CASE WHEN @OnlineOk = 1 AND t.OnlineBar IS NULL AND c.DefaultName IS NULL THEN 1 ELSE 0 END,
+SET GoesOnline   = CASE WHEN c.Verdict = 'SHRINK' AND @OnlineOk = 1 AND t.OnlineBar IS NULL AND c.DefaultName IS NULL THEN 1 ELSE 0 END,
     OfflineLogMB = (c.RowCnt * 450.0 + CASE WHEN t.IsHeap = 1 THEN 3.0 ELSE 2.0 END * c.TotalBytes) / 1048576
+                 -- a forced column also rebuilds its blocking indexes
+                 + CASE WHEN c.Verdict = 'FORCE'
+                        THEN ISNULL((SELECT SUM(bo.ExtraMB)
+                                     FROM #BlkObj AS bo
+                                     WHERE EXISTS (SELECT 1 FROM #Blk AS b
+                                                   WHERE b.ObjectId = c.ObjectId AND b.ColumnId = c.ColumnId
+                                                     AND b.Kind = bo.Kind AND b.RefId = bo.RefId AND bo.ObjectId = b.ObjectId)), 0)
+                             * CASE WHEN @FullyLogged = 1 THEN 1.0 ELSE 0.01 END
+                        ELSE 0 END
 FROM #Col AS c
 INNER JOIN #Tab AS t ON t.ObjectId = c.ObjectId
-WHERE c.Verdict = 'SHRINK';
+WHERE c.Verdict IN ('SHRINK', 'FORCE');
 
 UPDATE c
 SET AlterLogMB = CASE WHEN c.GoesOnline = 0 THEN c.OfflineLogMB
@@ -737,7 +923,7 @@ SET AlterLogMB = CASE WHEN c.GoesOnline = 0 THEN c.OfflineLogMB
                       ELSE 0.25 * (t.BaseMB - t.OffRowMB) + 0.75 * t.OffRowMB END
 FROM #Col AS c
 INNER JOIN #Tab AS t ON t.ObjectId = c.ObjectId
-WHERE c.Verdict = 'SHRINK';
+WHERE c.Verdict IN ('SHRINK', 'FORCE');
 
 -- =====================================================================================================
 -- 4. Roll up per table
@@ -747,7 +933,7 @@ IF OBJECT_ID('tempdb..#TabOut') IS NOT NULL DROP TABLE #TabOut;
 SELECT
     t.ObjectId,
     COUNT(*)                                                  AS MaxColumns,
-    SUM(CASE WHEN c.Verdict = 'SHRINK'   THEN 1 ELSE 0 END)   AS CanShrink,
+    SUM(CASE WHEN c.Verdict IN ('SHRINK', 'FORCE') THEN 1 ELSE 0 END) AS CanShrink,
     SUM(CASE WHEN c.Verdict = 'BLOCKED'  THEN 1 ELSE 0 END)   AS Blocked,
     SUM(CASE WHEN c.Verdict = 'KEEP MAX' THEN 1 ELSE 0 END)   AS KeepMax,
     SUM(CASE WHEN c.Verdict IN ('NO DATA', 'NOT SCANNED', 'SCAN FAILED') THEN 1 ELSE 0 END) AS Unknown,
@@ -755,8 +941,8 @@ SELECT
     SUM(ISNULL(c.OfflineLogMB, 0))                            AS SumOfflineMB,
     SUM(ISNULL(c.AlterLogMB, 0))                              AS SumScriptedMB,
     MAX(ISNULL(c.AlterLogMB, 0))                              AS MaxScriptedMB,
-    SUM(CASE WHEN c.Verdict = 'SHRINK' AND c.GoesOnline = 0 THEN 1 ELSE 0 END) AS OfflineAlters,
-    SUM(CASE WHEN c.Verdict = 'SHRINK' AND c.GoesOnline = 1 THEN 1 ELSE 0 END) AS OnlineAlters,
+    SUM(CASE WHEN c.Verdict IN ('SHRINK', 'FORCE') AND c.GoesOnline = 0 THEN 1 ELSE 0 END) AS OfflineAlters,
+    SUM(CASE WHEN c.Verdict IN ('SHRINK', 'FORCE') AND c.GoesOnline = 1 THEN 1 ELSE 0 END) AS OnlineAlters,
     -- REBUILD after offline ALTERs: ONLINE when the edition allows it. On a heap it rebuilds the nonclustered indexes too.
     MAX(CASE WHEN @OnlineOk = 1 AND @FullyLogged = 1 THEN t.BaseMB + t.ApproxRows * 350.0 / 1048576 + CASE WHEN t.IsHeap = 1 THEN t.NcIndexMB ELSE 0 END
              WHEN @OnlineOk = 1 THEN 0.25 * (t.BaseMB - t.OffRowMB + CASE WHEN t.IsHeap = 1 THEN t.NcIndexMB ELSE 0 END) + 0.75 * t.OffRowMB
@@ -790,7 +976,7 @@ SELECT
     @TablesFound                                                        AS TablesWithMaxColumns,
     (SELECT COUNT(*) FROM #Tab)                                         AS TablesChecked,
     COUNT(*)                                                            AS MaxColumns,
-    SUM(CASE WHEN Verdict = 'SHRINK'      THEN 1 ELSE 0 END)            AS Shrink,
+    SUM(CASE WHEN Verdict IN ('SHRINK', 'FORCE') THEN 1 ELSE 0 END)     AS Shrink,
     SUM(CASE WHEN Verdict = 'BLOCKED'     THEN 1 ELSE 0 END)            AS Blocked,
     SUM(CASE WHEN Verdict = 'KEEP MAX'    THEN 1 ELSE 0 END)            AS KeepMax,
     SUM(CASE WHEN Verdict = 'NO DATA'     THEN 1 ELSE 0 END)            AS NoData,
@@ -889,7 +1075,7 @@ SELECT
     c.NonNullRows,
     c.RowsOver4000,
     CAST(c.TotalBytes / 1048576.0 AS decimal(18, 1))                                              AS ColumnMB,
-    CASE WHEN c.Verdict = 'SHRINK' THEN CASE WHEN c.GoesOnline = 1 THEN 'ONLINE' ELSE 'OFFLINE' END END AS AlterRuns,
+    CASE WHEN c.Verdict IN ('SHRINK', 'FORCE') THEN CASE WHEN c.GoesOnline = 1 THEN 'ONLINE' ELSE 'OFFLINE' END END AS AlterRuns,
     c.AlterLogMB                                                                                  AS LogMB_Alter,
     CASE c.Verdict
         WHEN 'NOT SCANNED' THEN N'About ' + FORMAT(t.ApproxRows, 'N0') + N' rows, over @MaxRowsToScan. Raise the limit and run off-hours.'
@@ -901,6 +1087,10 @@ SELECT
         WHEN 'BLOCKED'     THEN N'Fits nvarchar(' + CAST(c.NewLen AS nvarchar(10)) + N'), but needs a hand-written change because of: '
                                 + ISNULL(t.TableBlocker, N'') + CASE WHEN t.TableBlocker IS NOT NULL AND c.Blockers IS NOT NULL THEN N'; ' ELSE N'' END
                                 + ISNULL(c.Blockers, N'') + N'.'
+                                + CASE WHEN @ForceBlocked = 1 THEN N' Not forced: ' + ISNULL(c.ForceNote, N'the table itself blocks it') + N'.' ELSE N'' END
+        WHEN 'FORCE'       THEN N'Headroom ' + FORMAT(100.0 * (c.NewLen - c.MaxChars) / c.MaxChars, 'N0') + N'% over the longest value. Forced: '
+                                + c.Blockers + N' dropped and re-created around the ALTER in one transaction, so it runs offline.'
+                                + CASE WHEN c.DefaultName IS NOT NULL THEN N' Default ' + QUOTENAME(c.DefaultName) + N' too.' ELSE N'' END
         WHEN 'SHRINK'      THEN N'Headroom ' + FORMAT(100.0 * (c.NewLen - c.MaxChars) / c.MaxChars, 'N0') + N'% over the longest value.'
                                 + CASE WHEN c.DefaultName IS NOT NULL THEN N' Default ' + QUOTENAME(c.DefaultName) + N' is dropped and re-created around the ALTER, so it runs offline.' ELSE N'' END
                                 + CASE WHEN c.DefaultName IS NULL AND @OnlineOk = 1 AND t.OnlineBar IS NOT NULL THEN N' Offline because ' + t.OnlineBar + N'.' ELSE N'' END
@@ -937,6 +1127,10 @@ BEGIN
         (0, 0, 7, N'SET XACT_ABORT ON; SET LOCK_TIMEOUT 10000;   -- give up after 10 seconds rather than queue behind a long transaction and block everyone else'),
         (0, 0, 8, N'GO');
 
+    IF @ForceBlocked = 1
+        INSERT INTO #Fix (TableRank, ColumnId, Part, Script)
+        VALUES (0, 0, 3, N'-- A forced column drops its blocking index, statistics or check constraint, changes the column and re-creates them in ONE transaction. If a step fails, all of it rolls back.');
+
     -- TABLE mode: a header line per table
     IF @FixScript = 'TABLE'
         INSERT INTO #Fix (TableRank, ColumnId, Part, Script)
@@ -957,19 +1151,31 @@ BEGIN
     CROSS APPLY (SELECT N'nvarchar(' + CAST(c.NewLen AS nvarchar(10)) + N')' + ISNULL(N' COLLATE ' + c.CollationName, N'')
                         + CASE WHEN c.IsNullable = 1 THEN N' NULL' ELSE N' NOT NULL' END AS NewType) AS n
     CROSS APPLY (VALUES
-        (1, N'-- ' + t.FullName + N'.' + QUOTENAME(c.ColumnName) + N': nvarchar(max) -> nvarchar(' + CAST(c.NewLen AS nvarchar(10)) + N'). Longest value '
+        (10, N'-- ' + t.FullName + N'.' + QUOTENAME(c.ColumnName) + N': nvarchar(max) -> nvarchar(' + CAST(c.NewLen AS nvarchar(10)) + N'). Longest value '
             + FORMAT(c.MaxChars, 'N0') + N' characters in ' + FORMAT(c.RowCnt, 'N0') + N' rows. Estimated log ' + FORMAT(c.AlterLogMB, 'N0') + N' MB, '
-            + CASE WHEN c.GoesOnline = 1 THEN N'online.' ELSE N'offline.' END),
-        (2, CASE WHEN c.DefaultName IS NOT NULL THEN N'BEGIN TRANSACTION;' END),
-        (3, CASE WHEN c.DefaultName IS NOT NULL THEN N'ALTER TABLE ' + t.FullName + N' DROP CONSTRAINT ' + QUOTENAME(c.DefaultName) + N';' END),
-        (4, N'ALTER TABLE ' + t.FullName + N' ALTER COLUMN ' + QUOTENAME(c.ColumnName) + N' ' + n.NewType
+            + CASE WHEN c.GoesOnline = 1 THEN N'online.' ELSE N'offline.' END
+            + CASE WHEN c.Verdict = 'FORCE' THEN N' Forced: drops and re-creates ' + c.Blockers + N'.' ELSE N'' END),
+        (20, CASE WHEN c.DefaultName IS NOT NULL OR c.Verdict = 'FORCE' THEN N'BEGIN TRANSACTION;' END),
+        (30, CASE WHEN c.DefaultName IS NOT NULL THEN N'ALTER TABLE ' + t.FullName + N' DROP CONSTRAINT ' + QUOTENAME(c.DefaultName) + N';' END),
+        (500, N'ALTER TABLE ' + t.FullName + N' ALTER COLUMN ' + QUOTENAME(c.ColumnName) + N' ' + n.NewType
             + CASE WHEN c.GoesOnline = 1 THEN N' WITH (ONLINE = ON);' ELSE N';' END),
-        (5, CASE WHEN c.DefaultName IS NOT NULL THEN N'ALTER TABLE ' + t.FullName + N' ADD CONSTRAINT ' + QUOTENAME(c.DefaultName) + N' DEFAULT ' + c.DefaultDef
+        (800, CASE WHEN c.DefaultName IS NOT NULL THEN N'ALTER TABLE ' + t.FullName + N' ADD CONSTRAINT ' + QUOTENAME(c.DefaultName) + N' DEFAULT ' + c.DefaultDef
                                                      + N' FOR ' + QUOTENAME(c.ColumnName) + N';' END),
-        (6, CASE WHEN c.DefaultName IS NOT NULL THEN N'COMMIT TRANSACTION;' END),
-        (7, N'GO')
+        (900, CASE WHEN c.DefaultName IS NOT NULL OR c.Verdict = 'FORCE' THEN N'COMMIT TRANSACTION;' END),
+        (990, N'GO')
     ) AS p (Part, Script)
-    WHERE c.Verdict = 'SHRINK' AND p.Script IS NOT NULL;
+    WHERE c.Verdict IN ('SHRINK', 'FORCE') AND p.Script IS NOT NULL;
+
+    -- a forced column: its blockers go before the ALTER (part 100) and come back after it (600, then 601)
+    INSERT INTO #Fix (TableRank, ColumnId, Part, Script)
+    SELECT t.TableRank, c.ColumnId, p.Part, p.Script
+    FROM #Col AS c
+    INNER JOIN #Tab AS t ON t.ObjectId = c.ObjectId
+    INNER JOIN #BlkObj AS bo ON bo.ObjectId = c.ObjectId
+    CROSS APPLY (VALUES (100, bo.DropSql), (600, bo.CreateSql), (601, bo.PostSql)) AS p (Part, Script)
+    WHERE c.Verdict = 'FORCE' AND p.Script IS NOT NULL
+      AND EXISTS (SELECT 1 FROM #Blk AS b
+                  WHERE b.ObjectId = c.ObjectId AND b.ColumnId = c.ColumnId AND b.Kind = bo.Kind AND b.RefId = bo.RefId);
 
     -- after the last column of a table: give back the space the old values still hold (offline ALTERs only)
     INSERT INTO #Fix (TableRank, ColumnId, Part, Script)
@@ -990,5 +1196,5 @@ BEGIN
 
     SELECT f.Script
     FROM #Fix AS f
-    ORDER BY f.TableRank, f.ColumnId, f.Part;
+    ORDER BY f.TableRank, f.ColumnId, f.Part, f.Script;
 END;
