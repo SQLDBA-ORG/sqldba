@@ -20,17 +20,26 @@
      The Why column then says which top queries use each column itself (read or write): a table can be
      in a plan through an index that never carries the nvarchar(max) column.
      Where the queries come from (@TopQueriesFrom): Query Store when it is on for this database and holds
-     data, because it survives restarts and memory pressure; otherwise the plan cache, which can be nearly
+     data for the last @TopQueriesDays days, because it survives restarts and memory pressure; otherwise
+     the plan cache, which can be nearly
      empty on a server short of memory or just restarted. The TopQueries result names the source that was
      used, and its LastSeen column shows how fresh each query is (a Query Store that went read-only is stale).
-     Plan cache: only queries compiled in this database's context are ranked. Query Store: all of its
-     retained history is ranked. The audit's own table scans are left out by a marker comment.
+     Plan cache: the instance's 5,000 heaviest cached statements are looked at, and of those only the
+     ones compiled in this database's context are ranked. Query Store: the last @TopQueriesDays days are
+     ranked (default 7; NULL = everything it holds, which is slow on a large Query Store).
+     The audit's own table scans are left out by a marker comment.
      A heavy query with no plan to read (a single-use ad hoc query under 'optimize for ad hoc workloads',
      or a plan already evicted) is listed with a blank rank and does not use up a place either.
-     Limits, so it stays cheap on a busy server: at most N + 100 plans, read one at a time, and it stops as
-     soon as N queries are kept. MAXDOP 1, memory grant capped at 1%. A plan over 5 million characters, or nested too deep to load as XML, is skipped
-     and shown as not read. The plan read can still wait if the server has no query memory free at all.
-     On a large Query Store the ranking is one pass over its runtime statistics and can take a minute.
+     Limits, so it stays cheap on a busy server: at most N + 100 plans, read one at a time as plain text
+     (no XML is loaded, so the read needs no memory grant), and it stops as soon as N queries are kept.
+     Every ranking step runs MAXDOP 1 with its memory grant capped at 1%, because the optimizer
+     over-estimates Query Store and asks for far too much: on a server short of query memory an uncapped
+     step queued for minutes (RESOURCE_SEMAPHORE, measured 2026-11-24). A plan over 5 million characters
+     is skipped and shown as not read. A ranking step can still wait a little if the server has no query
+     memory free at all.
+     The ranking works in small steps through temp tables: one pass over Query Store's runtime
+     statistics, then text and plans for about 100 queries only.
+     The Messages tab shows a line with the elapsed time after each step, so a slow step names itself.
 
    VERDICTS (result set 3)
      SHRINK       every value fits nvarchar(4000) and nothing blocks ALTER COLUMN. A fix is scripted.
@@ -74,6 +83,7 @@ DECLARE
     @TopQueries    int           = NULL,        -- NULL = off, or N (1 to 100) = high impact only: keep the tables the N heaviest queries touch
     @TopQueriesBy  varchar(10)   = 'CPU',       -- what "heaviest" means: CPU | READS | DURATION | GRANT (memory)
     @TopQueriesFrom varchar(10)  = 'AUTO',      -- AUTO (Query Store if it is on and holds data, else the plan cache) | QUERYSTORE | CACHE
+    @TopQueriesDays int          = 7,           -- Query Store only: rank the last N days; NULL = everything it holds (slow on a large one)
     @MaxRowsToScan bigint        = 50000000,    -- bigger tables are listed but not scanned; NULL = scan everything
     @ScanMaxDop    int           = 2,           -- MAXDOP for each scan; NULL = server default
     @HeadroomPct   int           = 50,          -- suggested size = longest value + this %, rounded up to a tidy size
@@ -95,8 +105,9 @@ END;
 IF @TopQueries < 1 OR @TopQueries > 100
    OR @TopQueriesBy IS NULL OR @TopQueriesBy NOT IN ('CPU', 'READS', 'DURATION', 'GRANT')
    OR @TopQueriesFrom IS NULL OR @TopQueriesFrom NOT IN ('AUTO', 'QUERYSTORE', 'CACHE')
+   OR @TopQueriesDays < 1
 BEGIN
-    RAISERROR('@TopQueries must be NULL or 1 to 100; @TopQueriesBy CPU, READS, DURATION or GRANT; @TopQueriesFrom AUTO, QUERYSTORE or CACHE.', 16, 1);
+    RAISERROR('@TopQueries must be NULL or 1 to 100; @TopQueriesBy CPU, READS, DURATION or GRANT; @TopQueriesFrom AUTO, QUERYSTORE or CACHE; @TopQueriesDays NULL or 1 or more.', 16, 1);
     RETURN;
 END;
 
@@ -104,6 +115,7 @@ END;
 -- 0. Environment
 -- =====================================================================================================
 DECLARE @Recovery nvarchar(60), @FullyLogged bit, @OnlineOk bit, @StatsSince datetime, @Msg nvarchar(2048);
+DECLARE @T0 datetime2(3) = SYSDATETIME();      -- start of the run, for the elapsed-time lines in Messages (@TopQueries only)
 
 SELECT @Recovery    = d.recovery_model_desc COLLATE DATABASE_DEFAULT,
        @FullyLogged = CASE WHEN d.recovery_model_desc = N'FULL' AND rs.last_log_backup_lsn IS NOT NULL THEN 1 ELSE 0 END
@@ -123,6 +135,10 @@ IF OBJECT_ID('tempdb..#Fix')  IS NOT NULL DROP TABLE #Fix;
 IF OBJECT_ID('tempdb..#TopQ') IS NOT NULL DROP TABLE #TopQ;
 IF OBJECT_ID('tempdb..#Cand') IS NOT NULL DROP TABLE #Cand;
 IF OBJECT_ID('tempdb..#PlanRef') IS NOT NULL DROP TABLE #PlanRef;
+IF OBJECT_ID('tempdb..#QsPlan') IS NOT NULL DROP TABLE #QsPlan;
+IF OBJECT_ID('tempdb..#QsTop')  IS NOT NULL DROP TABLE #QsTop;
+IF OBJECT_ID('tempdb..#QsRows') IS NOT NULL DROP TABLE #QsRows;
+IF OBJECT_ID('tempdb..#QsDb')   IS NOT NULL DROP TABLE #QsDb;
 
 -- =====================================================================================================
 -- 1. Find the tables and columns (catalog only)
@@ -200,13 +216,6 @@ INNER JOIN (SELECT object_id,
             WHERE database_id = DB_ID() AND index_id IN (0, 1)
             GROUP BY object_id) AS u ON u.object_id = t.ObjectId;
 
-UPDATE t
-SET LobFetches = o.Pages
-FROM #Tab AS t
-INNER JOIN (SELECT object_id, SUM(lob_fetch_in_pages + row_overflow_fetch_in_pages) AS Pages
-            FROM sys.dm_db_index_operational_stats(DB_ID(), NULL, NULL, NULL)
-            GROUP BY object_id) AS o ON o.object_id = t.ObjectId;
-
 DECLARE @DbBaseReads bigint =
     (SELECT SUM(u.user_seeks + u.user_scans + u.user_lookups)
      FROM sys.dm_db_index_usage_stats AS u
@@ -241,53 +250,113 @@ DECLARE @QSource varchar(10) = NULL;
 
 IF @TopQueries IS NOT NULL
 BEGIN
+    SET @Msg = FORMAT(DATEDIFF(MILLISECOND, @T0, SYSDATETIME()) / 1000.0, 'N1') + N' s: ' + CAST(@TablesFound AS nvarchar(10)) + N' tables have an nvarchar(max) column. Choosing where to rank the top queries.';
+    RAISERROR('%s', 0, 1, @Msg) WITH NOWAIT;
+
+    -- Query Store window: the first interval that ends inside the last @TopQueriesDays days (NULL days = no lower bound)
+    DECLARE @MinInterval bigint = NULL, @QsUsable bit = 0;
+
+    IF EXISTS (SELECT 1 FROM sys.database_query_store_options WHERE actual_state IN (1, 2))
+    BEGIN
+        IF @TopQueriesDays IS NOT NULL
+            SELECT @MinInterval = MIN(i.runtime_stats_interval_id)
+            FROM sys.query_store_runtime_stats_interval AS i
+            WHERE i.end_time >= DATEADD(DAY, -@TopQueriesDays, SYSDATETIMEOFFSET());
+
+        IF @TopQueriesDays IS NULL OR @MinInterval IS NOT NULL
+            IF EXISTS (SELECT 1 FROM sys.query_store_runtime_stats AS rs
+                       WHERE rs.runtime_stats_interval_id >= ISNULL(@MinInterval, 0))
+                SET @QsUsable = 1;
+    END;
+
     SET @QSource = CASE WHEN @TopQueriesFrom <> 'AUTO' THEN @TopQueriesFrom
-                        WHEN EXISTS (SELECT 1 FROM sys.database_query_store_options WHERE actual_state IN (1, 2))
-                             AND EXISTS (SELECT 1 FROM sys.query_store_runtime_stats) THEN 'QUERYSTORE'
+                        WHEN @QsUsable = 1 THEN 'QUERYSTORE'
                         ELSE 'CACHE' END;
 
+    SET @Msg = FORMAT(DATEDIFF(MILLISECOND, @T0, SYSDATETIME()) / 1000.0, 'N1') + N' s: ranking queries by ' + @TopQueriesBy + N' from '
+             + CASE @QSource WHEN 'QUERYSTORE' THEN N'Query Store' + ISNULL(N', last ' + CAST(@TopQueriesDays AS nvarchar(10)) + N' days', N', all it holds')
+                             ELSE N'the plan cache' END + N'.';
+    RAISERROR('%s', 0, 1, @Msg) WITH NOWAIT;
+
     IF @QSource = 'QUERYSTORE'
+    BEGIN
+        -- Step 1: one pass over the runtime statistics, nothing joined, summed per plan.
+        SELECT rs.plan_id,
+               SUM(CASE @TopQueriesBy WHEN 'CPU'      THEN rs.avg_cpu_time * rs.count_executions / 1000
+                                      WHEN 'READS'    THEN rs.avg_logical_io_reads * rs.count_executions
+                                      WHEN 'DURATION' THEN rs.avg_duration * rs.count_executions / 1000
+                                      ELSE                 rs.avg_query_max_used_memory * rs.count_executions * 8 END) AS Measure,
+               SUM(rs.count_executions)    AS Executions,
+               MAX(rs.last_execution_time) AS LastSeen
+        INTO #QsPlan
+        FROM sys.query_store_runtime_stats AS rs
+        WHERE rs.runtime_stats_interval_id >= ISNULL(@MinInterval, 0)
+        GROUP BY rs.plan_id
+        OPTION (RECOMPILE, MAXDOP 1, MAX_GRANT_PERCENT = 1);
+
+        -- Step 2: plans to queries in one join that carries no text and no plan. Keep the heaviest N + 100 queries
+        -- (spare: a query that names no user table is passed over), each with the plan it used last in the window.
+        SELECT TOP (@TopQueries + 100)
+               x.query_id, x.plan_id, x.Measure, x.Executions, x.LastSeen
+        INTO #QsTop
+        FROM (SELECT p.query_id, p.plan_id,
+                     CAST(SUM(a.Measure) OVER (PARTITION BY p.query_id) AS bigint) AS Measure,
+                     SUM(a.Executions)   OVER (PARTITION BY p.query_id)            AS Executions,
+                     MAX(a.LastSeen)     OVER (PARTITION BY p.query_id)            AS LastSeen,
+                     ROW_NUMBER()        OVER (PARTITION BY p.query_id ORDER BY a.LastSeen DESC, p.plan_id DESC) AS rn
+              FROM #QsPlan AS a
+              INNER JOIN sys.query_store_plan AS p ON p.plan_id = a.plan_id) AS x
+        WHERE x.rn = 1
+        ORDER BY x.Measure DESC, x.query_id
+        OPTION (MAXDOP 1, MAX_GRANT_PERCENT = 1);
+
+        -- Step 3: text and plan for those queries only, each found by its key.
         INSERT INTO #TopQ (QueryRank, Measure, Executions, LastSeen, QueryText, PlanText)
-        SELECT TOP (@TopQueries + 100)       -- spare candidates: a query that names no user table is passed over
-               ROW_NUMBER() OVER (ORDER BY g.Measure DESC, g.query_id),
+        SELECT ROW_NUMBER() OVER (ORDER BY g.Measure DESC, g.query_id),
                g.Measure, g.Executions,
                CAST(SWITCHOFFSET(g.LastSeen, DATENAME(TZOFFSET, SYSDATETIMEOFFSET())) AS datetime),
                LEFT(REPLACE(REPLACE(REPLACE(qt.query_sql_text, NCHAR(13), N' '), NCHAR(10), N' '), NCHAR(9), N' '), 400),
-               bp.query_plan
-        FROM (SELECT p.query_id,
-                     CAST(SUM(CASE @TopQueriesBy WHEN 'CPU'      THEN rs.avg_cpu_time * rs.count_executions / 1000
-                                                 WHEN 'READS'    THEN rs.avg_logical_io_reads * rs.count_executions
-                                                 WHEN 'DURATION' THEN rs.avg_duration * rs.count_executions / 1000
-                                                 ELSE                 rs.avg_query_max_used_memory * rs.count_executions * 8 END) AS bigint) AS Measure,
-                     SUM(rs.count_executions)    AS Executions,
-                     MAX(rs.last_execution_time) AS LastSeen
-              FROM sys.query_store_runtime_stats AS rs
-              INNER JOIN sys.query_store_plan AS p ON p.plan_id = rs.plan_id
-              GROUP BY p.query_id) AS g
+               p.query_plan
+        FROM #QsTop AS g
         INNER JOIN sys.query_store_query AS q ON q.query_id = g.query_id
         INNER JOIN sys.query_store_query_text AS qt ON qt.query_text_id = q.query_text_id
-        CROSS APPLY (SELECT TOP (1) p2.query_plan
-                     FROM sys.query_store_plan AS p2
-                     WHERE p2.query_id = g.query_id
-                     ORDER BY p2.last_execution_time DESC) AS bp
+        INNER JOIN sys.query_store_plan AS p ON p.plan_id = g.plan_id
         WHERE q.is_internal_query = 0
-          AND qt.query_sql_text NOT LIKE N'%nvarchar(max) right-sizing audit%'
-        ORDER BY g.Measure DESC, g.query_id;
+        OPTION (MAXDOP 1, MAX_GRANT_PERCENT = 1);
+
+        -- the audit's own scans, by their marker (it sits in the first 400 characters of the statement)
+        DELETE FROM #TopQ WHERE QueryText LIKE N'%nvarchar(max) right-sizing audit%';
+    END;
     ELSE
     BEGIN
         -- Plan cache. The same query cached many times (different literals) is one query: grouped by query_hash.
+        SELECT TOP (5000)
+               qs.plan_handle, qs.sql_handle, qs.statement_start_offset, qs.statement_end_offset, qs.creation_time, qs.execution_count, qs.query_hash,
+               CAST(CASE @TopQueriesBy WHEN 'CPU'      THEN qs.total_worker_time / 1000
+                                       WHEN 'READS'    THEN qs.total_logical_reads
+                                       WHEN 'DURATION' THEN qs.total_elapsed_time / 1000
+                                       ELSE                 ISNULL(qs.total_grant_kb, 0) END AS bigint) AS Measure
+        INTO #QsRows
+        FROM sys.dm_exec_query_stats AS qs
+        ORDER BY Measure DESC
+        OPTION (MAXDOP 1, MAX_GRANT_PERCENT = 1);
+
+        -- which of their plans were compiled in this database's context
+        SELECT h.plan_handle
+        INTO #QsDb
+        FROM (SELECT DISTINCT plan_handle FROM #QsRows) AS h
+        CROSS APPLY sys.dm_exec_plan_attributes(h.plan_handle) AS pa
+        WHERE pa.attribute = N'dbid' AND CAST(pa.value AS int) = DB_ID()
+        OPTION (MAXDOP 1, MAX_GRANT_PERCENT = 1);
+
         WITH s AS (
             SELECT qs.plan_handle, qs.sql_handle, qs.statement_start_offset, qs.statement_end_offset, qs.creation_time, qs.execution_count,
-                   CAST(CASE @TopQueriesBy WHEN 'CPU'      THEN qs.total_worker_time / 1000
-                                           WHEN 'READS'    THEN qs.total_logical_reads
-                                           WHEN 'DURATION' THEN qs.total_elapsed_time / 1000
-                                           ELSE                 ISNULL(qs.total_grant_kb, 0) END AS bigint) AS Measure,
+                   qs.Measure,
                    CASE WHEN qs.query_hash = 0x0000000000000000
                         THEN CAST(qs.plan_handle AS varbinary(72)) + CAST(qs.statement_start_offset AS binary(4))
                         ELSE CAST(qs.query_hash AS varbinary(72)) END AS GroupKey
-            FROM sys.dm_exec_query_stats AS qs
-            CROSS APPLY sys.dm_exec_plan_attributes(qs.plan_handle) AS pa
-            WHERE pa.attribute = N'dbid' AND CAST(pa.value AS int) = DB_ID()
+            FROM #QsRows AS qs
+            INNER JOIN #QsDb AS d ON d.plan_handle = qs.plan_handle
         ), g AS (
             SELECT s.*,
                    SUM(s.Measure)         OVER (PARTITION BY s.GroupKey) AS GroupMeasure,
@@ -301,7 +370,8 @@ BEGIN
         INTO #Cand
         FROM g
         WHERE g.rn = 1
-        ORDER BY g.GroupMeasure DESC, g.GroupKey;
+        ORDER BY g.GroupMeasure DESC, g.GroupKey
+        OPTION (MAXDOP 1, MAX_GRANT_PERCENT = 1);
 
         INSERT INTO #TopQ (QueryRank, Measure, Executions, LastSeen, QueryText, PlanHandle, StartOffset, EndOffset)
         SELECT TOP (@TopQueries + 100)
@@ -316,7 +386,8 @@ BEGIN
         FROM #Cand AS c
         OUTER APPLY sys.dm_exec_sql_text(c.sql_handle) AS st
         WHERE ISNULL(st.text, N'') NOT LIKE N'%nvarchar(max) right-sizing audit%'
-        ORDER BY c.GroupMeasure DESC, c.GroupKey;
+        ORDER BY c.GroupMeasure DESC, c.GroupKey
+        OPTION (MAXDOP 1, MAX_GRANT_PERCENT = 1);
 
         -- plan text for the candidates only
         UPDATE q
@@ -325,11 +396,25 @@ BEGIN
         OUTER APPLY sys.dm_exec_text_query_plan(q.PlanHandle, q.StartOffset, q.EndOffset) AS tp;
     END;
 
-    -- Read the plans one at a time. Each read is one small XML shred: MAXDOP 1, memory grant capped.
-    -- A candidate is kept when its plan names a user table of this database, or when it has a plan that
-    -- could not be read (too big or too deep). One with no plan at all is listed but takes no place.
-    -- One whose plan names no user table is dropped. The read stops at @TopQueries kept.
-    DECLARE @Rank int, @PlanText nvarchar(max), @PlanXml xml, @PlanRead nvarchar(200), @DbQ nvarchar(260) = QUOTENAME(DB_NAME()), @Kept int = 0;
+    SET @Msg = FORMAT(DATEDIFF(MILLISECOND, @T0, SYSDATETIME()) / 1000.0, 'N1') + N' s: ' + CAST((SELECT COUNT(*) FROM #TopQ) AS nvarchar(10)) + N' candidate queries ranked. Reading their plans.';
+    RAISERROR('%s', 0, 1, @Msg) WITH NOWAIT;
+
+    -- Read the plans one at a time, as TEXT. A plan names what it touches as
+    --     Database="[db]" Schema="[schema]" Table="[table]" [Alias="[a]"] Column="column"
+    -- (Column only on a column reference; names XML-escaped). One pass over the text finds every such
+    -- reference. Nothing here sorts, hashes or loads XML, so it needs no memory grant: reading the same
+    -- plan through XML queued 11 to 70 seconds for memory on a server short of it (measured 2026-11-24).
+    -- A candidate is kept when its plan names a user table of this database. One with no plan at all is
+    -- listed but takes no place. One whose plan names no user table is dropped. The read stops at
+    -- @TopQueries kept.
+    DECLARE @Rank int, @PlanText nvarchar(max), @PlanRead nvarchar(200), @Kept int = 0, @PlansRead int = 0,
+            @DbPfx nvarchar(600), @Pos bigint, @Q1 bigint, @Q2 bigint, @Cur bigint, @Refs int,
+            @Sch nvarchar(1000), @Tbl nvarchar(1000), @ColName nvarchar(1000),
+            @LastSch nvarchar(1000), @LastTbl nvarchar(1000), @LastCol nvarchar(1000);
+
+    -- the database name as the plan writes it: bracketed, then XML-escaped
+    SET @DbPfx = N'Database="' + REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(QUOTENAME(DB_NAME()), N'&', N'&amp;'), N'<', N'&lt;'), N'>', N'&gt;'), N'"', N'&quot;'), N'''', N'&apos;')
+               + N'" Schema="';
 
     DECLARE PlanCursor CURSOR LOCAL FAST_FORWARD FOR
         SELECT QueryRank, PlanText FROM #TopQ ORDER BY QueryRank;
@@ -339,7 +424,7 @@ BEGIN
 
     WHILE @@FETCH_STATUS = 0 AND @Kept < @TopQueries
     BEGIN
-        SET @PlanXml = NULL;
+        SET @PlansRead += 1;
 
         IF @PlanText IS NULL
             SET @PlanRead = CASE WHEN @QSource = 'CACHE' THEN N'No: no plan in the cache (single-use ad hoc query, or evicted). Not counted.'
@@ -348,33 +433,59 @@ BEGIN
             SET @PlanRead = N'No: plan is over 5 million characters';
         ELSE
         BEGIN
-            SET @PlanXml = TRY_CAST(@PlanText AS xml);
+            SELECT @Refs = 0, @LastSch = NULL, @LastTbl = NULL, @LastCol = NULL;
+            SET @Pos = CHARINDEX(@DbPfx COLLATE Latin1_General_100_BIN2, @PlanText COLLATE Latin1_General_100_BIN2);
 
-            IF @PlanXml IS NULL
-                SET @PlanRead = N'No: plan does not load as XML (nested too deep)';
-            ELSE
-            BEGIN TRY
-                WITH XMLNAMESPACES (DEFAULT 'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
-                INSERT INTO #PlanRef (QueryRank, SchemaQ, TableQ, ColumnName)
-                SELECT DISTINCT @Rank, r.SchemaQ, r.TableQ, r.ColumnName
-                FROM (SELECT n.value('@Schema', 'nvarchar(260)') AS SchemaQ,
-                             n.value('@Table',  'nvarchar(260)') AS TableQ,
-                             CASE WHEN n.value('local-name(.)', 'nvarchar(60)') = N'ColumnReference'
-                                  THEN n.value('@Column', 'nvarchar(260)') END AS ColumnName
-                      FROM @PlanXml.nodes('//*[@Database = sql:variable("@DbQ")][@Schema][@Table]') AS x (n)) AS r
-                WHERE r.SchemaQ IS NOT NULL AND r.TableQ IS NOT NULL
-                OPTION (MAXDOP 1, MAX_GRANT_PERCENT = 1);
+            WHILE @Pos > 0 AND @Refs < 200000
+            BEGIN
+                SET @Refs += 1;
+                SET @Cur = @Pos + LEN(@DbPfx);                                                      -- first character of the schema value
+                SET @Q1  = CHARINDEX(N'"', @PlanText COLLATE Latin1_General_100_BIN2, @Cur);        -- its closing quote
+                SELECT @Sch = SUBSTRING(@PlanText, @Cur, @Q1 - @Cur), @Tbl = NULL, @ColName = NULL;
 
-                SET @PlanRead = N'Yes';
-            END TRY
-            BEGIN CATCH
-                SET @PlanRead = LEFT(N'No: Msg ' + CAST(ERROR_NUMBER() AS nvarchar(10)) + N': ' + ERROR_MESSAGE(), 200);
-            END CATCH;
+                IF @Q1 > 0 AND SUBSTRING(@PlanText, @Q1, 9) COLLATE Latin1_General_100_BIN2 = N'" Table="'
+                BEGIN
+                    SET @Cur = @Q1 + 9;
+                    SET @Q2  = CHARINDEX(N'"', @PlanText COLLATE Latin1_General_100_BIN2, @Cur);
+                    SET @Tbl = SUBSTRING(@PlanText, @Cur, @Q2 - @Cur);
+                    SET @Cur = @Q2;
+
+                    IF SUBSTRING(@PlanText, @Cur, 9) COLLATE Latin1_General_100_BIN2 = N'" Alias="'
+                        SET @Cur = CHARINDEX(N'"', @PlanText COLLATE Latin1_General_100_BIN2, @Cur + 9);   -- step over the alias
+
+                    IF SUBSTRING(@PlanText, @Cur, 10) COLLATE Latin1_General_100_BIN2 = N'" Column="'
+                    BEGIN
+                        SET @Q2 = CHARINDEX(N'"', @PlanText COLLATE Latin1_General_100_BIN2, @Cur + 10);
+                        SET @ColName = SUBSTRING(@PlanText, @Cur + 10, @Q2 - @Cur - 10);
+                    END;
+
+                    -- a plan repeats the same reference many times in a row: store a change only
+                    IF @LastSch IS NULL OR @Sch <> @LastSch COLLATE Latin1_General_100_BIN2 OR @Tbl <> @LastTbl COLLATE Latin1_General_100_BIN2
+                       OR ISNULL(@ColName, N'"') <> ISNULL(@LastCol, N'"') COLLATE Latin1_General_100_BIN2
+                    BEGIN
+                        SELECT @LastSch = @Sch, @LastTbl = @Tbl, @LastCol = @ColName;
+                        -- back from XML text to the real name (&amp; last)
+                        SELECT @Sch     = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(@Sch,     N'&lt;', N'<'), N'&gt;', N'>'), N'&quot;', N'"'), N'&apos;', N''''), N'&amp;', N'&'),
+                               @Tbl     = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(@Tbl,     N'&lt;', N'<'), N'&gt;', N'>'), N'&quot;', N'"'), N'&apos;', N''''), N'&amp;', N'&'),
+                               @ColName = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(@ColName, N'&lt;', N'<'), N'&gt;', N'>'), N'&quot;', N'"'), N'&apos;', N''''), N'&amp;', N'&');
+
+                        IF LEN(@Sch) <= 260 AND LEN(@Tbl) <= 260 AND ISNULL(LEN(@ColName), 0) <= 260
+                           AND NOT EXISTS (SELECT 1 FROM #PlanRef AS r
+                                           WHERE r.QueryRank = @Rank AND r.SchemaQ = @Sch AND r.TableQ = @Tbl
+                                             AND (r.ColumnName = @ColName OR (r.ColumnName IS NULL AND @ColName IS NULL)))
+                            INSERT INTO #PlanRef (QueryRank, SchemaQ, TableQ, ColumnName) VALUES (@Rank, @Sch, @Tbl, @ColName);
+                    END;
+                END;
+
+                SET @Pos = CHARINDEX(@DbPfx COLLATE Latin1_General_100_BIN2, @PlanText COLLATE Latin1_General_100_BIN2, @Pos + LEN(@DbPfx));
+            END;
+
+            SET @PlanRead = CASE WHEN @Refs < 200000 THEN N'Yes' ELSE N'Yes: first 200,000 references only' END;
         END;
 
         IF @PlanText IS NULL
             UPDATE #TopQ SET PlanRead = @PlanRead WHERE QueryRank = @Rank;
-        ELSE IF @PlanRead <> N'Yes' OR EXISTS (SELECT 1 FROM #PlanRef WHERE QueryRank = @Rank AND SchemaQ <> N'[sys]')
+        ELSE IF @PlanRead NOT LIKE N'Yes%' OR EXISTS (SELECT 1 FROM #PlanRef WHERE QueryRank = @Rank AND SchemaQ <> N'[sys]')
         BEGIN
             SET @Kept += 1;
             UPDATE #TopQ SET PlanRead = @PlanRead, KeepRank = @Kept WHERE QueryRank = @Rank;
@@ -396,6 +507,10 @@ BEGIN
     FROM #Tab AS t
     WHERE NOT EXISTS (SELECT 1 FROM #PlanRef AS r
                       WHERE r.SchemaQ = QUOTENAME(t.SchemaName) AND r.TableQ = QUOTENAME(t.TableName));
+
+    SET @Msg = FORMAT(DATEDIFF(MILLISECOND, @T0, SYSDATETIME()) / 1000.0, 'N1') + N' s: ' + CAST(@PlansRead AS nvarchar(10)) + N' plans read, ' + CAST(@Kept AS nvarchar(10)) + N' top queries kept, '
+             + CAST((SELECT COUNT(*) FROM #Tab) AS nvarchar(10)) + N' tables pass the filter. Scanning those next.';
+    RAISERROR('%s', 0, 1, @Msg) WITH NOWAIT;
 END;
 
 -- @TopTables: keep only the N most-read tables. Done here, before the scan, so the others cost nothing.
@@ -407,6 +522,21 @@ IF @TopTables IS NOT NULL
                        ROW_NUMBER() OVER (ORDER BY BaseReads DESC, BaseWrites DESC, BaseMB DESC, SchemaName, TableName) AS UsageRank
                 FROM #Tab) AS r ON r.ObjectId = t.ObjectId
     WHERE r.UsageRank > @TopTables;
+
+-- LobFetches, read after the cuts: per table when few are left, in one pass over the database otherwise
+IF (SELECT COUNT(*) FROM #Tab) <= 200
+    UPDATE t
+    SET LobFetches = ISNULL(o.Pages, 0)
+    FROM #Tab AS t
+    CROSS APPLY (SELECT SUM(os.lob_fetch_in_pages + os.row_overflow_fetch_in_pages) AS Pages
+                 FROM sys.dm_db_index_operational_stats(DB_ID(), t.ObjectId, NULL, NULL) AS os) AS o;
+ELSE
+    UPDATE t
+    SET LobFetches = o.Pages
+    FROM #Tab AS t
+    INNER JOIN (SELECT object_id, SUM(lob_fetch_in_pages + row_overflow_fetch_in_pages) AS Pages
+                FROM sys.dm_db_index_operational_stats(DB_ID(), NULL, NULL, NULL)
+                GROUP BY object_id) AS o ON o.object_id = t.ObjectId;
 
 CREATE TABLE #Col (
     ObjectId      int            NOT NULL,
