@@ -15,10 +15,11 @@ ALTER PROCEDURE [dbo].[sp_triage®]  --@Debug = 0]
 WANT [sp_triage®]?
 https://github.com/SQLDBA-ORG/sqldba/
 
-Supported platforms. Tested by recorded runs on SQL Server 2017 (14.0.2140.2) and SQL Server 2022 (16.0.4305.5), as a sysadmin login. A run as a login that is not sysadmin was proved on SQL Server 2022 (16.0.4305.5) and SQL Server 2017 (14.0.2140.2), as six login permission shapes, none sysadmin (with and without VIEW SERVER STATE, VIEW ANY DATABASE and VIEW ANY DEFINITION): it sends no error and returns its report, and each step the login may not run shows in the Could not run section. Not tested as a login that is not sysadmin: Azure SQL Managed Instance, Azure SQL Database, or a login that holds CONTROL SERVER without sysadmin. SQL Server 2008: the script parses as SQL Server 2008 T-SQL (a parse check only); it has never been installed or run on 2008. A step that needs a newer version shows in the Could not run section with its reason. Not tested on Azure SQL Managed Instance, Azure SQL Database, Amazon RDS or SQL Server on Linux: a run there starts with a "Not tested" first row.
+Supported platforms. Tested by recorded runs on SQL Server 2017 (14.0.2140.2) and SQL Server 2022 (16.0.4305.5 and 16.0.4315.2), as a sysadmin login. A run as a login that is not sysadmin was proved on SQL Server 2022 (16.0.4305.5) and SQL Server 2017 (14.0.2140.2), as six login permission shapes, none sysadmin (with and without VIEW SERVER STATE, VIEW ANY DATABASE and VIEW ANY DEFINITION): it sends no error and returns its report, and each step the login may not run shows in the Could not run section. Not tested as a login that is not sysadmin: Azure SQL Managed Instance, Azure SQL Database, or a login that holds CONTROL SERVER without sysadmin. SQL Server 2008: the script parses as SQL Server 2008 T-SQL (a parse check only); it has never been installed or run on 2008. A step that needs a newer version shows in the Could not run section with its reason. Not tested on Azure SQL Managed Instance, Azure SQL Database, Amazon RDS or SQL Server on Linux: a run there starts with a "Not tested" first row.
 
 Sample command:
 	EXEC  [dbo].[sp_triage®]  @MailResults = 1
+	EXEC  [dbo].[sp_triage®]  @Debug = 1, @Anonymise = 1
 	
 RAISERROR (N'SQL server evaluation script  adrian@sqldba.org ?',0,1) WITH NOWAIT;
 Thanks:
@@ -80,6 +81,7 @@ DROP PROCEDURE [master].[dbo].[sp_triage®]
 , @VersionDate DATETIME = NULL OUTPUT
 , @VersionCheckMode BIT = 0
 , @ErrorLogMaxMB [INT] = 50 /*Error log files over this many MB are not read: the SQL Server log archives sp_triage reads and the Agent log it reads. Each one left out gets a row in its error-log section. The current SQL Server log (archive 0) over the cap is read for its last 7 days only. Default 50. NULL = no cap: every log is read as before. Appended LAST on purpose - positional callers must not shift.*/
+, @Anonymise BIT = 0 /*1 = share the output without naming the server. Every result set and every message shows these names as tokens (DB_01, SERVER_01, DOMAIN_01, LOGIN_01, PATH_01, IP_01), in any letter case, each name with one token for the run: user database names (from the databases, the backup history and the default trace); server, machine, instance, host, cluster node, replica, listener and linked server names; the domain; logins and service accounts; database, backup, error log and trace file paths and folders, and the host and share of a network path; IP addresses. In messages, a SQL error shows its error number only. A Could not run row keeps SQL's error text, with the names above hidden. Step names, section names, timings, counts and error numbers stay readable. An anonymised run writes nothing to the export table (it runs as @Export = SCREEN). Not hidden: object names (tables, indexes, procedures), Agent job names, query text, application names, certificate names and subjects, error log and trace text other than the names above, a folder above a seeded folder, and any name this login cannot read. A database, login or file name under 4 characters, or made only of digits, is hidden only inside square brackets or quotes. A domain or server name under 4 characters, and an IP address, is hidden only where a space, an ASCII punctuation mark or the edge of the text stands on each side of it. An IP address right before or right after a full stop is not hidden. A short instance name right after -s in a service start parameter is not hidden. A name that is exactly a built-in SQL Server or Windows word (such as sa, dbo, guest, public, system, administrator, users, everyone, localhost) is not hidden. A name that is also a word of the script's own text (a database called Backup, a domain called IT) is replaced in result rows too. A text value near 4,000 characters may lose its tail when a token is longer than the name. Text holding a control character other than TAB, CR and LF is not matched, and a private-use character already in the output shows as ?. Measured 2026-11-28 on SQL Server 2022: the hiding step took 24 to 62 seconds on 20,000 output rows, with 300 names and with 2,000 names. If a name source could not be read, the output's first row says so. If the hiding step fails, the run shows no rows, or one row that says so. Default 0: the run is unchanged. Appended LAST on purpose - positional callers must not shift.*/
 WITH RECOMPILE/*, ENCRYPTION*/
 AS
 BEGIN
@@ -100,8 +102,12 @@ BEGIN
 	SET LOCK_TIMEOUT 5000;
 	SET DEADLOCK_PRIORITY LOW;
 
-	SELECT @Version = '2026.11.19', @VersionDate = '20261119';
+	SELECT @Version = '2026.11.28', @VersionDate = '20261128';
 	IF @VersionCheckMode = 1 RETURN;
+	/* @Anonymise: NULL means 0. An anonymised run writes NOTHING
+	   to the export table, so it is a SCREEN run; this sits before the first read of @Export. */
+	SET @Anonymise = ISNULL(@Anonymise, 0);
+	IF @Anonymise = 1 SET @Export = N'SCREEN';
 	/* The run's start: read by the one total-time line at the end of the run (IF @Debug = 1). */
 	DECLARE @starttime DATETIME;
 	SET @starttime = GETDATE();
@@ -118,6 +124,238 @@ BEGIN
 		, ErrorNumber INT
 		, ErrorMessage [NVARCHAR] (4000)
 	);
+
+	/* @Anonymise. Invariant: when @Anonymise = 1 no result set
+	   and no message sp_triage sends holds a name this map seeds, in any letter case; each name shows as ONE token for the
+	   run. The map holds each real name (Base) and every text form searched for (Name), with its token; Bnd marks a BOUNDED
+	   name (every IP, and a domain or server name under 4 characters), replaced only where a delimiter or the edge of the
+	   text stands on each side of it. Created always, filled only when @Anonymise = 1. Each name source reads in its own
+	   TRY: a source this login cannot read records its Could not run row and sets @AnonMapPartial, and the output's first
+	   row then says so. Every read of an object that may be missing (msdb, a DMV, sys.traces) is EXEC sp_executesql, so a
+	   compile error is caught here. The domain read from the registry is added once it is read (after the SQL Server
+	   properties); the map is finished and the tokens made there. Messages read @DatabaseNameShown, set beside every
+	   assignment of @DatabaseName and @dbname. The ONE choke point that replaces the names is just before the @Export
+	   branches; @AnonDone is set by its last statement and read by the screen SELECT (a doomed caller transaction defeats
+	   the CATCH's DELETE). */
+	CREATE TABLE #sp_triage_anon_map
+	(
+		Seq INT IDENTITY(1,1) PRIMARY KEY
+		, Kind [NVARCHAR] (10) NOT NULL
+		, Base [NVARCHAR] (4000) COLLATE Latin1_General_BIN2 NOT NULL
+		, Name [NVARCHAR] (4000) COLLATE Latin1_General_BIN2 NOT NULL
+		, Token [NVARCHAR] (40) NULL
+		, Hit BIT NOT NULL DEFAULT 0
+		, Bnd BIT NOT NULL DEFAULT 0
+	);
+	/* A session's Windows user and domain, kept apart until its login is known to be seeded (never for NT SERVICE\...). */
+	CREATE TABLE #sp_triage_anon_sess (login_name [NVARCHAR] (4000) COLLATE Latin1_General_BIN2 NULL, nt_user_name [NVARCHAR] (4000) NULL, nt_domain [NVARCHAR] (4000) NULL);
+	DECLARE @AnonMapPartial BIT, @AnonDone BIT, @AnonPass INT, @DatabaseNameShown [NVARCHAR] (4000);
+	SET @AnonMapPartial = 0;
+	SET @AnonDone = 0;
+	IF @Anonymise = 1
+	BEGIN
+		BEGIN TRY
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT N'DB', d.name, d.name FROM sys.databases AS d WHERE d.database_id > 4;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: databases', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name) SELECT DISTINCT N''DB'', b.database_name, b.database_name FROM msdb.dbo.backupset AS b WHERE b.database_name IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: backup history databases', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		/* A database dropped or renamed since the default trace began still shows in sections 32 and 33 (read the same way). */
+		BEGIN TRY
+			IF OBJECT_ID(N'sys.traces') IS NOT NULL
+				EXEC sp_executesql N'DECLARE @p [NVARCHAR] (260);
+					SELECT @p = t.path FROM sys.traces AS t WHERE t.is_default = 1;
+					IF @p IS NOT NULL
+						INSERT #sp_triage_anon_map (Kind, Base, Name)
+						SELECT DISTINCT N''DB'', g.DatabaseName, g.DatabaseName FROM fn_trace_gettable(@p, DEFAULT) AS g WHERE g.DatabaseName IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: default trace databases', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT N'SERVER', x.b, x.b
+			FROM (
+				SELECT CONVERT([NVARCHAR] (4000), @@SERVERNAME) AS b
+				UNION ALL SELECT CONVERT([NVARCHAR] (4000), SERVERPROPERTY('ServerName'))
+				UNION ALL SELECT CONVERT([NVARCHAR] (4000), SERVERPROPERTY('MachineName'))
+				UNION ALL SELECT CONVERT([NVARCHAR] (4000), SERVERPROPERTY('InstanceName'))
+				UNION ALL SELECT CONVERT([NVARCHAR] (4000), SERVERPROPERTY('ComputerNamePhysicalNetBIOS'))
+				UNION ALL SELECT CONVERT([NVARCHAR] (4000), HOST_NAME())
+			) AS x
+			WHERE x.b IS NOT NULL;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: server names', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		/* Linked servers: the name, the data source and its host (the text before \ or , once a tcp:, np: or lpc: prefix is
+		   dropped; not for a data source that is a file path). */
+		BEGIN TRY
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT DISTINCT N'SERVER', x.b, x.b
+			FROM sys.servers AS s
+			CROSS APPLY (SELECT CASE WHEN UPPER(LEFT(s.data_source, 4)) IN (N'TCP:', N'LPC:') OR UPPER(LEFT(s.data_source, 3)) = N'NP:'
+				THEN SUBSTRING(s.data_source, CHARINDEX(N':', s.data_source) + 1, 4000) ELSE s.data_source END AS ds) AS d
+			CROSS APPLY (
+				SELECT s.name AS b
+				UNION ALL SELECT d.ds
+				UNION ALL SELECT LEFT(d.ds, PATINDEX(N'%[\,]%', d.ds + N'\') - 1) WHERE d.ds NOT LIKE N'_:%' AND d.ds NOT LIKE N'\\%'
+			) AS x
+			WHERE x.b IS NOT NULL AND LEN(x.b) > 0;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: linked servers', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT DISTINCT x.k, x.b, x.b
+			FROM (
+				SELECT N'SERVER' AS k, s.host_name AS b FROM sys.dm_exec_sessions AS s
+				UNION ALL SELECT N'LOGIN', s.login_name FROM sys.dm_exec_sessions AS s
+				UNION ALL SELECT N'LOGIN', s.original_login_name FROM sys.dm_exec_sessions AS s
+			) AS x
+			WHERE x.b IS NOT NULL;
+			INSERT #sp_triage_anon_sess (login_name, nt_user_name, nt_domain)
+			SELECT DISTINCT s.login_name, s.nt_user_name, s.nt_domain
+			FROM sys.dm_exec_sessions AS s
+			WHERE s.nt_user_name IS NOT NULL OR s.nt_domain IS NOT NULL;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: sessions', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name) SELECT DISTINCT N''SERVER'', n.NodeName, n.NodeName FROM sys.dm_os_cluster_nodes AS n WHERE n.NodeName IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: cluster nodes', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		/* Availability groups: replicas, listeners, groups, and the host of each replica's endpoint URL (TCP://host:port),
+		   with its first label when it holds a letter; a host that is an address is an IP. */
+		BEGIN TRY
+			IF OBJECT_ID(N'sys.availability_replicas') IS NOT NULL
+				EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name)
+					SELECT DISTINCT x.k, x.b, x.b
+					FROM (
+						SELECT N''SERVER'' AS k, r.replica_server_name AS b FROM sys.availability_replicas AS r
+						UNION ALL SELECT N''SERVER'', l.dns_name FROM sys.availability_group_listeners AS l
+						UNION ALL SELECT N''SERVER'', g.name FROM sys.availability_groups AS g
+						UNION ALL SELECT CASE WHEN h.host NOT LIKE N''%[^0-9.]%'' THEN N''IP'' ELSE N''SERVER'' END, h.host
+						FROM sys.availability_replicas AS r
+						CROSS APPLY (SELECT SUBSTRING(r.endpoint_url, CHARINDEX(N''//'', r.endpoint_url) + 2, 4000) AS rest) AS e
+						CROSS APPLY (SELECT LEFT(e.rest, CHARINDEX(N'':'', e.rest + N'':'') - 1) AS host0) AS h0
+						CROSS APPLY (SELECT h0.host0 AS host UNION ALL SELECT LEFT(h0.host0, CHARINDEX(N''.'', h0.host0 + N''.'') - 1) WHERE h0.host0 LIKE N''%[a-zA-Z]%'') AS h
+						WHERE r.endpoint_url LIKE N''%://%''
+					) AS x
+					WHERE x.b IS NOT NULL AND LEN(x.b) > 0;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: availability groups', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT N'LOGIN', p.name, p.name FROM sys.server_principals AS p WHERE p.type IN ('S', 'U', 'G');
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: server logins', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			IF OBJECT_ID(N'sys.dm_server_services') IS NOT NULL
+				EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name) SELECT DISTINCT N''LOGIN'', s.service_account, s.service_account FROM sys.dm_server_services AS s WHERE s.service_account IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: service accounts', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name)
+				SELECT DISTINCT N''PATH'', f.p, f.p
+				FROM (SELECT mf.physical_name AS p FROM sys.master_files AS mf) AS src
+				CROSS APPLY (SELECT src.p AS p UNION ALL SELECT LEFT(src.p, LEN(src.p) - CHARINDEX(N''\'', REVERSE(REPLACE(src.p, N''/'', N''\''))))) AS f
+				WHERE f.p IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: database files', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name)
+				SELECT DISTINCT N''PATH'', x.p, x.p
+				FROM (SELECT LEFT(f.physical_device_name, LEN(f.physical_device_name) - CHARINDEX(N''\'', REVERSE(REPLACE(f.physical_device_name, N''/'', N''\'')))) AS p FROM msdb.dbo.backupmediafamily AS f) AS x
+				WHERE x.p IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: backup folders', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT DISTINCT N'PATH', f.p, f.p
+			FROM (SELECT CONVERT([NVARCHAR] (4000), SERVERPROPERTY('ErrorLogFileName')) AS p UNION ALL SELECT CONVERT([NVARCHAR] (4000), SERVERPROPERTY('InstanceDefaultDataPath')) UNION ALL SELECT CONVERT([NVARCHAR] (4000), SERVERPROPERTY('InstanceDefaultLogPath'))) AS src
+			CROSS APPLY (SELECT src.p AS p UNION ALL SELECT LEFT(src.p, LEN(src.p) - CHARINDEX(N'\', REVERSE(REPLACE(src.p, N'/', N'\'))))) AS f
+			WHERE f.p IS NOT NULL;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: error log and default paths', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			IF OBJECT_ID(N'sys.traces') IS NOT NULL
+				EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name)
+					SELECT DISTINCT N''PATH'', f.p, f.p
+					FROM (SELECT t.path AS p FROM sys.traces AS t WHERE t.is_default = 1) AS src
+					CROSS APPLY (SELECT src.p AS p UNION ALL SELECT LEFT(src.p, LEN(src.p) - CHARINDEX(N''\'', REVERSE(REPLACE(src.p, N''/'', N''\''))))) AS f
+					WHERE f.p IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: default trace', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT DISTINCT N'IP', x.b, x.b
+			FROM (
+				SELECT c.local_net_address AS b FROM sys.dm_exec_connections AS c
+				UNION ALL SELECT c.client_net_address FROM sys.dm_exec_connections AS c
+			) AS x
+			WHERE x.b IS NOT NULL;
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: connection addresses', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			IF OBJECT_ID(N'sys.dm_tcp_listener_states') IS NOT NULL
+				EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name) SELECT DISTINCT N''IP'', CONVERT(NVARCHAR(4000), l.ip_address), CONVERT(NVARCHAR(4000), l.ip_address) FROM sys.dm_tcp_listener_states AS l WHERE l.ip_address IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: listener addresses', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+		BEGIN TRY
+			IF OBJECT_ID(N'sys.dm_server_registry') IS NOT NULL
+				EXEC sp_executesql N'INSERT #sp_triage_anon_map (Kind, Base, Name) SELECT DISTINCT N''IP'', CONVERT(NVARCHAR(4000), r.value_data), CONVERT(NVARCHAR(4000), r.value_data) FROM sys.dm_server_registry AS r WHERE r.value_name = N''IpAddress'' AND r.value_data IS NOT NULL;';
+		END TRY
+		BEGIN CATCH
+			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: registry addresses', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+			SET @AnonMapPartial = 1;
+		END CATCH
+	END
 
 	/* Invariant 3 (2026-10-20): NO DATABASE STATE MAKES sp_triage ABORT.
 	   OFFLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT, EMERGENCY, SINGLE_USER or RESTRICTED_USER: a step that
@@ -251,7 +489,7 @@ SET @PlatformNotTested = CASE WHEN @IsSQLMI = 1 THEN N'Azure SQL Managed Instanc
 DECLARE @DebugTime DATETIME
 DECLARE @DebugTimeMSG [VARCHAR](500)	
 DECLARE @errMessage [VARCHAR](MAX) 
-SET @errMessage = ERROR_MESSAGE()
+SET @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 SET @DebugTime = GETDATE()
 DECLARE @ThisServer [NVARCHAR] (500)
 DECLARE @CharToCheck [NVARCHAR] (5) 
@@ -268,7 +506,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server name lookup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE()
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
   IF @Debug = 1
   BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -442,7 +680,7 @@ DECLARE @ProcIORead BIT = 0;
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR (N'%s', 0, 1, @DebugTimeMSG) WITH NOWAIT; 
 		RAISERROR (N'%s', 0, 1, @License) WITH NOWAIT; 
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT; 
 	END
 	--PRINT 'Let''s do this!';
@@ -541,7 +779,7 @@ IF @IsSQLAzure = 0 AND @IsSQLMI = 0  /* was OR: two mutually-exclusive flags OR'
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'SQL Server properties', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		PRINT 'The domain name was not read from the registry';
 	END CATCH
@@ -549,6 +787,112 @@ END
 IF (@IsSQLAzure = 1 OR @IsSQLMI = 1) 
 		SELECT @ThisDomain = RIGHT(SYSTEM_USER,LEN(SYSTEM_USER) - CHARINDEX('@',SYSTEM_USER)) /*CONVERT([NVARCHAR] (100),SERVERPROPERTY('ServerName'))+'.database.windows.net';*/
 SET @ThisDomain = ISNULL(@ThisDomain, DEFAULT_DOMAIN());
+/* @Anonymise: the domain (read just above) joins the map, then the map is finished. Pass 1 drops the names never hidden, then adds what the kept names imply:
+   a session's Windows user and domain only when its own login was kept (the Agent's NT SERVICE session must not turn
+   SQLAgent$... into a token), the user part of each DOMAIN\user login, and the host (SERVER, or IP when it is an address)
+   and the share root (PATH) of each network path \\host\share\...; pass 2 drops the never-hidden names among those. Each
+   name then adds its text forms: the closure of ]] doubled and '' doubled, each also XML-escaped. A BOUNDED name (every IP;
+   a domain or server name under 4 characters) is searched for as those forms, with the delimiter test at the choke point.
+   Any other name under 4 characters or made only of digits is searched for only as [x], 'x' or "x". One row per text form
+   (case-insensitive), and each name gets its token, numbered per kind in the order the sources found it. A name left
+   without a token makes the choke point fail closed. */
+IF @Anonymise = 1
+BEGIN TRY
+	INSERT #sp_triage_anon_map (Kind, Base, Name)
+	SELECT N'DOMAIN', x.b, x.b
+	FROM (SELECT CONVERT([NVARCHAR] (4000), @ThisDomain) AS b UNION ALL SELECT CONVERT([NVARCHAR] (4000), DEFAULT_DOMAIN())) AS x
+	WHERE x.b IS NOT NULL;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: domain', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SET @AnonMapPartial = 1;
+END CATCH
+IF @Anonymise = 1
+BEGIN TRY
+	/* A registry string value ends in NCHAR(0) (measured on NEW2022: every IpAddress in sys.dm_server_registry), and the
+	   output sanitise turns that character into a space, so the name is searched for without it. */
+	UPDATE #sp_triage_anon_map SET Base = REPLACE(Base, NCHAR(0), N''), Name = REPLACE(Name, NCHAR(0), N'') WHERE CHARINDEX(NCHAR(0), Base) > 0;
+	SET @AnonPass = 1;
+	WHILE @AnonPass <= 2
+	BEGIN
+		DELETE FROM #sp_triage_anon_map
+		WHERE LEN(Base) = 0
+			OR Base COLLATE Latin1_General_CI_AS IN (N'sa', N'dbo', N'guest', N'public', N'SQLDBA.ORG', N'master', N'model', N'msdb', N'tempdb',
+				N'<local machine>', N'<named pipe>', N'0.0.0.0', N'::', N'127.0.0.1', N'::1', N'.', N'(local)', N'localhost',
+				N'NT SERVICE', N'NT AUTHORITY', N'BUILTIN', N'SYSTEM', N'LOCAL SERVICE', N'NETWORK SERVICE', N'LocalSystem', N'LOCAL SYSTEM',
+				N'ANONYMOUS LOGON', N'Administrator', N'Administrators', N'Users', N'Everyone', N'INTERACTIVE')
+			OR Base COLLATE Latin1_General_CI_AS LIKE N'##%'
+			OR Base COLLATE Latin1_General_CI_AS LIKE N'NT SERVICE\%'
+			OR Base COLLATE Latin1_General_CI_AS LIKE N'NT AUTHORITY\%'
+			OR Base COLLATE Latin1_General_CI_AS LIKE N'BUILTIN\%';
+		IF @AnonPass = 1
+		BEGIN
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT DISTINCT x.k, x.b, x.b
+			FROM #sp_triage_anon_sess AS s
+			CROSS APPLY (SELECT N'LOGIN' AS k, s.nt_user_name AS b UNION ALL SELECT N'DOMAIN', s.nt_domain) AS x
+			WHERE x.b IS NOT NULL
+				AND EXISTS (SELECT 1 FROM #sp_triage_anon_map AS m WHERE m.Kind = N'LOGIN' AND m.Base = s.login_name);
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT m.Kind, x.b, x.b
+			FROM #sp_triage_anon_map AS m
+			CROSS APPLY (SELECT RIGHT(m.Base, CHARINDEX(N'\', REVERSE(m.Base)) - 1) AS b) AS x
+			WHERE m.Kind = N'LOGIN' AND CHARINDEX(N'\', m.Base) > 0 AND LEN(x.b) > 0;
+			INSERT #sp_triage_anon_map (Kind, Base, Name)
+			SELECT DISTINCT x.k, x.b, x.b
+			FROM #sp_triage_anon_map AS m
+			CROSS APPLY (SELECT SUBSTRING(m.Base, 3, 4000) AS s) AS a
+			CROSS APPLY (SELECT LEFT(a.s, CHARINDEX(N'\', a.s + N'\') - 1) AS h) AS b
+			CROSS APPLY (SELECT SUBSTRING(a.s, LEN(b.h) + 2, 4000) AS r) AS c
+			CROSS APPLY (SELECT LEFT(c.r, CHARINDEX(N'\', c.r + N'\') - 1) AS sh) AS d
+			CROSS APPLY (
+				SELECT CASE WHEN b.h NOT LIKE N'%[^0-9.]%' THEN N'IP' ELSE N'SERVER' END AS k, b.h AS b
+				UNION ALL SELECT N'PATH', N'\\' + b.h + N'\' + d.sh WHERE LEN(d.sh) > 0
+			) AS x
+			WHERE m.Kind = N'PATH' AND m.Base LIKE N'\\%' AND LEN(b.h) > 0;
+		END
+		SET @AnonPass = @AnonPass + 1;
+	END
+	INSERT #sp_triage_anon_map (Kind, Base, Name, Token, Bnd)
+	SELECT r.Kind, r.Base, v.Name, v.Token, r.Bnd
+	FROM (
+		SELECT g.Kind, g.Base, g.Seq, g.Bnd, CASE WHEN g.Bnd = 0 AND (LEN(g.Base) < 4 OR g.Base NOT LIKE N'%[^0-9]%') THEN 1 ELSE 0 END AS Delimited
+		FROM (
+			SELECT m.Kind, m.Base, MIN(m.Seq) AS Seq
+				, CASE WHEN m.Kind = N'IP' OR (m.Kind IN (N'DOMAIN', N'SERVER') AND LEN(m.Base) < 4) THEN 1 ELSE 0 END AS Bnd
+			FROM #sp_triage_anon_map AS m
+			WHERE m.Token IS NULL
+			GROUP BY m.Kind, m.Base
+		) AS g
+	) AS r
+	CROSS APPLY (
+		SELECT r.Base AS f
+		UNION SELECT REPLACE(r.Base, N']', N']]')
+		UNION SELECT REPLACE(r.Base, N'''', N'''''')
+		UNION SELECT REPLACE(REPLACE(r.Base, N']', N']]'), N'''', N'''''')
+	) AS e
+	CROSS APPLY (SELECT e.f AS x UNION SELECT REPLACE(REPLACE(REPLACE(e.f, N'&', N'&amp;'), N'<', N'&lt;'), N'>', N'&gt;')) AS c
+	CROSS APPLY (
+		SELECT c.x AS Name, N'{t}' AS Token WHERE r.Delimited = 0
+		UNION SELECT N'[' + REPLACE(c.x, N']', N']]') + N']', N'[{t}]' WHERE r.Delimited = 1
+		UNION SELECT N'''' + c.x + N'''', N'''{t}''' WHERE r.Delimited = 1
+		UNION SELECT N'"' + c.x + N'"', N'"{t}"' WHERE r.Delimited = 1
+	) AS v
+	ORDER BY r.Seq;
+	DELETE FROM #sp_triage_anon_map WHERE Token IS NULL;
+	WITH d AS (SELECT ROW_NUMBER() OVER (PARTITION BY UPPER(m.Name) ORDER BY m.Seq) AS rn FROM #sp_triage_anon_map AS m)
+	DELETE FROM d WHERE d.rn > 1;
+	UPDATE m SET Token = REPLACE(m.Token, N'{t}', n.Tok)
+	FROM #sp_triage_anon_map AS m
+	INNER JOIN (
+		SELECT b.Kind, b.Base, b.Kind + N'_' + CASE WHEN b.n < 10 THEN N'0' ELSE N'' END + CONVERT([NVARCHAR] (12), b.n) AS Tok
+		FROM (SELECT g.Kind, g.Base, ROW_NUMBER() OVER (PARTITION BY g.Kind ORDER BY MIN(g.Seq)) AS n FROM #sp_triage_anon_map AS g GROUP BY g.Kind, g.Base) AS b
+	) AS n ON n.Kind = m.Kind AND n.Base = m.Base;
+END TRY
+BEGIN CATCH
+	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Anonymise map: tokens', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
+	SET @AnonMapPartial = 1;
+END CATCH
 
 SELECT 
 @SP_MachineName = CONVERT([NVARCHAR] (50),SERVERPROPERTY('MACHINENAME') )
@@ -934,7 +1278,7 @@ BEGIN CATCH
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR (N'%s', 0, 1, @DebugTimeMSG) WITH NOWAIT; 
 		RAISERROR (N'Problem inserting data into #dadatafor_exec_query_stats',0,1) WITH NOWAIT;
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END
 END CATCH
@@ -1005,7 +1349,7 @@ BEGIN CATCH
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR (N'%s', 0, 1, @DebugTimeMSG) WITH NOWAIT; 
 		RAISERROR (N'Problem with adding columns to #dadatafor_exec_query_stats',0,1) WITH NOWAIT;
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END
 END CATCH
@@ -1203,6 +1547,14 @@ END CATCH
 	IF @PlatformNotTested IS NOT NULL
 		INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity)
 		VALUES (0, N'Platform', N'Not tested on ' + @PlatformNotTested + N'; results may be partial.', @Result_Warning);
+	/* @Anonymise: a name source this login could not read (its Could not run row names it). Every map source is read above,
+	   so this row sits with the first rows of the report (ORDER BY ID). */
+	IF @Anonymise = 1 AND @AnonMapPartial = 1
+	BEGIN
+		INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity)
+		VALUES (0, N'Anonymise incomplete', N'Anonymise incomplete: a name source could not be read; some names may be shown', @Result_Warning);
+		RAISERROR (N'Anonymise incomplete: a name source could not be read; some names may be shown', 0, 1) WITH NOWAIT;
+	END
 
 	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_ConfigurationDefaults') IS NOT NULL
 				DROP TABLE #output_sqldba_org_sp_triage_ConfigurationDefaults;
@@ -1274,26 +1626,6 @@ END CATCH
 				id [INT] NULL
 			);
 
-	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_SQLVersionsDump') IS NOT NULL
-				DROP TABLE #output_sqldba_org_sp_triage_SQLVersionsDump		
-	CREATE TABLE #output_sqldba_org_sp_triage_SQLVersionsDump 
-			(
-				  ID [INT] IDENTITY(0,1)
-				, Output [NVARCHAR] (250)
-			);
-	
-	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_SQLVersions') IS NOT NULL
-				DROP TABLE #output_sqldba_org_sp_triage_SQLVersions
-	CREATE TABLE #output_sqldba_org_sp_triage_SQLVersions 
-			(
-			  Id INT
-			, [Products Released] [NVARCHAR] (250)
-			, [Lifecycle Start Date]  [NVARCHAR] (250)
-			, [Mainstream Support End Date]  [NVARCHAR] (250)
-			, [Extended Support End Date]  [NVARCHAR] (250)
-			, [Service Pack Support End Date]  [NVARCHAR] (250)
-			);
-			
 	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_spnCheck') IS NOT NULL
 				DROP TABLE #output_sqldba_org_sp_triage_spnCheck
 	CREATE TABLE #output_sqldba_org_sp_triage_spnCheck
@@ -1817,7 +2149,7 @@ BEGIN CATCH
 		SET @DebugTime = GETDATE();
 		IF @ShowDebugTime = 1 RAISERROR (N'%s', 0, 1, @DebugTimeMSG) WITH NOWAIT; 
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT; 
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END
 END CATCH
@@ -2036,7 +2368,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Power plan', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE()
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2329,7 +2661,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server properties', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2404,7 +2736,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Machine key', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2451,38 +2783,38 @@ BEGIN TRY
 	SELECT @MyBuild = CONVERT([NVARCHAR] (50),SERVERPROPERTY('productversion'));
 
 
-	DECLARE @BuildTable TABLE
+	/* Support status (section 0). The support list below is GENERATED from Microsoft's published list (the build catalogue,
+	   Config/sql-build-catalogue.json) by the catalogue refresh; never edit it by hand: a test fails
+	   when it and the catalogue differ. The verdict reads only @MyBuild, @SupportToday, @IsSQLAzure, @IsSQLMI and the list,
+	   and matches the server's major and minor version numbers (a newer CU of a listed version still matches). */
+	DECLARE @SupportToday [DATE];
+	SET @SupportToday = CONVERT([DATE], GETDATE());
+	/* BEGIN GENERATED: sql-build-catalogue (scripts/generate-sp-triage-build-table.py, run by scripts/update-build-catalogue.py); do not edit by hand */
+	DECLARE @SupportList TABLE
 	(
-		[Server] [NVARCHAR] (250)
-		, MajorBuild [NVARCHAR] (5)
-		, SupportEnds [NVARCHAR] (25)
-		, MinBuild [NVARCHAR] (25)
-		, MaxBuild [NVARCHAR] (25)
-	)
-	/*Kind of not being used anymore. The checks are done in the AI engine*/
-	INSERT INTO @BuildTable 
-		SELECT '2000', '8', '2007-10-07', '8.0.047', '8.0.997' 
-		UNION ALL SELECT '2000', '8', '2013-09-04', '8.0.2039', '8.0.2305' 
-		UNION ALL SELECT '2005', '9', '2016-12-04', '9.0.1399', '9.0.5324.00' 
-		UNION ALL SELECT '2008', '10', '2019-09-07', '10.0.1019.17', '10.0.6556.0' 
-		UNION ALL SELECT '2008R2', '10', '2019-09-07', '10.50.1092.20', '10.50.6560.0' 
-		UNION ALL SELECT '2012', '11', '2014-01-14', '11.0.1103.9', '11.0.2100.60' 
-		UNION ALL SELECT '2012', '11', '2015-07-14', '11.0.2214.0', '11.0.3128.0' 
-		UNION ALL SELECT '2012', '11', '2017-01-10', '11.0.3153.0', '11.0.5678.0' 
-		UNION ALL SELECT '2012', '11', '2018-10-09', '11.0.6020.0', '11.0.6615.2' 
-		UNION ALL SELECT '2012', '11', '2022-07-12', '11.0.7001.0', '11.0.7493.4' 
-		UNION ALL SELECT '2014', '12', '2016-07-12', '12.0.1524.0', '12.0.2569.0' 
-		UNION ALL SELECT '2014', '12', '2020-01-14', '12.0.4050.0', '12.0.5687.1' 
-		UNION ALL SELECT '2014', '12', '2024-07-09', '12.0.6024.0', '12.0.6372.1' 
-		UNION ALL SELECT '2016', '13', '2018-01-09', '13.0.1000.281', '13.0.3900.73' 
-		UNION ALL SELECT '2016', '13', '2019-07-09', '13.0.4001.0', '13.0.4604.0' 
-		UNION ALL SELECT '2016', '13', '2026-07-14', '13.0.5026.0', '13.0.5820.21' 
-		UNION ALL SELECT '2017', '14', '2027-10-12', '14.0.1.246', '14.0.900.75' 
-		UNION ALL SELECT '2019', '15', '2030-01-08', '15.0.1000.34', '15.0.4999.99'
-		UNION ALL SELECT '2022', '16', '2033-01-11', '16.0.1000.6', '16.0.4999.99'
-		UNION ALL SELECT '2025', '17', '2036-01-01', '17.0.1000.0', '17.9.9999.99';
-	
-	/*This step requires administrative permissions on the local machine for SQL server Service account, at least it does not play nicely with "NT xx" accounts*/
+		VersionLabel [NVARCHAR] (20)
+		, Major [INT]
+		, Minor [INT]
+		, MainstreamEnds [DATE]
+		, ExtendedEnds [DATE]
+		, CatalogueDate [DATE]
+	);
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2008', 10, 0, '2014-07-08', '2019-07-09', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2008 R2', 10, 50, '2014-07-08', '2019-07-09', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2012', 11, 0, '2017-07-11', '2022-07-12', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2014', 12, 0, '2019-07-09', '2024-07-09', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2016', 13, 0, '2021-07-13', '2026-07-14', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2017', 14, 0, '2022-10-11', '2027-10-12', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2019', 15, 0, '2025-02-28', '2030-01-08', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2022', 16, 0, '2028-01-11', '2033-01-11', '2026-11-10');
+	INSERT INTO @SupportList (VersionLabel, Major, Minor, MainstreamEnds, ExtendedEnds, CatalogueDate) VALUES (N'2025', 17, 0, '2031-01-06', '2036-01-06', '2026-11-10');
+	/* END GENERATED: sql-build-catalogue */
+	DECLARE @MyMajor [INT];
+	DECLARE @MyMinor [INT];
+	DECLARE @SupportListDate [DATE];
+	SET @MyMajor = CONVERT([INT], PARSENAME(@MyBuild, 4));
+	SET @MyMinor = CONVERT([INT], PARSENAME(@MyBuild, 3));
+	SELECT @SupportListDate = MAX(CatalogueDate) FROM @SupportList;
 	INSERT #output_sqldba_org_sp_triage 
 		(
 			SectionID
@@ -2491,14 +2823,33 @@ BEGIN TRY
 			, Severity
 			, Details
 		)
-	SELECT  0 
+	SELECT 0
 		, 'Supported'
-		, CASE WHEN SupportEnds < GETDATE() THEN '!BUILD NOT SUPPORTED!' ELSE 'Build in support' END
-		, CASE WHEN SupportEnds < GETDATE() THEN @Result_YourServerIsDead ELSE @Result_Good END 
-		, 'Build:' + @MyBuild 
-		+ ISNULL('; [Mainstream Support End Date]:' + CONVERT([VARCHAR],SupportEnds,120),'')
-	 FROM @BuildTable
-	 WHERE @MyBuild BETWEEN MinBuild AND MaxBuild ;
+		, CASE
+			WHEN @IsSQLAzure = 1 OR @IsSQLMI = 1 OR s.Major IS NULL THEN 'Support status not known'
+			WHEN @SupportToday <= s.MainstreamEnds THEN 'Build in support'
+			WHEN @SupportToday <= s.ExtendedEnds THEN 'Build in extended support only'
+			ELSE '!BUILD NOT SUPPORTED!'
+		  END
+		, CASE
+			WHEN @IsSQLAzure = 1 OR @IsSQLMI = 1 OR s.Major IS NULL THEN @Result_Warning
+			WHEN @SupportToday <= s.MainstreamEnds THEN @Result_Good
+			WHEN @SupportToday <= s.ExtendedEnds THEN @Result_Warning
+			ELSE @Result_YourServerIsDead
+		  END
+		, CASE
+			WHEN @IsSQLAzure = 1 THEN 'Build:' + @MyBuild + '; Azure SQL Database has no SQL Server support lifecycle in this list'
+			WHEN @IsSQLMI = 1 THEN 'Build:' + @MyBuild + '; Azure SQL Managed Instance has no SQL Server support lifecycle in this list'
+			WHEN s.Major IS NULL THEN 'Build:' + @MyBuild + '; this script''s support list (Microsoft list as of '
+				+ ISNULL(CONVERT([VARCHAR] (10), @SupportListDate, 120), 'n/a') + ') does not hold this version'
+			ELSE 'Build:' + @MyBuild + '; SQL Server ' + s.VersionLabel
+				+ '; [Mainstream Support End Date]:' + CONVERT([VARCHAR] (10), s.MainstreamEnds, 120)
+				+ '; [Extended Support End Date]:' + CONVERT([VARCHAR] (10), s.ExtendedEnds, 120)
+				+ '; Microsoft list as of ' + CONVERT([VARCHAR] (10), s.CatalogueDate, 120)
+		  END
+	FROM (SELECT 1 AS [One]) AS [AlwaysOneRow]
+	LEFT OUTER JOIN @SupportList s ON s.Major = @MyMajor AND s.Minor = @MyMinor;
+	/* END support verdict (section 0) */
 	
 	IF @Debug = 1
 		RAISERROR (N'Evaluated build support END date',0,1) WITH NOWAIT;
@@ -2515,7 +2866,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server build versions', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2551,9 +2902,9 @@ BEGIN TRY
 	+ CASE WHEN work_queue_count > 0 THEN 'work_queue_count,' ELSE '' END
 	+ CASE WHEN pending_disk_io_count > 0 THEN 'pending_disk_io_count,' ELSE '' END 
 	+';'+ CONVERT([VARCHAR](2),load_factor)
-	+';'+ CONVERT([VARCHAR](20),CONVERT(MONEY,current_tasks_count)/SUM(CONVERT([BIGINT],current_tasks_count)) OVER(PARTITION BY  parent_node_id) *100)
-	+';'+ CONVERT([VARCHAR](20),CONVERT(MONEY,current_workers_count)/SUM(CONVERT([BIGINT],current_workers_count)) OVER(PARTITION BY  parent_node_id) *100)
-	+';'+ CONVERT([VARCHAR](20),CONVERT(MONEY,active_workers_count)/SUM(CONVERT([BIGINT],active_workers_count)) OVER(PARTITION BY  parent_node_id) *100 )
+	+';'+ ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,current_tasks_count)/NULLIF(SUM(CONVERT([BIGINT],current_tasks_count)) OVER(PARTITION BY  parent_node_id), 0) *100), '0')
+	+';'+ ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,current_workers_count)/NULLIF(SUM(CONVERT([BIGINT],current_workers_count)) OVER(PARTITION BY  parent_node_id), 0) *100), '0')
+	+';'+ ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,active_workers_count)/NULLIF(SUM(CONVERT([BIGINT],active_workers_count)) OVER(PARTITION BY  parent_node_id), 0) *100), '0')
 	/*, current_tasks_count
 	, current_workers_count
 	, active_workers_count */
@@ -2561,16 +2912,16 @@ BEGIN TRY
 	,    DATEADD(ms, total_cpu_usage_ms, DATEADD(DAY,total_cpu_usage_ms/1000/60/60/24 ,0)) [total_cpu_usage]
 	,  +  DATEADD(ms, total_scheduler_delay_ms, DATEADD(DAY,total_scheduler_delay_ms/1000/60/60/24 ,0)) [total_scheduler_delay]
 	*/
-	+';'+ CONVERT([VARCHAR](20),CONVERT(MONEY,context_switches_count)/SUM(CONVERT([BIGINT],context_switches_count)) OVER(PARTITION BY  parent_node_id) *100 )
-	+';'+ CONVERT([VARCHAR](20),CONVERT(MONEY,preemptive_switches_count)/SUM(CONVERT([BIGINT],preemptive_switches_count)) OVER(PARTITION BY  parent_node_id) *100)
-	+';'+ CONVERT([VARCHAR](20),CONVERT(MONEY,idle_switches_count)/SUM(CONVERT([BIGINT],idle_switches_count)) OVER(PARTITION BY  parent_node_id) *100 )
+	+';'+ ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,context_switches_count)/NULLIF(SUM(CONVERT([BIGINT],context_switches_count)) OVER(PARTITION BY  parent_node_id), 0) *100), '0')
+	+';'+ ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,preemptive_switches_count)/NULLIF(SUM(CONVERT([BIGINT],preemptive_switches_count)) OVER(PARTITION BY  parent_node_id), 0) *100), '0')
+	+';'+ ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,idle_switches_count)/NULLIF(SUM(CONVERT([BIGINT],idle_switches_count)) OVER(PARTITION BY  parent_node_id), 0) *100), '0')
 	, @Result_Warning 
 	FROM [sys].dm_os_schedulers
 	WHERE status = 'VISIBLE ONLINE';
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'CPU NUMA node details', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2616,7 +2967,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Antivirus scanning SQL process', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2657,7 +3008,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TempDB file count', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2725,7 +3076,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TempDB latching', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2806,7 +3157,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Locked Pages in Memory', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2936,7 +3287,7 @@ BEGIN TRY
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Service account names', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	  SELECT @errMessage  = ERROR_MESSAGE()
+	  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	  IF @Debug = 1
 		BEGIN
 			SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -2949,7 +3300,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Service account details', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
   IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -3026,7 +3377,7 @@ IF @Debug = 1
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Worker thread usage', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -3049,7 +3400,7 @@ END CATCH
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'CPU clock for the CPU history', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 	
@@ -3181,7 +3532,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counter setup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-    SELECT @errMessage  = ERROR_MESSAGE();
+    SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -3198,7 +3549,7 @@ IF @Debug = 1
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE();
 		RAISERROR (N'%s', 0, 1, @DebugTimeMSG) WITH NOWAIT;
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT; 
 	END
 BEGIN TRY
@@ -3392,7 +3743,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counters', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -3578,7 +3929,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Azure calculations', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -3680,7 +4031,7 @@ IF @Debug = 1
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Suspect pages', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-  SELECT @errMessage  = ERROR_MESSAGE();
+  SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -3805,7 +4156,7 @@ END CATCH
 		END TRY
 		BEGIN CATCH
 			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'User connections', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-			SELECT @errMessage  = ERROR_MESSAGE();
+			SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 			IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		END CATCH
 
@@ -4144,7 +4495,7 @@ DECLARE @Databases TABLE
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Availability Group database list', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT; 
 IF @Debug = 1
 	BEGIN
@@ -4162,7 +4513,7 @@ IF @Debug = 1
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Database list', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 	SET @Databasei_Max = (
@@ -4198,7 +4549,7 @@ IF @Debug = 1
 		END TRY
 		BEGIN CATCH
 			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server start time', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-			SELECT @errMessage  = ERROR_MESSAGE();
+			SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 			IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		END CATCH
 
@@ -4368,7 +4719,7 @@ IF @Debug = 1
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Memory figures', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 
@@ -4431,7 +4782,7 @@ IF @Debug = 1
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'SQL memory usage', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 
@@ -4510,7 +4861,7 @@ IF @Debug = 1
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'CPU history', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 
@@ -4653,7 +5004,7 @@ IF @Debug = 1
 		END TRY
 		BEGIN CATCH
 			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'SQL Server error log', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-			SELECT @errMessage  = ERROR_MESSAGE();
+			SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 			IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		END CATCH
 
@@ -4870,7 +5221,7 @@ IF @Debug = 1
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Agent log', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT; 
 		IF @Debug = 1
 	BEGIN
@@ -5016,7 +5367,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Agent job history', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE();
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 	IF EXISTS 
@@ -5425,7 +5776,7 @@ BEGIN
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'SQL Agent job history limiter', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage = ERROR_MESSAGE();
+		SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 END
@@ -5663,6 +6014,7 @@ BEGIN
 			databasename 
 			FROM @DatabasesForLOG
 		)  
+        SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
         /* Quote-safe literal; a failed read leaves @vlfs NULL (never 0 or @@ROWCOUNT) and the run continues (2026-10-09). */
         SET @query = N'dbcc loginfo (N''' + REPLACE(@dbname, N'''', N'''''') + N''') ' ;
 		SET @vlfs = NULL;
@@ -5676,7 +6028,7 @@ BEGIN
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'VLF count (dbcc loginfo)' + ISNULL(N' ' + QUOTENAME(@dbname), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @dbname + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @DatabaseNameShown + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 			END CATCH
 		END
@@ -5720,6 +6072,7 @@ BEGIN
 			databasename 
 			FROM @DatabasesForLOG
 		)  
+        SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
         /* Quote-safe literal; a failed read leaves @vlfs NULL (never 0 or @@ROWCOUNT) and the run continues (2026-10-09). */
         SET @query = N'dbcc loginfo (N''' + REPLACE(@dbname, N'''', N'''''') + N''') '  ;
 		SET @vlfs = NULL;
@@ -5733,7 +6086,7 @@ BEGIN
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'VLF count (dbcc loginfo)' + ISNULL(N' ' + QUOTENAME(@dbname), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @dbname + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+				SET @ReadSkippedMsg = N'sp_triage: VLF count (dbcc loginfo) skipped for [' + @DatabaseNameShown + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 			END CATCH
 		END
@@ -6278,25 +6631,25 @@ END
 	SELECT 
 		10
 		, LEFT(mf.physical_name, 2) + '\ '
-		+ ' ; ' + CONVERT([VARCHAR](250),SUM(io_stall)/SUM(num_of_reads+num_of_writes)) + ' (ms)'
+		+ ' ; ' + ISNULL(CONVERT([VARCHAR](250),SUM(io_stall)/NULLIF(SUM(num_of_reads+num_of_writes), 0)), '0') + ' (ms)'
 		+ ' ; ' + CONVERT([VARCHAR](25),CONVERT(DECIMAL(20,2), SUM([num_of_bytes_read] + [num_of_bytes_written]) / 1073741824.0 / @DaysUptime))+ 'GB/day' /* GB per day comes from the byte counters (num_of_bytes_read + num_of_bytes_written), never from an IO count times 8 KB: one IO is not one 8 KB page. */
 		+ '; Free space: ' + CONVERT([VARCHAR](20), MAX(CAST(fd.FreeSpaceMB / 1024 as decimal(20,2)))) + 'GB'
 		, ' ; ' + 
 		CASE 
 			WHEN SUM(num_of_reads) = 0 THEN '0' 
-			ELSE CONVERT([VARCHAR](25),SUM(io_stall_read_ms)/SUM(num_of_reads)) 
+			ELSE CONVERT([VARCHAR](25),SUM(io_stall_read_ms)/NULLIF(SUM(num_of_reads), 0)) 
 		END + ' (ms)'
 			 
 		+ ' ; ' + 
 		CASE 
 			WHEN SUM(num_of_writes) = 0 THEN '0' 
-			ELSE CONVERT([VARCHAR](25),SUM(io_stall_write_ms)/SUM(num_of_writes)) 
+			ELSE CONVERT([VARCHAR](25),SUM(io_stall_write_ms)/NULLIF(SUM(num_of_writes), 0)) 
 		END + ' (ms)' 
 		, CASE 
 			WHEN SUM(num_of_reads+num_of_writes) = 0 THEN ''
-			WHEN SUM(io_stall)/SUM(num_of_reads+num_of_writes) < 10 THEN @Result_Good
-			WHEN SUM(io_stall)/SUM(num_of_reads+num_of_writes) BETWEEN 10 AND 100 THEN @Result_Warning
-			WHEN SUM(io_stall)/SUM(num_of_reads+num_of_writes) > 100 THEN @Result_YourServerIsDead
+			WHEN SUM(io_stall)/NULLIF(SUM(num_of_reads+num_of_writes), 0) < 10 THEN @Result_Good
+			WHEN SUM(io_stall)/NULLIF(SUM(num_of_reads+num_of_writes), 0) BETWEEN 10 AND 100 THEN @Result_Warning
+			WHEN SUM(io_stall)/NULLIF(SUM(num_of_reads+num_of_writes), 0) > 100 THEN @Result_YourServerIsDead
 			ELSE ''
 		END 
 	
@@ -6339,7 +6692,7 @@ END
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Disk latency', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 	
@@ -6378,7 +6731,7 @@ END
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Page size from spt_values', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		RAISERROR (N'Server does not seem to have spt_values table ',0,1) WITH NOWAIT;
 		SET @PageSize = 8 /*as in 8 KB*/;
@@ -6416,6 +6769,7 @@ END
 		   filtered out and a `SELECT @var = ...` with no matching row leaves the vars holding the
 		   PRIOR iteration's DB, so the DBCC block below would run against the wrong database. */
 		SELECT @DatabaseName = NULL, @DatabaseState = NULL, @AGBackupPref = NULL, @SecondaryReadRole = NULL, @VLFcount = NULL;
+		SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @DatabaseName), CASE WHEN @DatabaseName IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @DatabaseName ELSE N'DB_?' END) ELSE @DatabaseName END;
 		/* @VLFcount too: a failed loginfo read must leave VLFCount NULL, never 0 or the previous database's count. */
 		SELECT 
 			@DatabaseName = d.databasename
@@ -6425,6 +6779,7 @@ END
 		FROM @Databases d 
 		WHERE id = @Databasei_Count 
 		AND d.state NOT IN (2,6);
+		SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @DatabaseName), CASE WHEN @DatabaseName IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @DatabaseName ELSE N'DB_?' END) ELSE @DatabaseName END;
 
 		/* Non-AG databases arrive with BackupPref/ReadSecondary NULL (first UNION branch), so the bare <> was UNKNOWN and
 		   this block never ran on a server without an AG: section 11 was empty. ISNULL keeps the AG 'primary' exclusion. */
@@ -6455,7 +6810,7 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'File reads (DBCC showfilestats, sysfiles)' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SET @ReadSkippedMsg = N'sp_triage: file reads (DBCC showfilestats, sysfiles) skipped for [' + @DatabaseName + N'], left out of section 11: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+				SET @ReadSkippedMsg = N'sp_triage: file reads (DBCC showfilestats, sysfiles) skipped for [' + @DatabaseNameShown + N'], left out of section 11: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 				RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 			END CATCH
 
@@ -6478,7 +6833,7 @@ END
 				END TRY
 				BEGIN CATCH
 					INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'VLF count (DBCC loginfo)' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-					SET @ReadSkippedMsg = N'sp_triage: VLF count (DBCC loginfo) skipped for [' + @DatabaseName + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + ERROR_MESSAGE();
+					SET @ReadSkippedMsg = N'sp_triage: VLF count (DBCC loginfo) skipped for [' + @DatabaseNameShown + N']: ' + CONVERT([NVARCHAR] (20), ERROR_NUMBER()) + N' ' + CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 					RAISERROR(N'%s', 0, 1, @ReadSkippedMsg) WITH NOWAIT;
 				END CATCH
 			END
@@ -6629,7 +6984,7 @@ END
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Cached plans', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 
@@ -6686,7 +7041,7 @@ END
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Single-use plans', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 
@@ -6840,7 +7195,7 @@ END
 			, CONVERT([VARCHAR](20), 
 			CASE 
 				WHEN (SUM([num_of_reads]) = 0 AND SUM([num_of_writes]) = 0) THEN 0 
-				ELSE (SUM([io_stall]) / (SUM([num_of_reads]) + SUM([num_of_writes]))) 
+				ELSE (SUM([io_stall]) / NULLIF(SUM([num_of_reads]) + SUM([num_of_writes]), 0)) 
 			END) + ' (ms)' [Latency]
 			, CONVERT([VARCHAR](20),
 			CASE 
@@ -6862,7 +7217,7 @@ END
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Database resource use', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 
@@ -6895,16 +7250,16 @@ END
 	BEGIN TRY
 	INSERT #output_sqldba_org_sp_triage (SectionID, Section,Summary,Severity,HoursToResolveWithTesting )
 	SELECT TOP 15 15,
-	REPLICATE ('|', 100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER())+ REPLICATE ('''', 100- 100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER()) + CONVERT([VARCHAR](20), CONVERT(INT,ROUND(100.0 * [wait_time_ms] / SUM ([wait_time_ms]) OVER(),0))) + '%'
+	REPLICATE ('|', ISNULL(100.0 * [wait_time_ms] / NULLIF(SUM ([wait_time_ms]) OVER(), 0), 0))+ REPLICATE ('''', 100- ISNULL(100.0 * [wait_time_ms] / NULLIF(SUM ([wait_time_ms]) OVER(), 0), 0)) + ISNULL(CONVERT([VARCHAR](20), CONVERT(INT,ROUND(100.0 * [wait_time_ms] / NULLIF(SUM ([wait_time_ms]) OVER(), 0),0))), '0') + '%'
 	, S.[wait_type] + ':' 
 	+ ';HH:' + CONVERT([VARCHAR](20),CONVERT(MONEY,SUM(wait_time_ms / 1000.0 / 60 / 60) OVER (PARTITION BY S.[wait_type])))
-	+ ':MM/HH/VCPU:' + CONVERT([VARCHAR](20),CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / @minutesSinceRestart /60000/@CPUcount))
+	+ ':MM/HH/VCPU:' + ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / NULLIF(@minutesSinceRestart, 0) /60000/@CPUcount)), 'n/a')
 	+'; Wait(s):'+ CONVERT([VARCHAR](20),CONVERT([BIGINT],[wait_time_ms] / 1000.0)) + '(s)'
 	+'; Wait count:' + CONVERT([VARCHAR](20),[waiting_tasks_count])
 	+'; AVGTime:' + CONVERT([VARCHAR](20),CONVERT(MONEY,[wait_time_ms] / 1000.0)/[waiting_tasks_count])
 	, CASE 
-		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / @minutesSinceRestart /60000/@CPUcount) BETWEEN 10 AND 30 THEN @Result_Warning
-		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / @minutesSinceRestart /60000/@CPUcount) > 30 THEN  @Result_YourServerIsDead
+		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / NULLIF(@minutesSinceRestart, 0) /60000/@CPUcount) BETWEEN 10 AND 30 THEN @Result_Warning
+		WHEN CONVERT(MONEY,SUM(60.0 * wait_time_ms) OVER (PARTITION BY S.[wait_type]) / NULLIF(@minutesSinceRestart, 0) /60000/@CPUcount) > 30 THEN  @Result_YourServerIsDead
 		WHEN S.[wait_type] LIKE 'PREEMPTIVE%' THEN @Result_YourServerIsDead
 		WHEN S.[wait_type] LIKE 'LATCH%' THEN @Result_YourServerIsDead
 		WHEN I.[Weight] <= 2 THEN @Result_Warning
@@ -6929,7 +7284,7 @@ END
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Wait statistics', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE();
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 		IF @Debug = 1 RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	END CATCH
 
@@ -7206,7 +7561,7 @@ END
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Plan insight - missing index', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		IF @Debug = 1
 	BEGIN
@@ -7249,10 +7604,10 @@ END
 		, REPLICATE ('|', 
 			CASE 
 				WHEN [Total_GBsRead]*[Impact%] = 0 THEN 0 
-				ELSE 100.0 * [Total_GBsRead]*[Impact%]  / SUM ([Total_GBsRead]*[Impact%]) OVER() 
+				ELSE 100.0 * [Total_GBsRead]*[Impact%]  / NULLIF(SUM ([Total_GBsRead]*[Impact%]) OVER(), 0) 
 			END)   
 		+ CASE 
-			WHEN [Impact%] > 0 THEN CONVERT([VARCHAR](20),CONVERT(INT,ROUND(100.0 * [Total_GBsRead]*[Impact%]  / SUM ([Total_GBsRead]*[Impact%]) OVER(),0))) + '%' 
+			WHEN [Impact%] > 0 THEN ISNULL(CONVERT([VARCHAR](20),CONVERT(INT,ROUND(100.0 * [Total_GBsRead]*[Impact%]  / NULLIF(SUM ([Total_GBsRead]*[Impact%]) OVER(), 0),0))), '0') + '%' 
 			ELSE '' 
 		END [Section]
 
@@ -7329,7 +7684,7 @@ END
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Plan insight - most intensive query', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 		IF @Debug = 1
 	BEGIN
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
 		SET @DebugTime = GETDATE()
@@ -7505,6 +7860,7 @@ END
 						AND (@IsSQLAzure = 0 OR r.database_id = DB_ID());
 					OPEN s18_measure_db;
 					FETCH NEXT FROM s18_measure_db INTO @s18dbid, @dbname;
+					SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
 					WHILE @@FETCH_STATUS = 0
 					BEGIN
 						SET @s18sql = CASE WHEN @IsSQLAzure = 1 THEN N'' ELSE N'USE ' + QUOTENAME(@dbname) + N'; ' END + @s18body;
@@ -7516,6 +7872,7 @@ END
 							INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(N'Missing index key order (statistics) ' + QUOTENAME(@dbname), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
 						END CATCH
 						FETCH NEXT FROM s18_measure_db INTO @s18dbid, @dbname;
+						SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
 					END
 					CLOSE s18_measure_db;
 					DEALLOCATE s18_measure_db;
@@ -7645,7 +8002,7 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for missing indexes in DMVs', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -7721,7 +8078,7 @@ END
 		SELECT @PerDbSkipList = N'', @PerDbRn = 1, @PerDbShown = 0;
 		WHILE @PerDbRn <= @PerDbSkipCount
 		BEGIN
-			SELECT @PerDbSkipName = QUOTENAME(s.dbname) FROM @PerDbSkipped s WHERE s.rn = @PerDbRn;
+			SELECT @PerDbSkipName = QUOTENAME(CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = s.dbname COLLATE Latin1_General_BIN2), CASE WHEN s.dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN s.dbname ELSE N'DB_?' END) ELSE s.dbname END) FROM @PerDbSkipped s WHERE s.rn = @PerDbRn;
 			IF LEN(@PerDbHead) + LEN(@PerDbSkipList) + 2 + LEN(@PerDbSkipName) + 80 > 3800 BREAK;
 			SET @PerDbSkipList = @PerDbSkipList + CASE WHEN @PerDbRn = 1 THEN N'' ELSE N', ' END + @PerDbSkipName;
 			SET @PerDbShown = @PerDbRn;
@@ -7745,7 +8102,8 @@ END
 		/* 2026-10-16: a debug result set. Unguarded, it reached the client as an extra result set on every
 		   server with more than 10 user databases. */
 		IF @Debug = 1
-			SELECT * from @Databases
+			IF @Anonymise = 0 /* @Anonymise: its rows hold real names */
+				SELECT * from @Databases
 	END
 
 	SET @Databasei_Max = (SELECT COUNT(1) FROM @Databases);
@@ -7763,6 +8121,7 @@ END
 	BEGIN 
 		SET @SkipthisDB = 0;
 		SELECT @DatabaseName = NULL, @DatabaseState = NULL, @AGBackupPref = NULL, @AGCurrentLocation = NULL, @SecondaryReadRole = NULL;
+		SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @DatabaseName), CASE WHEN @DatabaseName IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @DatabaseName ELSE N'DB_?' END) ELSE @DatabaseName END;
 		SELECT TOP 1
 			@DatabaseName = d.databasename
 			, @DatabaseState = d.state 
@@ -7774,13 +8133,14 @@ END
 		--AND id = @Databasei_Count 
 		AND d.state NOT IN (2,6)
 		OPTION (RECOMPILE)
+		SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @DatabaseName), CASE WHEN @DatabaseName IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @DatabaseName ELSE N'DB_?' END) ELSE @DatabaseName END;
 		IF @DatabaseName IS NULL BREAK;
 
 		/*Now we have the variables, so delete the entry so the table loops become simpler*/
 		DELETE FROM @Databases
 		WHERE databasename = @DatabaseName
 
-		SET @ErrorMessage = 'Looping Database ' + CONVERT([VARCHAR](4),@Databasei_Count) +' of ' + CONVERT([VARCHAR](4),@Databasei_Max ) + ': [' + @DatabaseName + '] ';
+		SET @ErrorMessage = 'Looping Database ' + CONVERT([VARCHAR](4),@Databasei_Count) +' of ' + CONVERT([VARCHAR](4),@Databasei_Max ) + ': [' + @DatabaseNameShown + '] ';
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -7802,7 +8162,7 @@ END
 		   loop left behind (or on NULL), and mixed other databases' usage rows in: dm_db_index_usage_stats is server-wide,
 		   so the s.database_id = DB_ID() filter is required. Invariant: no code reads a loop variable outside its loop
 		  . */
-			SET @CustomErrorText = '['+@DatabaseName+'] Index usage checks'
+			SET @CustomErrorText = '['+@DatabaseNameShown+'] Index usage checks'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -7852,7 +8212,7 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Index usage checks' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -7861,7 +8221,7 @@ END
 		/*13. Find idle indexes*/
 
 			/*---------------------------------------Shows Indexes that have never been used---------------------------------------*/
-				SET @CustomErrorText = '['+@DatabaseName+'] Looking at unused indexes'
+				SET @CustomErrorText = '['+@DatabaseNameShown+'] Looking at unused indexes'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -7912,7 +8272,7 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking at unused indexes' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -7924,7 +8284,7 @@ END
 
 			/*---------------------------------------Shows tables without primary key. Heaps---------------------------------------*/
 
-				SET @CustomErrorText = '['+@DatabaseName+'] Looking for heap tables'
+				SET @CustomErrorText = '['+@DatabaseNameShown+'] Looking for heap tables'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -7986,7 +8346,7 @@ END
 				END TRY
 				BEGIN CATCH
 					INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for heap tables' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-					SELECT @errMessage  = ERROR_MESSAGE()
+					SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 					RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 					SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 					RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -7994,7 +8354,7 @@ END
 			END
 		
 			
-			SET @CustomErrorText = '['+@DatabaseName+'] Looking for stale statistics'
+			SET @CustomErrorText = '['+@DatabaseNameShown+'] Looking for stale statistics'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -8082,14 +8442,14 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for stale statistics' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
 			END CATCH
 		
 			
-		SET @CustomErrorText = '['+@DatabaseName+'] Skipping bad NC Indexes tables'
+		SET @CustomErrorText = '['+@DatabaseNameShown+'] Skipping bad NC Indexes tables'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -8125,7 +8485,7 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Bad nonclustered indexes' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -8136,7 +8496,7 @@ END
 			----------------------------------------*/
 
 			/* Constraints behaving badly*/
-	SET @CustomErrorText = '['+@DatabaseName+'] Looking for bad constraints'
+	SET @CustomErrorText = '['+@DatabaseNameShown+'] Looking for bad constraints'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -8210,14 +8570,14 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for bad constraints' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
 			END CATCH
 
 
-			SET @CustomErrorText = '['+@DatabaseName+'] Looking for indexes with possible compression benefit'
+			SET @CustomErrorText = '['+@DatabaseNameShown+'] Looking for indexes with possible compression benefit'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -8279,14 +8639,14 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for indexes with possible compression benefit' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
 			END CATCH
 		
 
-		SET @CustomErrorText = '['+@DatabaseName+'] Intelligent compression evaluation'
+		SET @CustomErrorText = '['+@DatabaseNameShown+'] Intelligent compression evaluation'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -8344,14 +8704,14 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Intelligent compression evaluation' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
 			END CATCH
 
 
-	SET @CustomErrorText = '['+@DatabaseName+'] Blocking tables'
+	SET @CustomErrorText = '['+@DatabaseNameShown+'] Blocking tables'
 	IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -8399,7 +8759,7 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Blocking tables' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -8407,7 +8767,7 @@ END
 
 
 
-		SET @CustomErrorText = '['+@DatabaseName+'] FKs without Indexes'
+		SET @CustomErrorText = '['+@DatabaseNameShown+'] FKs without Indexes'
 		IF @Debug = 1
 	BEGIN
 		SET @DebugTimeMSG = CONVERT([VARCHAR],GETDATE(),120) +' previous step took: ' + CONVERT([VARCHAR](20),DATEDIFF(MILLISECOND,@DebugTime,GETDATE() )) + ' milliseconds'
@@ -8454,7 +8814,7 @@ END
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'FKs without Indexes' + ISNULL(N' ' + QUOTENAME(@DatabaseName), N''), N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -8533,7 +8893,7 @@ LOOPING of databases ends here, add new sections above this portion
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Looking for Stored Procedure Workload', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -8615,7 +8975,7 @@ BEGIN TRY
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Missing index details output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -8628,7 +8988,7 @@ BEGIN CATCH
 	RAISERROR (N'Error with missing index details',0,1) WITH NOWAIT;
 	SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 	IF @Debug = 1
@@ -8706,7 +9066,7 @@ BEGIN TRY
 			END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Heap tables output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -8718,7 +9078,7 @@ BEGIN CATCH
 	RAISERROR (N'Error with finding heaps',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 	IF @Debug = 1
@@ -8801,7 +9161,7 @@ BEGIN TRY
 	 	END TRY
 			BEGIN CATCH
 				INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Stale statistics output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-				SELECT @errMessage  = ERROR_MESSAGE()
+				SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 				RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -8853,7 +9213,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Stale statistics', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with stale stats',0,1) WITH NOWAIT;
 	SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -8898,13 +9258,13 @@ BEGIN TRY
 		SELECT 
 		TOP 10 
 		22
-		, REPLICATE('|', CONVERT(MONEY,execution_count*100) / SUM (execution_count) OVER() ) + ' '+ CONVERT([VARCHAR](20),CONVERT(INT,ROUND(CONVERT(MONEY,execution_count*100) / SUM (execution_count) OVER(),0))) + '%'
+		, REPLICATE('|', ISNULL(CONVERT(MONEY,execution_count*100) / NULLIF(SUM (execution_count) OVER(), 0), 0) ) + ' '+ ISNULL(CONVERT([VARCHAR](20),CONVERT(INT,ROUND(CONVERT(MONEY,execution_count*100) / NULLIF(SUM (execution_count) OVER(), 0),0))), '0') + '%'
 		,  [SP Name] + '; Executions:'+ CONVERT([VARCHAR](20),execution_count)
 			+ '; Per second:' + CONVERT([VARCHAR](20),[Calls/Second])
 		, dbname
 			+ '; Avg Time:' + CONVERT([VARCHAR](20), avg_elapsed_time/1000/1000 ) + '(s)'
 			+ '; Total time:' + CONVERT([VARCHAR](20), total_elapsed_time/1000/1000 ) + '(s)'
-			+ '; Overall time:' + CONVERT([VARCHAR](20),CONVERT(MONEY,total_elapsed_time*100) / SUM (total_elapsed_time) OVER()) +'%'
+			+ '; Overall time:' + ISNULL(CONVERT([VARCHAR](20),CONVERT(MONEY,total_elapsed_time*100) / NULLIF(SUM (total_elapsed_time) OVER(), 0)), '0') +'%'
 		FROM #output_sqldba_org_sp_triage_db_sps
 		ORDER BY execution_count DESC OPTION (RECOMPILE)
 
@@ -8912,7 +9272,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Top 10 Stored Procedure workload', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with SP workload',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -8973,7 +9333,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server Details, PLE', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with server details',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9131,7 +9491,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Non-default server settings', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with non default server settings',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9165,7 +9525,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Current active users', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with current active users',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9212,7 +9572,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'FK trust checks', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with trust issues.. it happens',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9285,7 +9645,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Database connected users', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with connected users',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9329,7 +9689,7 @@ INNER JOIN (
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Current likely active databases', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Issue with @confidence',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9481,7 +9841,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Database usage likelihood', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with database usage measures',0,1) WITH NOWAIT;
 END CATCH
@@ -9523,7 +9883,7 @@ IF @ShowMigrationRelatedOutputs = 1
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'DMA Output', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with creating DMA commands',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9671,7 +10031,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Default trace data', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with trace part 1 before autogrowth',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9692,7 +10052,7 @@ INSERT #output_sqldba_org_sp_triage (
 		
 SET @dynamicSQL=' SELECT 33
 		,DBName
-		,''%Change:''+ CONVERT([NVARCHAR] (20),SUM(EventGrowthMB)*100/(MAX(CurrentFileSizeMB) - SUM(EventGrowthMB)))
+		,''%Change:''+ ISNULL(CONVERT([NVARCHAR] (20),SUM(EventGrowthMB)*100/NULLIF(MAX(CurrentFileSizeMB) - SUM(EventGrowthMB), 0)), ''n/a'')
 
 	, ''EventGrowthMB:''+CONVERT([NVARCHAR] (20),SUM(EventGrowthMB)) 
 	+'';FileType:''+FileType
@@ -9737,12 +10097,12 @@ EXEC sp_executesql @dynamicSQL
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Trace data autogrowth', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Issue with Trace data insert',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
-	PRINT @dynamicSQL
+	IF @Anonymise = 0 PRINT @dynamicSQL;
 END CATCH
 
 	IF @Debug = 1
@@ -9799,7 +10159,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Index compression checks', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with compression candidates',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9847,7 +10207,7 @@ INSERT #output_sqldba_org_sp_triage (
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Actual index compression validation', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error compression validation',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -9909,7 +10269,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TOP 25 index usage', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with index usage stats',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10008,7 +10368,7 @@ INSERT #output_sqldba_org_sp_triage (
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Our index usage evaluation', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with custom index evaluation',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10070,7 +10430,7 @@ SET @CustomErrorText = 'Current blocking tables'
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Current blocking tables', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with currently blocking tables',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10203,7 +10563,7 @@ ORDER BY [RankIO]  ASC
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Top queries', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with selecting the top queries',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10264,7 +10624,7 @@ BEGIN CATCH
 	RAISERROR (N'Error reading sys.dm_os_volume_stats (expected on Azure SQL DB)',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 END
@@ -10298,7 +10658,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Disk volumes', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error writing disk volumes to output table',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10393,7 +10753,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Maintenance summary', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with reading or finding CommandLog table for Ola output',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10507,11 +10867,11 @@ BEGIN TRY
 	
 	SELECT
 		 99 [SectionID]
-		, REPLICATE('|', CONVERT(INT,(s.[I/O GB]/@DaysOldestCachedQuery )/@TotalIODailyWorkload *100)) + ' ' + CONVERT([VARCHAR](10),((s.[I/O GB]/@DaysOldestCachedQuery )/@TotalIODailyWorkload *100)) + '%' [Section]
+		, REPLICATE('|', ISNULL(CONVERT(INT,(s.[I/O GB]/@DaysOldestCachedQuery )/NULLIF(@TotalIODailyWorkload, 0) *100), 0)) + ' ' + ISNULL(CONVERT([VARCHAR](10),((s.[I/O GB]/@DaysOldestCachedQuery )/NULLIF(@TotalIODailyWorkload, 0) *100)), '0') + '%' [Section]
 		, CONVERT([VARCHAR](15),(s.[I/O GB]/@DaysOldestCachedQuery) )
 		+ 'GB/day; ' + CONVERT([VARCHAR](15),(CASE WHEN s.[Total Execution Count] = 1 THEN 1 ELSE CONVERT(MONEY,s.[Total Execution Count])/@DaysOldestCachedQuery END) ) 
 		+ ' executions/day; ' +  CONVERT([VARCHAR](15),([Avg CPU Time in MS]/1000))
-		+ ' s(avg) *[DailyGB; DailyExecutions; AverageTime(s)]' [Summary]
+		+ ' s CPU (avg) *[DailyGB; DailyExecutions; AverageCPUTime(s)]' [Summary]
 		, LEFT('/*' + ISNULL(O.type_desc COLLATE DATABASE_DEFAULT,'') + '; '+ ISNULL(CASE WHEN rdb.database_id IS NOT NULL THEN OBJECT_NAME(st.objectid, st.dbid) END COLLATE DATABASE_DEFAULT,'') + ' ' + QUOTENAME(ISNULL(DBs.name COLLATE DATABASE_DEFAULT,'')) + '.' + QUOTENAME(ISNULL(CASE WHEN rdb.database_id IS NOT NULL THEN OBJECT_SCHEMA_NAME(st.objectid, st.dbid) END COLLATE DATABASE_DEFAULT,'')) + ' > */' + ISNULL(left(replace(replace(replace(replace(CONVERT([NVARCHAR] (3600),st.text COLLATE DATABASE_DEFAULT), CHAR(9), ' '),CHAR(10),' '), CHAR(13), ' '), ' ',' ') ,3800),''),3850) [Details]
 	FROM
 	/* Perf 2026-07-02: TOP (35) ORDER BY RankIO applied to the aggregate BEFORE the plan/text DMV
@@ -10584,7 +10944,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Daily workload', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -10647,7 +11007,7 @@ END CATCH
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Top procs by I/O', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage = ERROR_MESSAGE(); RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
+		SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END; RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		RAISERROR (N'Error with top procs by I/O (dm_exec_procedure_stats)',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
 		RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -10759,7 +11119,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Password checks', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error checking password issues',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10812,7 +11172,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Deprecated features', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with reading or finding Depreacted features',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -10856,7 +11216,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'FK no indexes', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with FKs with no indexes',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -11096,7 +11456,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Perfmon counters', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with Perfmon Counters',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -11135,8 +11495,8 @@ BEGIN TRY
 		, '[AvgRunTimeMS]:' + CONVERT([VARCHAR](50),CASE WHEN bcount.cntr_value = 0 THEN 0 ELSE btime.cntr_value/bcount.cntr_value END )
 		+ ',[StatementCount]:' + CONVERT([VARCHAR](50), CAST(bcount.cntr_value AS BIGINT))
 		+ ',[TotalElapsedTimeMS]:' + CONVERT([VARCHAR](50),btime.cntr_value)
-		, '[Time%]:' + CONVERT([VARCHAR](7),CAST((100.0 * btime.cntr_value/SUM (btime.cntr_value) OVER()) AS DECIMAL(5,2)))
-		+ '[Count%]:' + CONVERT([VARCHAR](7),CAST((100.0 * bcount.cntr_value/SUM (bcount.cntr_value) OVER()) AS DECIMAL(5,2)))
+		, '[Time%]:' + ISNULL(CONVERT([VARCHAR](7),CAST((100.0 * btime.cntr_value/NULLIF(SUM (btime.cntr_value) OVER(), 0)) AS DECIMAL(5,2))), '0')
+		+ '[Count%]:' + ISNULL(CONVERT([VARCHAR](7),CAST((100.0 * bcount.cntr_value/NULLIF(SUM (bcount.cntr_value) OVER(), 0)) AS DECIMAL(5,2))), '0')
 		FROM
 		(
 		SELECT *
@@ -11167,7 +11527,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Batch averages from perfmon', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with Batch averages from perfmon',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -12143,7 +12503,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counters: snapshots', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with Performance counters: snapshots',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -12407,7 +12767,7 @@ BEGIN
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Performance counters: normals, trends, first seen', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 			RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		RAISERROR (N'Error with Performance counters: normals, trends, first seen',0,1) WITH NOWAIT;
 		UPDATE #pcs_val SET HistSummary = NULL, HistDetails = NULL, NormOut = NULL;
@@ -12596,7 +12956,7 @@ BEGIN
 		END TRY
 		BEGIN CATCH
 			INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(@pcs_Step, N'Performance counters'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-			SELECT @errMessage  = ERROR_MESSAGE()
+			SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 				RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 			RAISERROR (N'Error with Performance counters',0,1) WITH NOWAIT;
 		END CATCH
@@ -12794,7 +13154,7 @@ BEGIN
 	END TRY
 	BEGIN CATCH
 		INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Batch response-time profile', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 			RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		RAISERROR (N'Error with Batch response-time profile',0,1) WITH NOWAIT;
 	END CATCH
@@ -12853,7 +13213,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'TCP listener states', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with TCP listener states',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -12925,7 +13285,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Endpoints', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with Endpoints',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -12976,7 +13336,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Connections ports and IPs', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with Connections ports and IPs',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -13021,7 +13381,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Server registry', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with Server registry',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -13123,7 +13483,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Check certificates', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	SET @CustomErrorText = 'Error with '+ @CustomErrorText
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -13218,7 +13578,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Availability Group synchronization lag', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	SET @CustomErrorText = 'Error with '+ @CustomErrorText
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -13287,7 +13647,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Database not online', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13345,6 +13705,7 @@ BEGIN TRY
 		DECLARE cc_checkdb_cur CURSOR LOCAL FAST_FORWARD FOR SELECT dbname FROM @cc_list ORDER BY dbname;
 		OPEN cc_checkdb_cur;
 		FETCH NEXT FROM cc_checkdb_cur INTO @dbname;
+		SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
 		WHILE @@FETCH_STATUS = 0
 		BEGIN
 			SET @cc_total = @cc_total + 1;
@@ -13377,6 +13738,7 @@ BEGIN TRY
 				INSERT INTO @cc_obj (rn, objname, measure) VALUES (@cc_total, QUOTENAME(@dbname), N'could not be read');
 			END CATCH
 			FETCH NEXT FROM cc_checkdb_cur INTO @dbname;
+			SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
 		END
 		CLOSE cc_checkdb_cur;
 		DEALLOCATE cc_checkdb_cur;
@@ -13412,7 +13774,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Last good integrity check (CHECKDB)', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13445,7 +13807,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Page verify not CHECKSUM', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13478,7 +13840,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: AUTO_CLOSE on', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13511,7 +13873,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: AUTO_SHRINK on', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13557,6 +13919,7 @@ BEGIN TRY
 			DECLARE cc_qs_cur CURSOR LOCAL FAST_FORWARD FOR SELECT dbname FROM @cc_list ORDER BY dbname;
 			OPEN cc_qs_cur;
 			FETCH NEXT FROM cc_qs_cur INTO @dbname;
+			SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
 			WHILE @@FETCH_STATUS = 0
 			BEGIN
 				SET @cc_total = @cc_total + 1;
@@ -13577,6 +13940,7 @@ BEGIN TRY
 					INSERT INTO @cc_obj (rn, objname, measure) VALUES (@cc_total, QUOTENAME(@dbname), N'could not be read');
 				END CATCH
 				FETCH NEXT FROM cc_qs_cur INTO @dbname;
+				SET @DatabaseNameShown = CASE WHEN @Anonymise = 1 THEN ISNULL((SELECT TOP 1 m.Token FROM #sp_triage_anon_map m WHERE m.Kind = N'DB' AND m.Base = @dbname), CASE WHEN @dbname IN (N'master', N'model', N'msdb', N'tempdb', N'SQLDBA.ORG') THEN @dbname ELSE N'DB_?' END) ELSE @dbname END;
 			END
 			CLOSE cc_qs_cur;
 			DEALLOCATE cc_qs_cur;
@@ -13610,7 +13974,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Query Store off', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13656,7 +14020,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Global trace flags', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13716,7 +14080,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: TDE certificate key backup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13777,7 +14141,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Backup encryption certificate key backup', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13817,7 +14181,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Memory dumps', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 
@@ -13860,7 +14224,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Core check: Linked servers', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 END CATCH
 	SET @CustomErrorText = 'Core checks (corpus parity, basic set)';
@@ -13904,7 +14268,7 @@ BEGIN TRY
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'End-of-checks template (no check runs here)', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	RAISERROR (N'Error with the thing',0,1) WITH NOWAIT;
 		SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -13974,7 +14338,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'sp_Blitz results', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	SET @CustomErrorText = 'Error with '+ @CustomErrorText
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -14039,7 +14403,7 @@ END
 END TRY
 BEGIN CATCH
 	INSERT #sp_triage_skipped (Step, ErrorNumber, ErrorMessage) VALUES (LEFT(ISNULL(N'Security checklist results', N'?'), 400), ISNULL(ERROR_NUMBER(), 0), LEFT(ISNULL(ERROR_MESSAGE(), N''), 4000));
-	SELECT @errMessage  = ERROR_MESSAGE()
+	SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 	SET @CustomErrorText = 'Error with '+ @CustomErrorText
 	RAISERROR (N'%s', 0, 1, @CustomErrorText) WITH NOWAIT;
@@ -14135,8 +14499,185 @@ BEGIN TRY
 	EXEC sp_executesql @OutputSanitiseSQL;
 END TRY
 BEGIN CATCH
-	SELECT @errMessage = ERROR_MESSAGE();
+	SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 	RAISERROR (N'Output sanitise failed: %s',0,1,@errMessage) WITH NOWAIT;
+END CATCH
+
+/* @Anonymise: the ONE choke point. Every result set reads
+   #output_sqldba_org_sp_triage after this point, and an anonymised run is a SCREEN run (set at the top), so nothing else
+   reaches the client. (a) QueryPlan is cleared, and a private-use character already in a shown column becomes ? (the
+   placeholders below are private-use characters). (b) One upper-case shadow of each shown row (#anon_u, BIN2) marks the
+   names that occur at all (Hit). (c) Pass 1, longest name first: hit name number Ord, in any letter case, becomes the ONE
+   private-use character NCHAR(57344 + Ord), so a value never grows and a shorter name never matches inside a token; a
+   BOUNDED name (Bnd) is replaced only where a delimiter of @AnonD or the edge of the value stands on each side of it
+   (in an NVARCHAR(MAX) copy whose edges are NCHAR(63742): every delimiter is first followed by the mark NCHAR(63743),
+   matched exactly, so no letter is ever rewritten; then mark + name + delimiter becomes placeholder + delimiter, the
+   delimiter keeping its own mark; then the marks and edges go); an IP's neighbours may not be a full stop (an IP's
+   delimiter set has no full stop, in both steps). More than 6,000 hit names fails closed.
+   (d) Pass 2: each placeholder becomes its token. SectionID 104 rows are never shown and never written on this run, so
+   they are left alone. Every expression that mixes a map column with output text or a variable carries an explicit
+   COLLATE (a collation conflict is a compile error the TRY cannot catch). Fails closed: any error empties the output and
+   leaves one row, Anonymise failed; no output shown. Its LAST statement sets @AnonDone, and the screen SELECT shows rows
+   of an anonymised run only when @AnonDone = 1 (or the one failed row): under a caller's doomed transaction the CATCH's
+   DELETE and INSERT fail (Msg 3930), and the variable still holds 0, so no row is shown.
+   */
+DECLARE @AnonOrder TABLE (Ord INT IDENTITY(1,1) PRIMARY KEY, Seq INT NOT NULL);
+DECLARE @AnonD TABLE (n INT IDENTITY(1,1) PRIMARY KEY, c [NCHAR] (1) NOT NULL, ForIp BIT NOT NULL);
+DECLARE @AnonI INT, @AnonN INT, @AnonJ INT, @AnonDN INT, @AnonName [NVARCHAR] (4000), @AnonUName [NVARCHAR] (4000), @AnonPh [NCHAR] (1), @AnonToken [NVARCHAR] (40), @AnonBnd BIT, @AnonKind [NVARCHAR] (10), @AnonC [NCHAR] (1), @AnonPat [NVARCHAR] (10), @AnonMName [NVARCHAR] (MAX);
+IF @Anonymise = 1
+BEGIN TRY
+	IF EXISTS (SELECT 1 FROM #sp_triage_anon_map AS m WHERE m.Token IS NULL OR CHARINDEX(N'{t}', m.Token) > 0)
+		RAISERROR (N'Anonymise map: a name has no token', 16, 1);
+	UPDATE #output_sqldba_org_sp_triage SET QueryPlan = NULL WHERE QueryPlan IS NOT NULL;
+	SET @AnonPat = N'%[' + NCHAR(57344) + N'-' + NCHAR(63743) + N']%';
+	CREATE TABLE #anon_p (ID INT PRIMARY KEY);
+	INSERT #anon_p (ID)
+	SELECT o.ID FROM #output_sqldba_org_sp_triage AS o
+	WHERE ISNULL(o.SectionID, -1) <> 104
+		AND (PATINDEX(@AnonPat, o.domain COLLATE Latin1_General_BIN2) > 0 OR PATINDEX(@AnonPat, o.SQLInstance COLLATE Latin1_General_BIN2) > 0
+			OR PATINDEX(@AnonPat, o.Section COLLATE Latin1_General_BIN2) > 0 OR PATINDEX(@AnonPat, o.Summary COLLATE Latin1_General_BIN2) > 0
+			OR PATINDEX(@AnonPat, o.Details COLLATE Latin1_General_BIN2) > 0);
+	WHILE EXISTS (SELECT 1 FROM #anon_p)
+	BEGIN
+		UPDATE o SET
+			domain = CASE WHEN PATINDEX(@AnonPat, o.domain COLLATE Latin1_General_BIN2) > 0 THEN STUFF(o.domain, PATINDEX(@AnonPat, o.domain COLLATE Latin1_General_BIN2), 1, N'?') ELSE o.domain END
+			, SQLInstance = CASE WHEN PATINDEX(@AnonPat, o.SQLInstance COLLATE Latin1_General_BIN2) > 0 THEN STUFF(o.SQLInstance, PATINDEX(@AnonPat, o.SQLInstance COLLATE Latin1_General_BIN2), 1, N'?') ELSE o.SQLInstance END
+			, Section = CASE WHEN PATINDEX(@AnonPat, o.Section COLLATE Latin1_General_BIN2) > 0 THEN STUFF(o.Section, PATINDEX(@AnonPat, o.Section COLLATE Latin1_General_BIN2), 1, N'?') ELSE o.Section END
+			, Summary = CASE WHEN PATINDEX(@AnonPat, o.Summary COLLATE Latin1_General_BIN2) > 0 THEN STUFF(o.Summary, PATINDEX(@AnonPat, o.Summary COLLATE Latin1_General_BIN2), 1, N'?') ELSE o.Summary END
+			, Details = CASE WHEN PATINDEX(@AnonPat, o.Details COLLATE Latin1_General_BIN2) > 0 THEN STUFF(o.Details, PATINDEX(@AnonPat, o.Details COLLATE Latin1_General_BIN2), 1, N'?') ELSE o.Details END
+		FROM #output_sqldba_org_sp_triage AS o
+		INNER JOIN #anon_p AS p ON p.ID = o.ID;
+		DELETE p
+		FROM #anon_p AS p
+		INNER JOIN #output_sqldba_org_sp_triage AS o ON o.ID = p.ID
+		WHERE NOT (PATINDEX(@AnonPat, ISNULL(o.domain, N'') COLLATE Latin1_General_BIN2) > 0 OR PATINDEX(@AnonPat, ISNULL(o.SQLInstance, N'') COLLATE Latin1_General_BIN2) > 0
+			OR PATINDEX(@AnonPat, ISNULL(o.Section, N'') COLLATE Latin1_General_BIN2) > 0 OR PATINDEX(@AnonPat, ISNULL(o.Summary, N'') COLLATE Latin1_General_BIN2) > 0
+			OR PATINDEX(@AnonPat, ISNULL(o.Details, N'') COLLATE Latin1_General_BIN2) > 0);
+	END
+	INSERT @AnonD (c, ForIp)
+	SELECT x.c, x.f
+	FROM (
+		SELECT NCHAR(63742) AS c, 1 AS f UNION ALL SELECT N' ', 1 UNION ALL SELECT NCHAR(9), 1 UNION ALL SELECT NCHAR(13), 1
+		UNION ALL SELECT NCHAR(10), 1 UNION ALL SELECT N'\', 1 UNION ALL SELECT N'/', 1 UNION ALL SELECT N':', 1
+		UNION ALL SELECT N';', 1 UNION ALL SELECT N',', 1 UNION ALL SELECT N'(', 1 UNION ALL SELECT N')', 1
+		UNION ALL SELECT N'=', 1 UNION ALL SELECT N'@', 1 UNION ALL SELECT N'[', 1 UNION ALL SELECT N']', 1
+		UNION ALL SELECT N'''', 1 UNION ALL SELECT N'"', 1 UNION ALL SELECT N'<', 1 UNION ALL SELECT N'>', 1
+		UNION ALL SELECT N'|', 1 UNION ALL SELECT N'{', 1 UNION ALL SELECT N'}', 1 UNION ALL SELECT N'_', 1 UNION ALL SELECT N'$', 1 UNION ALL SELECT N'-', 1 UNION ALL SELECT N'&', 1 UNION ALL SELECT N'#', 1 UNION ALL SELECT N'!', 1 UNION ALL SELECT N'?', 1 UNION ALL SELECT N'*', 1 UNION ALL SELECT N'+', 1 UNION ALL SELECT N'%', 1 UNION ALL SELECT N'~', 1 UNION ALL SELECT N'^', 1 UNION ALL SELECT N'`', 1 UNION ALL SELECT N'.', 0
+	) AS x;
+	SELECT @AnonDN = COUNT(*) FROM @AnonD;
+	CREATE TABLE #anon_u (ID INT PRIMARY KEY, U [NVARCHAR] (MAX) COLLATE Latin1_General_BIN2);
+	INSERT #anon_u (ID, U)
+	SELECT o.ID, UPPER(CONVERT([NVARCHAR] (MAX), ISNULL(o.domain COLLATE Latin1_General_BIN2, N''))
+		+ NCHAR(1) + ISNULL(o.SQLInstance COLLATE Latin1_General_BIN2, N'')
+		+ NCHAR(1) + ISNULL(o.Section COLLATE Latin1_General_BIN2, N'')
+		+ NCHAR(1) + ISNULL(o.Summary COLLATE Latin1_General_BIN2, N'')
+		+ NCHAR(1) + ISNULL(o.Details COLLATE Latin1_General_BIN2, N''))
+	FROM #output_sqldba_org_sp_triage AS o
+	WHERE ISNULL(o.SectionID, -1) <> 104;
+	UPDATE m SET Hit = 1
+	FROM #sp_triage_anon_map AS m
+	WHERE EXISTS (SELECT 1 FROM #anon_u AS u WHERE CHARINDEX(UPPER(m.Name) COLLATE Latin1_General_BIN2, u.U COLLATE Latin1_General_BIN2) > 0);
+	INSERT @AnonOrder (Seq)
+	SELECT m.Seq
+	FROM #sp_triage_anon_map AS m
+	WHERE m.Hit = 1
+	ORDER BY DATALENGTH(m.Name) DESC, m.Seq ASC;
+	SELECT @AnonN = COUNT(*) FROM @AnonOrder;
+	IF @AnonN > 6000
+		RAISERROR (N'Anonymise: more than 6000 names to hide', 16, 1);
+	CREATE TABLE #anon_b (ID INT PRIMARY KEY, domain [NVARCHAR] (MAX), SQLInstance [NVARCHAR] (MAX), Section [NVARCHAR] (MAX), Summary [NVARCHAR] (MAX), Details [NVARCHAR] (MAX));
+	SET @AnonI = 1;
+	WHILE @AnonI <= @AnonN
+	BEGIN
+		SELECT @AnonName = m.Name, @AnonUName = UPPER(m.Name), @AnonBnd = m.Bnd, @AnonKind = m.Kind
+		FROM @AnonOrder AS a INNER JOIN #sp_triage_anon_map AS m ON m.Seq = a.Seq
+		WHERE a.Ord = @AnonI;
+		SET @AnonPh = NCHAR(57344 + @AnonI);
+		IF @AnonBnd = 0
+			UPDATE o SET
+				domain = LEFT(REPLACE(o.domain COLLATE Latin1_General_100_CI_AS, @AnonName COLLATE Latin1_General_100_CI_AS, @AnonPh COLLATE Latin1_General_100_CI_AS), 505)
+				, SQLInstance = LEFT(REPLACE(o.SQLInstance COLLATE Latin1_General_100_CI_AS, @AnonName COLLATE Latin1_General_100_CI_AS, @AnonPh COLLATE Latin1_General_100_CI_AS), 505)
+				, Section = LEFT(REPLACE(o.Section COLLATE Latin1_General_100_CI_AS, @AnonName COLLATE Latin1_General_100_CI_AS, @AnonPh COLLATE Latin1_General_100_CI_AS), 4000)
+				, Summary = LEFT(REPLACE(o.Summary COLLATE Latin1_General_100_CI_AS, @AnonName COLLATE Latin1_General_100_CI_AS, @AnonPh COLLATE Latin1_General_100_CI_AS), 4000)
+				, Details = LEFT(REPLACE(o.Details COLLATE Latin1_General_100_CI_AS, @AnonName COLLATE Latin1_General_100_CI_AS, @AnonPh COLLATE Latin1_General_100_CI_AS), 4000)
+			FROM #output_sqldba_org_sp_triage AS o
+			INNER JOIN #anon_u AS u ON u.ID = o.ID
+			WHERE CHARINDEX(@AnonUName COLLATE Latin1_General_BIN2, u.U COLLATE Latin1_General_BIN2) > 0;
+		ELSE
+		BEGIN
+			DELETE FROM #anon_b;
+			INSERT #anon_b (ID, domain, SQLInstance, Section, Summary, Details)
+			SELECT o.ID
+				, NCHAR(63742) + CONVERT([NVARCHAR] (MAX), ISNULL(o.domain, N'')) + NCHAR(63742)
+				, NCHAR(63742) + CONVERT([NVARCHAR] (MAX), ISNULL(o.SQLInstance, N'')) + NCHAR(63742)
+				, NCHAR(63742) + CONVERT([NVARCHAR] (MAX), ISNULL(o.Section, N'')) + NCHAR(63742)
+				, NCHAR(63742) + CONVERT([NVARCHAR] (MAX), ISNULL(o.Summary, N'')) + NCHAR(63742)
+				, NCHAR(63742) + CONVERT([NVARCHAR] (MAX), ISNULL(o.Details, N'')) + NCHAR(63742)
+			FROM #output_sqldba_org_sp_triage AS o
+			INNER JOIN #anon_u AS u ON u.ID = o.ID
+			WHERE CHARINDEX(@AnonUName COLLATE Latin1_General_BIN2, u.U COLLATE Latin1_General_BIN2) > 0;
+			SET @AnonMName = @AnonName;
+			SET @AnonJ = 1;
+			WHILE @AnonJ <= 2 * @AnonDN
+			BEGIN
+				SET @AnonC = NULL;
+				SELECT @AnonC = x.c FROM @AnonD AS x WHERE x.n = 1 + (@AnonJ - 1) % @AnonDN AND (x.ForIp = 1 OR @AnonKind <> N'IP');
+				IF @AnonC IS NOT NULL AND @AnonJ <= @AnonDN
+				BEGIN
+					/* Stage a marks every delimiter, never a letter (BIN2: that exact character only), so no text is rewritten.
+					   The name is marked the same way, so a name that holds a delimiter (an IP's : or .) still matches. */
+					SET @AnonMName = REPLACE(@AnonMName COLLATE Latin1_General_BIN2, @AnonC COLLATE Latin1_General_BIN2, (@AnonC + NCHAR(63743)) COLLATE Latin1_General_BIN2);
+					UPDATE #anon_b SET
+						domain = REPLACE(domain COLLATE Latin1_General_BIN2, @AnonC COLLATE Latin1_General_BIN2, (@AnonC + NCHAR(63743)) COLLATE Latin1_General_BIN2)
+						, SQLInstance = REPLACE(SQLInstance COLLATE Latin1_General_BIN2, @AnonC COLLATE Latin1_General_BIN2, (@AnonC + NCHAR(63743)) COLLATE Latin1_General_BIN2)
+						, Section = REPLACE(Section COLLATE Latin1_General_BIN2, @AnonC COLLATE Latin1_General_BIN2, (@AnonC + NCHAR(63743)) COLLATE Latin1_General_BIN2)
+						, Summary = REPLACE(Summary COLLATE Latin1_General_BIN2, @AnonC COLLATE Latin1_General_BIN2, (@AnonC + NCHAR(63743)) COLLATE Latin1_General_BIN2)
+						, Details = REPLACE(Details COLLATE Latin1_General_BIN2, @AnonC COLLATE Latin1_General_BIN2, (@AnonC + NCHAR(63743)) COLLATE Latin1_General_BIN2);
+				END
+				IF @AnonC IS NOT NULL AND @AnonJ > @AnonDN
+					UPDATE #anon_b SET
+						domain = REPLACE(domain COLLATE Latin1_General_100_CI_AS, (NCHAR(63743) + @AnonMName + @AnonC) COLLATE Latin1_General_100_CI_AS, (@AnonPh + @AnonC) COLLATE Latin1_General_100_CI_AS)
+						, SQLInstance = REPLACE(SQLInstance COLLATE Latin1_General_100_CI_AS, (NCHAR(63743) + @AnonMName + @AnonC) COLLATE Latin1_General_100_CI_AS, (@AnonPh + @AnonC) COLLATE Latin1_General_100_CI_AS)
+						, Section = REPLACE(Section COLLATE Latin1_General_100_CI_AS, (NCHAR(63743) + @AnonMName + @AnonC) COLLATE Latin1_General_100_CI_AS, (@AnonPh + @AnonC) COLLATE Latin1_General_100_CI_AS)
+						, Summary = REPLACE(Summary COLLATE Latin1_General_100_CI_AS, (NCHAR(63743) + @AnonMName + @AnonC) COLLATE Latin1_General_100_CI_AS, (@AnonPh + @AnonC) COLLATE Latin1_General_100_CI_AS)
+						, Details = REPLACE(Details COLLATE Latin1_General_100_CI_AS, (NCHAR(63743) + @AnonMName + @AnonC) COLLATE Latin1_General_100_CI_AS, (@AnonPh + @AnonC) COLLATE Latin1_General_100_CI_AS);
+				SET @AnonJ = @AnonJ + 1;
+			END
+			UPDATE o SET
+				domain = CASE WHEN o.domain IS NULL THEN NULL ELSE LEFT(REPLACE(REPLACE(b.domain COLLATE Latin1_General_BIN2, NCHAR(63743), N''), NCHAR(63742), N''), 505) END
+				, SQLInstance = CASE WHEN o.SQLInstance IS NULL THEN NULL ELSE LEFT(REPLACE(REPLACE(b.SQLInstance COLLATE Latin1_General_BIN2, NCHAR(63743), N''), NCHAR(63742), N''), 505) END
+				, Section = CASE WHEN o.Section IS NULL THEN NULL ELSE LEFT(REPLACE(REPLACE(b.Section COLLATE Latin1_General_BIN2, NCHAR(63743), N''), NCHAR(63742), N''), 4000) END
+				, Summary = CASE WHEN o.Summary IS NULL THEN NULL ELSE LEFT(REPLACE(REPLACE(b.Summary COLLATE Latin1_General_BIN2, NCHAR(63743), N''), NCHAR(63742), N''), 4000) END
+				, Details = CASE WHEN o.Details IS NULL THEN NULL ELSE LEFT(REPLACE(REPLACE(b.Details COLLATE Latin1_General_BIN2, NCHAR(63743), N''), NCHAR(63742), N''), 4000) END
+			FROM #output_sqldba_org_sp_triage AS o
+			INNER JOIN #anon_b AS b ON b.ID = o.ID;
+		END
+		SET @AnonI = @AnonI + 1;
+	END
+	SET @AnonI = 1;
+	WHILE @AnonI <= @AnonN
+	BEGIN
+		SELECT @AnonToken = m.Token
+		FROM @AnonOrder AS a INNER JOIN #sp_triage_anon_map AS m ON m.Seq = a.Seq
+		WHERE a.Ord = @AnonI;
+		SET @AnonPh = NCHAR(57344 + @AnonI);
+		UPDATE o SET
+			domain = LEFT(REPLACE(o.domain COLLATE Latin1_General_BIN2, @AnonPh COLLATE Latin1_General_BIN2, @AnonToken COLLATE Latin1_General_BIN2), 505)
+			, SQLInstance = LEFT(REPLACE(o.SQLInstance COLLATE Latin1_General_BIN2, @AnonPh COLLATE Latin1_General_BIN2, @AnonToken COLLATE Latin1_General_BIN2), 505)
+			, Section = LEFT(REPLACE(o.Section COLLATE Latin1_General_BIN2, @AnonPh COLLATE Latin1_General_BIN2, @AnonToken COLLATE Latin1_General_BIN2), 4000)
+			, Summary = LEFT(REPLACE(o.Summary COLLATE Latin1_General_BIN2, @AnonPh COLLATE Latin1_General_BIN2, @AnonToken COLLATE Latin1_General_BIN2), 4000)
+			, Details = LEFT(REPLACE(o.Details COLLATE Latin1_General_BIN2, @AnonPh COLLATE Latin1_General_BIN2, @AnonToken COLLATE Latin1_General_BIN2), 4000)
+		FROM #output_sqldba_org_sp_triage AS o
+		WHERE CHARINDEX(@AnonPh COLLATE Latin1_General_BIN2, o.domain COLLATE Latin1_General_BIN2) > 0 OR CHARINDEX(@AnonPh COLLATE Latin1_General_BIN2, o.SQLInstance COLLATE Latin1_General_BIN2) > 0 OR CHARINDEX(@AnonPh COLLATE Latin1_General_BIN2, o.Section COLLATE Latin1_General_BIN2) > 0 OR CHARINDEX(@AnonPh COLLATE Latin1_General_BIN2, o.Summary COLLATE Latin1_General_BIN2) > 0 OR CHARINDEX(@AnonPh COLLATE Latin1_General_BIN2, o.Details COLLATE Latin1_General_BIN2) > 0;
+		SET @AnonI = @AnonI + 1;
+	END
+	SET @AnonDone = 1;
+END TRY
+BEGIN CATCH
+	DELETE #output_sqldba_org_sp_triage;
+	INSERT #output_sqldba_org_sp_triage (SectionID, Section, Summary, Severity)
+	VALUES (0, N'Anonymise failed', N'Anonymise failed; no output shown', @Result_CouldNotRun);
+	RAISERROR (N'Anonymise failed; no output shown', 0, 1) WITH NOWAIT;
 END CATCH
 
 IF UPPER(LEFT(@Export,1)) = 'S'
@@ -14153,7 +14694,7 @@ BEGIN
 	, ISNULL(T1.HoursToResolveWithTesting,'') [HoursToResolveWithTesting]
 	, NULL QueryPlan
 	FROM #output_sqldba_org_sp_triage T1
-	WHERE ISNULL(T1.SectionID, -1) <> 104 /*SectionID 104 (every raw perfmon counter, ~2,100 rows) goes to the export table only, never to the screen. Sections 120-123 summarise it.*/
+	WHERE ISNULL(T1.SectionID, -1) <> 104 AND (@Anonymise = 0 OR @AnonDone = 1 OR T1.Section = N'Anonymise failed') /*@AnonDone: see the choke point above. SectionID 104 (every raw perfmon counter, ~2,100 rows) goes to the export table only, never to the screen. Sections 120-123 summarise it.*/
 	ORDER BY ID ASC
 	OPTION (RECOMPILE)
 END
@@ -14200,7 +14741,7 @@ BEGIN
 		END TRY
 		BEGIN CATCH
 			RAISERROR (N'Could not create export table (permission?); results still returned on screen',0,1) WITH NOWAIT;
-			SELECT @errMessage = ERROR_MESSAGE(); RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
+			SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END; RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		END CATCH
 	END
 	/* 2026-10-16. Invariant: a run whose @Export does not select the table
@@ -14221,7 +14762,7 @@ BEGIN
 		EXEC sp_executesql @dynamicSQL;
 	END TRY
 	BEGIN CATCH
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 		RAISERROR (N'Failed to clean old records in output table',0,1) WITH NOWAIT;
 	END CATCH
@@ -14307,7 +14848,7 @@ BEGIN
 			EXEC sp_executesql @dynamicSQL;
 		END TRY
 		BEGIN CATCH
-			SELECT @errMessage  = ERROR_MESSAGE()
+			SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
 			RAISERROR (N'Error with modifying output table',0,1) WITH NOWAIT;
 				SET @CustomErrorText = REPLACE(@CustomErrorText,'[','Error - [')
@@ -14351,9 +14892,9 @@ BEGIN
 	END TRY
 	
 	BEGIN CATCH
-		SELECT @errMessage  = ERROR_MESSAGE()
+		SELECT @errMessage  = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END
 		RAISERROR (N'%s', 0, 1, @errMessage) WITH NOWAIT;
-		PRINT @dynamicSQL
+		IF @Anonymise = 0 PRINT @dynamicSQL;
 	END CATCH
 
 
@@ -14406,7 +14947,7 @@ BEGIN
 			   the batch before the housekeeping below. Retry once without the LOB QueryPlan
 			   column and with CHAR(0) stripped - the usual TDS stream-breakers. The export
 			   table already holds the full results either way. */
-			SELECT @errMessage = ERROR_MESSAGE();
+			SELECT @errMessage = CASE WHEN @Anonymise = 1 THEN N'Error ' + CONVERT(NVARCHAR(12), ERROR_NUMBER()) + N' (message text hidden by @Anonymise)' ELSE ERROR_MESSAGE() END;
 			RAISERROR (N'%s',0,1,@errMessage) WITH NOWAIT; /*%s form: a literal % in the error text printf-mangles the bare form*/
 			RAISERROR (N'Results-to-screen SELECT failed; retrying without QueryPlan',0,1) WITH NOWAIT;
 			BEGIN TRY
@@ -14520,12 +15061,6 @@ END
 
 	IF OBJECT_ID('tempdb..#output_sqldba_org_sp_triage_dbccloginfo') IS NOT NULL
 		DROP TABLE #output_sqldba_org_sp_triage_dbccloginfo
-
-	IF OBJECT_ID('tempdb..output_sqldba_org_sp_triage_SQLVersionsDump') IS NOT NULL
-		DROP TABLE #output_sqldba_org_sp_triage_SQLVersionsDump
-
-	IF OBJECT_ID('tempdb..output_sqldba_org_sp_triage_SQLVersions') IS NOT NULL
-		DROP TABLE #output_sqldba_org_sp_triage_SQLVersions
 
 	IF OBJECT_ID('tempdb..#dadatafor_exec_query_stats') IS NOT NULL
 		DROP TABLE #dadatafor_exec_query_stats;
